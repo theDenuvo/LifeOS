@@ -12,7 +12,7 @@
   --color-border-focus: #2563eb;
   --color-text: #fafafa;
   --color-text-secondary: #a1a1aa;
-  --color-text-muted: #71717a;
+  --color-text-muted: #9a9aa4;
   --color-text-disabled: #52525b;
   --color-accent: #2563eb;
   --color-accent-hover: #3b82f6;
@@ -629,11 +629,11 @@ a:hover {
 }
 
 .task-item.is-overdue {
-  border-left: 3px solid var(--color-danger);
+  border-left: 2px solid rgba(239,68,68,0.6);
 }
 
 .task-item.is-high-priority {
-  border-left: 3px solid var(--color-warning);
+  border-left: 2px solid rgba(245,158,11,0.6);
 }
 
 .task-item__checkbox {
@@ -1564,7 +1564,7 @@ a:hover {
   padding: var(--space-4);
   background: var(--color-bg-subtle);
   border-radius: var(--radius-md);
-  border-left: 3px solid var(--color-accent);
+  border-left: 2px solid rgba(37,99,235,0.5);
 }
 
 .focus-overlay__actions {

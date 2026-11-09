@@ -11,9 +11,9 @@
   --color-border-focus: #8b5cf6;
   --color-text: #f1f1f5;
   --color-text-secondary: #a0a0b0;
-  --color-text-muted: #6b6b7b;
+  --color-text-muted: #8a8a9a;
   --color-text-disabled: #4a4a5a;
-  --color-accent: #8b5cf6;
+  --color-accent: #7c4fe0;
   --color-accent-hover: #a78bfa;
   --color-accent-subtle: rgba(139,92,246,0.15);
   --color-accent-glow: rgba(139,92,246,0.4);
@@ -734,7 +734,7 @@ a:hover { text-decoration: underline; }
   top: 0;
   left: 0;
   right: 0;
-  height: 3px;
+  height: 2px;
   background: var(--color-accent);
   opacity: 0;
   transition: opacity var(--duration-fast);

@@ -2,7 +2,7 @@
 
 # Binaries
 lifeos.exe
-lifeos
+/lifeos
 *.exe
 *.bin
 

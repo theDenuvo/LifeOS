@@ -92,6 +92,7 @@ jobs:
         run: go vet ./...
 
       - name: Sync frontend build to embed directory
+        shell: bash
         run: |
           rm -rf internal/web/dist/build
           cp -r web/build internal/web/dist/build

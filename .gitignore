@@ -1,0 +1,69 @@
+# LifeOS — .gitignore
+
+# Binaries
+lifeos.exe
+lifeos
+*.exe
+*.bin
+
+# Data (SQLite)
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/*.db-wal.*
+backups/
+
+# Frontend build artifacts
+web/node_modules/
+web/dist/
+web/build/
+web/.svelte-kit/
+web/.pnp/
+web/.pnp.js
+web/package-lock.json
+
+# IDE / editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Environment / secrets
+.env
+.env.local
+.env.production
+*.local
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+tmp/
+
+# macOS / Linux
+Thumbs.db
+.DS_Store
+
+# OS / build
+.git
+*.gcno
+*.gcda
+
+# Test coverage
+coverage.out
+coverage.txt
+
+# Debug
+debug/
+
+# LSP
+*.code-workspace
+
+# Backup files
+*.backup

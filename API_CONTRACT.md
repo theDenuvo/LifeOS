@@ -109,7 +109,7 @@ REST API v1 для LifeOS. Базовый путь: `/api/v1`
     "completed_today": 1,
     "inbox_count": 5
   },
-  "focus_task": {"id": 1, "title": "Презентация", "project": "Работа", "time_estimate": "2ч"}
+  "focus_task": {"id": 1, "title": "Презентация", "time_estimate": "2ч"}
 }
 ```
 
@@ -193,7 +193,7 @@ POST /api/v1/tasks
 - `title` required, 1-500 chars
 - `priority` ∈ {low,medium,high}, default medium
 - `planned_date`, `due_date` — валидные DATE
-- `due_at` — валидный RFC3339 UTC, ≥ now
+- `due_at` — валидный RFC3339 UTC
 - `timezone` — валидная IANA TZ, default Europe/Moscow
 - `tags` — массив строк, каждая ≤ 50 chars
 

@@ -31,10 +31,10 @@
 | `due_date` | DATE | NULLABLE | Календарный дедлайн (без времени) |
 | `due_at` | TIMESTAMP | NULLABLE | Точный момент дедлайна (UTC) |
 | `timezone` | TEXT | NOT NULL, DEFAULT 'Europe/Moscow' | IANA TZ для planned/due дат |
-| `created_at` | TIMESTAMP | NOT NULL, DEFAULT (unixepoch()) | UTC момент создания |
-| `updated_at` | TIMESTAMP | NOT NULL, DEFAULT (unixepoch()) | UTC последнего изменения |
-| `completed_at` | TIMESTAMP | NULLABLE | UTC момент завершения |
-| `cancelled_at` | TIMESTAMP | NULLABLE | UTC момент отмены |
+| `created_at` | TIMESTAMP | NOT NULL, DEFAULT (unixepoch()) | UTC момент создания (Unix seconds) |
+| `updated_at` | TIMESTAMP | NOT NULL, DEFAULT (unixepoch()) | UTC последнего изменения (Unix seconds) |
+| `completed_at` | TIMESTAMP | NULLABLE | UTC момент завершения (Unix seconds) |
+| `cancelled_at` | TIMESTAMP | NULLABLE | UTC момент отмены (Unix seconds) |
 | `parent_task_id` | INTEGER | FK → tasks(id), NULLABLE | Для будущих подзадач (v1: не используется) |
 
 **Индексы:**
@@ -92,8 +92,8 @@ func (t *Task) IsOverdue(now time.Time) bool {
 
 **Жизненный цикл:**
 1. `Capture` — создание
-2. `ConvertToTask` → создаёт Task, ставит `processed_at`, удаляет InboxItem (или soft delete)
-3. `Dismiss` — ставит `processed_at`, удаляет
+2. `ConvertToTask` → создаёт Task, ставит `processed_at` и `converted_task_id`, сохраняет InboxItem
+3. `Dismiss` — удаляет InboxItem
 
 ---
 
@@ -105,7 +105,7 @@ func (t *Task) IsOverdue(now time.Time) bool {
 |------|-----|-------------|----------|
 | `id` | INTEGER | PK, AUTOINCREMENT | |
 | `task_id` | INTEGER | NOT NULL, FK → tasks(id) | |
-| `type` | TEXT | NOT NULL, CHECK IN ('created','updated','completed','cancelled','rescheduled','linked','converted_from_inbox') | Тип события |
+| `type` | TEXT | NOT NULL, CHECK IN ('created','updated','completed','cancelled','rescheduled','restored','linked','converted_from_inbox') | Тип события |
 | `payload` | TEXT | NOT NULL, JSON | Детали изменения (old/new values) |
 | `actor` | TEXT | NOT NULL, DEFAULT 'user' | 'user' \| 'assistant' \| 'system' |
 | `created_at` | TIMESTAMP | NOT NULL, DEFAULT (unixepoch()) | UTC |
@@ -297,11 +297,16 @@ Message 1 ──< PendingAction
 | Версия | Описание |
 |--------|----------|
 | 001 | Создание таблиц: tasks, inbox_items, task_events, conversations, messages, pending_actions, app_settings |
-| 002 | Индексы |
-| 003 | Триггер updated_at для tasks, messages |
-| 004 | Проверочные ограничения (CHECK) |
+| 002 | Индексы для inbox_items |
+| 003 | Таблица task_events с append-only триггерами |
+| 004 | Таблица conversations |
+| 005 | Таблица messages |
+| 006 | Таблица pending_actions |
+| 007 | Таблица app_settings |
+| 008 | Триггеры updated_at для tasks, conversations |
+| 009 | Защита append-only task_events, защита от удаления tasks с историей, converted_task_id для inbox_items |
 
-> Детальные SQL миграции создаются на этапе реализации Task Engine.
+> Детальные SQL миграции в `internal/infrastructure/sqlite/migrations/`.
 
 ---
 

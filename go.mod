@@ -1,6 +1,6 @@
 module github.com/theDenuvo/LifeOS
 
-go 1.26.0
+go 1.27.3
 
 require (
 	github.com/pressly/goose/v3 v3.24.1

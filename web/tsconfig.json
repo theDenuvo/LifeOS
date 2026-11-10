@@ -12,7 +12,7 @@
       "$lib": ["src/lib"],
       "$lib/*": ["src/lib/*"]
     },
-    "types": ["vite/client", "@sveltejs/kit"]
+    "types": ["vite/client", "@sveltejs/kit", "node"]
   },
   "include": ["src/**/*", "*.d.ts"],
   "exclude": ["node_modules", "build"]

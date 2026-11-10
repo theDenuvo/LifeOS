@@ -9,7 +9,7 @@ LifeOS — один Go-бинарник со встроенным статиче
 ## 1. Разработка на Windows
 
 ### Требования
-- Go 1.23+ (`/c/Users/cheli/go/go/bin/go` в PATH)
+- Go 1.27.3 (`/c/Users/cheli/go/go/bin/go` в PATH)
 - Node.js 20+ (`/z/Node.js/node`)
 - npm 10+
 - Git
@@ -24,7 +24,7 @@ LIFEOS_LLM_PROVIDER=openrouter
 LIFEOS_LLM_BASE_URL=https://openrouter.ai/api/v1
 LIFEOS_LLM_API_KEY=sk-...
 LIFEOS_LLM_MODEL=openai/gpt-4o-mini
-LIFEOS_MCP_ENABLED=true
+LIFEOS_MCP_ENABLED=false
 LIFEOS_MCP_PATH=/mcp
 ```
 
@@ -173,7 +173,7 @@ curl -I http://127.0.0.1:8787/healthz # 200 OK, application/json
 | `LIFEOS_LLM_BASE_URL` | Нет* | `https://openrouter.ai/api/v1` | Base URL для LLM |
 | `LIFEOS_LLM_API_KEY` | Нет* | — | API ключ (обязателен для OpenRouter) |
 | `LIFEOS_LLM_MODEL` | Нет | `openai/gpt-4o-mini` | Модель по умолчанию |
-| `LIFEOS_MCP_ENABLED` | Нет | `true` | Включить MCP endpoint |
+| `LIFEOS_MCP_ENABLED` | Нет | `false` | Включить MCP endpoint |
 | `LIFEOS_MCP_PATH` | Нет | `/mcp` | Путь для MCP Streamable HTTP |
 
 * — обязательны если соответствующий провайдер включен

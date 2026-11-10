@@ -4,22 +4,25 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
+
+	_ "time/tzdata"
 )
 
 type Config struct {
-	ListenAddr    string
-	DataDir       string
-	Timezone      string
-	LogLevel      string
+	ListenAddr string
+	DataDir    string
+	Timezone   string
+	LogLevel   string
 
-	LLMProvider   string
-	LLMBaseURL    string
-	LLMAPIKey     string
-	LLMModel      string
+	LLMProvider string
+	LLMBaseURL  string
+	LLMAPIKey   string
+	LLMModel    string
 
-	MCPEnabled    bool
-	MCPPath       string
+	MCPEnabled bool
+	MCPPath    string
 }
 
 func Load(configPath string) (*Config, error) {
@@ -32,19 +35,32 @@ func Load(configPath string) (*Config, error) {
 		LLMBaseURL:  getEnv("LIFEOS_LLM_BASE_URL", "https://openrouter.ai/api/v1"),
 		LLMAPIKey:   getEnv("LIFEOS_LLM_API_KEY", ""),
 		LLMModel:    getEnv("LIFEOS_LLM_MODEL", "openai/gpt-4o-mini"),
-		MCPEnabled:  getEnvBool("LIFEOS_MCP_ENABLED", true),
+		MCPEnabled:  getEnvBool("LIFEOS_MCP_ENABLED", false),
 		MCPPath:     getEnv("LIFEOS_MCP_PATH", "/mcp"),
 	}
 
-	// Validate timezone - on Windows, use fixed offset if IANA not available
+	// Load .env file if configPath is provided and file exists
+	if configPath != "" {
+		if err := loadDotEnv(configPath); err != nil {
+			return nil, err
+		}
+		// Re-read env vars after loading .env (env vars take precedence)
+		cfg.ListenAddr = getEnv("LIFEOS_LISTEN_ADDR", cfg.ListenAddr)
+		cfg.DataDir = getEnv("LIFEOS_DATA_DIR", cfg.DataDir)
+		cfg.Timezone = getEnv("LIFEOS_TIMEZONE", cfg.Timezone)
+		cfg.LogLevel = getEnv("LIFEOS_LOG_LEVEL", cfg.LogLevel)
+		cfg.LLMProvider = getEnv("LIFEOS_LLM_PROVIDER", cfg.LLMProvider)
+		cfg.LLMBaseURL = getEnv("LIFEOS_LLM_BASE_URL", cfg.LLMBaseURL)
+		cfg.LLMAPIKey = getEnv("LIFEOS_LLM_API_KEY", cfg.LLMAPIKey)
+		cfg.LLMModel = getEnv("LIFEOS_LLM_MODEL", cfg.LLMModel)
+		cfg.MCPEnabled = getEnvBool("LIFEOS_MCP_ENABLED", cfg.MCPEnabled)
+		cfg.MCPPath = getEnv("LIFEOS_MCP_PATH", cfg.MCPPath)
+	}
+
+	// Validate timezone using embedded IANA database
 	loc, err := time.LoadLocation(cfg.Timezone)
 	if err != nil {
-		// Fallback for Windows: Moscow is UTC+3 year-round (no DST since 2014)
-		if cfg.Timezone == "Europe/Moscow" {
-			loc = time.FixedZone("MSK", 3*60*60)
-		} else {
-			return nil, ErrInvalidTimezone{cfg.Timezone}
-		}
+		return nil, ErrInvalidTimezone{cfg.Timezone}
 	}
 	_ = loc // validated
 
@@ -85,4 +101,36 @@ type ErrInvalidTimezone struct {
 
 func (e ErrInvalidTimezone) Error() string {
 	return "invalid timezone: " + e.TZ
+}
+
+func loadDotEnv(path string) error {
+	// Simple .env loader - reads KEY=VALUE lines
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // .env file is optional
+		}
+		return err
+	}
+
+	lines := string(data)
+	for _, line := range strings.Split(lines, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+		// Remove surrounding quotes if present
+		value = strings.Trim(value, "\"'")
+		// Only set if not already set in environment
+		if os.Getenv(key) == "" {
+			os.Setenv(key, value)
+		}
+	}
+	return nil
 }

@@ -20,7 +20,6 @@ web/build/
 web/.svelte-kit/
 web/.pnp/
 web/.pnp.js
-web/package-lock.json
 
 # IDE / editors
 .idea/

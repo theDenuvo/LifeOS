@@ -1,8 +1,5 @@
 import adapter from '@sveltejs/adapter-static';
 import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
-import { sveltekit } from '@sveltejs/kit/vite';
-import { svelte } from '@sveltejs/vite-plugin-svelte';
-import { defineConfig } from 'vite';
 
 /** @type {import('@sveltejs/kit').Config} */
 const config = {
@@ -26,12 +23,7 @@ const config = {
 		alias: {
 			$lib: 'src/lib'
 		}
-	},
-
-	plugins: [
-		svelte(),
-		sveltekit()
-	]
+	}
 };
 
-export default defineConfig(config);
+export default config;

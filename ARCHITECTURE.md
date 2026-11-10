@@ -2,7 +2,7 @@
 
 ## 1. Общая архитектура
 
-LifeOS — **Modular Monolith** на Go 1.23+ с встроенным статическим фронтендом (SvelteKit 2 + Svelte 5).
+LifeOS — **Modular Monolith** на Go 1.27.3 с встроенным статическим фронтендом (SvelteKit 2 + Svelte 5).
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -114,7 +114,7 @@ Transport (HTTP, MCP) ──► Application ──► Domain
 - Connection pooling (std database/sql)
 
 ### `internal/transport/http`
-- `chi` router (stdlib-compatible, минимальный)
+- `net/http` (stdlib)
 - REST handlers → Application services
 - SSE endpoint для realtime
 - Embedded frontend serving
@@ -222,7 +222,7 @@ LIFEOS_LLM_API_KEY=
 LIFEOS_LLM_MODEL=openai/gpt-4o-mini
 
 # MCP
-LIFEOS_MCP_ENABLED=true
+LIFEOS_MCP_ENABLED=false
 LIFEOS_MCP_PATH=/mcp
 
 # Frontend (dev)

@@ -15,27 +15,35 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23.4'
+          go-version: '1.27.3'
           cache: true
-      
+
       - name: Verify Go version
         run: |
           go version
           go env GOTOOLCHAIN
-      
-      - name: Go mod tidy
-        run: go mod tidy
-      
+
+      - name: Go mod verify
+        run: go mod verify
+
+      - name: gofmt
+        run: |
+          if [ -n "$(gofmt -l .)" ]; then
+            echo "gofmt failures:"
+            gofmt -l .
+            exit 1
+          fi
+
       - name: go vet
         run: go vet ./...
-      
+
       - name: Build Windows
         run: go build -trimpath -ldflags="-s -w" -o lifeos.exe ./cmd/lifeos
-      
+
       - name: Test
         run: go test -v -race ./...
 
@@ -43,22 +51,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23.4'
+          go-version: '1.27.3'
           cache: true
-      
+
+      - name: Go mod verify
+        run: go mod verify
+
+      - name: gofmt
+        run: |
+          if [ -n "$(gofmt -l .)" ]; then
+            echo "gofmt failures:"
+            gofmt -l .
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
       - name: Build Linux AMD64 v1
         run: |
           GOOS=linux GOARCH=amd64 GOAMD64=v1 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o lifeos ./cmd/lifeos
-      
+
       - name: Verify binary
         run: |
           file lifeos
           strings lifeos | grep -E "SSE4|AVX|AES-NI" || echo "No unsupported instructions found"
-      
+
       - name: Test
         run: go test -v -race ./...
 
@@ -90,8 +112,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Validate OpenAPI
-        run: |
-          # Will be populated when api/openapi.yaml is created
-          echo "OpenAPI validation will run when api/openapi.yaml exists"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install OpenAPI validator
+        run: npm install -g @redocly/openapi-cli@latest
+
+      - name: Validate OpenAPI spec
+        run: redocly lint api/openapi.yaml --config=api/redocly.yaml

@@ -241,8 +241,9 @@ func (t *Task) IsOverdue(now time.Time) bool {
 INSERT INTO tasks (title, due_date, timezone) VALUES ('Дедлайн', '2026-11-10', 'Europe/Moscow');
 
 -- Задача с точным дедлайном 10 ноября 18:00 по Москве
-INSERT INTO tasks (title, due_at, timezone) VALUES ('Встреча', '2026-11-10T15:00:00Z', 'Europe/Moscow');
--- due_at хранится в UTC (15:00Z = 18:00 MSK)
+-- due_at хранится в SQLite как Unix seconds (UTC)
+INSERT INTO tasks (title, due_at, timezone) VALUES ('Встреча', 1762867200, 'Europe/Moscow');
+-- 1762867200 = 2026-11-10T15:00:00Z = 2026-11-10 18:00 MSK
 ```
 
 ### Go типы

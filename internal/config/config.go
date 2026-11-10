@@ -26,6 +26,11 @@ type Config struct {
 }
 
 func Load(configPath string) (*Config, error) {
+	// Default to .env if not specified
+	if configPath == "" {
+		configPath = ".env"
+	}
+
 	cfg := &Config{
 		ListenAddr:  getEnv("LIFEOS_LISTEN_ADDR", "127.0.0.1:8787"),
 		DataDir:     getEnv("LIFEOS_DATA_DIR", "./data"),
@@ -39,23 +44,21 @@ func Load(configPath string) (*Config, error) {
 		MCPPath:     getEnv("LIFEOS_MCP_PATH", "/mcp"),
 	}
 
-	// Load .env file if configPath is provided and file exists
-	if configPath != "" {
-		if err := loadDotEnv(configPath); err != nil {
-			return nil, err
-		}
-		// Re-read env vars after loading .env (env vars take precedence)
-		cfg.ListenAddr = getEnv("LIFEOS_LISTEN_ADDR", cfg.ListenAddr)
-		cfg.DataDir = getEnv("LIFEOS_DATA_DIR", cfg.DataDir)
-		cfg.Timezone = getEnv("LIFEOS_TIMEZONE", cfg.Timezone)
-		cfg.LogLevel = getEnv("LIFEOS_LOG_LEVEL", cfg.LogLevel)
-		cfg.LLMProvider = getEnv("LIFEOS_LLM_PROVIDER", cfg.LLMProvider)
-		cfg.LLMBaseURL = getEnv("LIFEOS_LLM_BASE_URL", cfg.LLMBaseURL)
-		cfg.LLMAPIKey = getEnv("LIFEOS_LLM_API_KEY", cfg.LLMAPIKey)
-		cfg.LLMModel = getEnv("LIFEOS_LLM_MODEL", cfg.LLMModel)
-		cfg.MCPEnabled = getEnvBool("LIFEOS_MCP_ENABLED", cfg.MCPEnabled)
-		cfg.MCPPath = getEnv("LIFEOS_MCP_PATH", cfg.MCPPath)
+	// Load .env file if it exists (non-fatal if missing)
+	if err := loadDotEnv(configPath); err != nil {
+		return nil, err
 	}
+	// Re-read env vars after loading .env (env vars take precedence)
+	cfg.ListenAddr = getEnv("LIFEOS_LISTEN_ADDR", cfg.ListenAddr)
+	cfg.DataDir = getEnv("LIFEOS_DATA_DIR", cfg.DataDir)
+	cfg.Timezone = getEnv("LIFEOS_TIMEZONE", cfg.Timezone)
+	cfg.LogLevel = getEnv("LIFEOS_LOG_LEVEL", cfg.LogLevel)
+	cfg.LLMProvider = getEnv("LIFEOS_LLM_PROVIDER", cfg.LLMProvider)
+	cfg.LLMBaseURL = getEnv("LIFEOS_LLM_BASE_URL", cfg.LLMBaseURL)
+	cfg.LLMAPIKey = getEnv("LIFEOS_LLM_API_KEY", cfg.LLMAPIKey)
+	cfg.LLMModel = getEnv("LIFEOS_LLM_MODEL", cfg.LLMModel)
+	cfg.MCPEnabled = getEnvBool("LIFEOS_MCP_ENABLED", cfg.MCPEnabled)
+	cfg.MCPPath = getEnv("LIFEOS_MCP_PATH", cfg.MCPPath)
 
 	// Validate timezone using embedded IANA database
 	loc, err := time.LoadLocation(cfg.Timezone)

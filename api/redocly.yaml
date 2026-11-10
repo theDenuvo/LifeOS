@@ -9,6 +9,5 @@ rules:
   operation-singular-tag: error
   no-server-example.com: error
   spec-components-invalid-map-name: error
-
-preprocessors:
-  - resolve-all-of
+  # Disable security-defined since this is a personal app without auth yet
+  security-defined: off

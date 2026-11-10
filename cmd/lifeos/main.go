@@ -59,7 +59,7 @@ func main() {
 	}
 
 	// Create HTTP handler with all routes
-	handler := httptransport.NewHandler(db, cfg, dist.FS)
+	handler := httptransport.NewHandler(db, cfg, dist.FS).Routes()
 
 	// HTTP Server
 	server := &http.Server{

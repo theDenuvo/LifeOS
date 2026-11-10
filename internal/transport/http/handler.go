@@ -19,12 +19,12 @@ type Handler struct {
 	embedFS embed.FS
 }
 
-func NewHandler(db *sql.DB, cfg *config.Config, embedFS embed.FS) http.Handler {
+func NewHandler(db *sql.DB, cfg *config.Config, embedFS embed.FS) *Handler {
 	h := &Handler{db: db, cfg: cfg, embedFS: embedFS}
-	return h.routes()
+	return h
 }
 
-func (h *Handler) routes() http.Handler {
+func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", h.healthz)
 	mux.Handle("/api/v1/", http.StripPrefix("/api/v1", h.apiRoutes()))

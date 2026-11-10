@@ -31,6 +31,7 @@ jobs:
         run: go mod verify
 
       - name: gofmt
+        shell: bash
         run: |
           if [ -n "$(gofmt -l .)" ]; then
             echo "gofmt failures:"
@@ -40,6 +41,11 @@ jobs:
 
       - name: go vet
         run: go vet ./...
+
+      - name: Sync frontend build to embed directory
+        run: |
+          rm -rf internal/web/dist/build
+          cp -r web/build internal/web/dist/build
 
       - name: Build Windows
         run: go build -trimpath -ldflags="-s -w" -o lifeos.exe ./cmd/lifeos
@@ -72,6 +78,11 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      - name: Sync frontend build to embed directory
+        run: |
+          rm -rf internal/web/dist/build
+          cp -r web/build internal/web/dist/build
+
       - name: Build Linux AMD64 v1
         run: |
           GOOS=linux GOARCH=amd64 GOAMD64=v1 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o lifeos ./cmd/lifeos
@@ -88,36 +99,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
           cache-dependency-path: web/package-lock.json
-      
+
       - name: Install dependencies
         working-directory: web
         run: npm ci
-      
+
       - name: TypeScript check
         working-directory: web
         run: npm run check
-      
+
       - name: Build
         working-directory: web
         run: npm run build
+
+      - name: Sync frontend build to embed directory
+        run: |
+          rm -rf internal/web/dist/build
+          cp -r web/build internal/web/dist/build
 
   openapi-validation:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
 
       - name: Install OpenAPI validator
         run: npm install -g @redocly/openapi-cli@latest

@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"embed"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -22,12 +21,6 @@ type Handler struct {
 
 func NewHandler(db *sql.DB, cfg *config.Config, embedFS embed.FS) http.Handler {
 	h := &Handler{db: db, cfg: cfg, embedFS: embedFS}
-	entries, _ := embedFS.ReadDir("build")
-	fmt.Printf("[DEBUG] embedFS build entries: ")
-	for _, e := range entries {
-		fmt.Printf("%s(%v) ", e.Name(), e.IsDir())
-	}
-	fmt.Println()
 	return h.routes()
 }
 
@@ -89,17 +82,14 @@ func (h *Handler) serveFrontend(w http.ResponseWriter, r *http.Request) {
 	if path == "/" || path == "" {
 		path = "/index.html"
 	}
+
 	embedPath := "build" + path
-	fmt.Printf("[DEBUG] serveFrontend: path=%s, embedPath=%s\n", path, embedPath)
+
 	f, err := h.embedFS.Open(strings.TrimPrefix(embedPath, "/"))
 	if err == nil {
 		defer f.Close()
 		stat, _ := f.Stat()
-		fmt.Printf("[DEBUG] First try: err=%v, IsDir=%v, size=%d\n", err, stat.IsDir(), stat.Size())
 		if !stat.IsDir() {
-			buf := make([]byte, 100)
-			n, _ := f.Read(buf)
-			fmt.Printf("[DEBUG] First 100 bytes: %s\n", string(buf[:n]))
 			seeker, ok := f.(io.ReadSeeker)
 			if ok {
 				seeker.Seek(0, 0)
@@ -108,9 +98,17 @@ func (h *Handler) serveFrontend(w http.ResponseWriter, r *http.Request) {
 			http.ServeContent(w, r, path, stat.ModTime(), seeker)
 			return
 		}
-	} else {
-		fmt.Printf("[DEBUG] First try error: %v\n", err)
 	}
+
+	// Check if this looks like a static asset request (has file extension)
+	// If so, return 404 instead of SPA fallback
+	slog.Debug("serveFrontend check", "path", path, "looksLikeAsset", h.looksLikeStaticAsset(path))
+	if h.looksLikeStaticAsset(path) {
+		h.writeProblem(w, r, http.StatusNotFound, "not-found", "Asset not found", "Static asset not found")
+		return
+	}
+
+	// SPA fallback for client-side routes
 	f, err = h.embedFS.Open("build/index.html")
 	if err != nil {
 		slog.Error("Failed to open build/index.html", "error", err)
@@ -119,16 +117,25 @@ func (h *Handler) serveFrontend(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 	stat, _ := f.Stat()
-	buf := make([]byte, 100)
-	n, _ := f.Read(buf)
-	fmt.Printf("[DEBUG] SPA fallback first 100 bytes: %s\n", string(buf[:n]))
 	seeker, ok := f.(io.ReadSeeker)
 	if ok {
 		seeker.Seek(0, 0)
 	}
-	fmt.Printf("[DEBUG] SPA fallback: size=%d\n", stat.Size())
 	slog.Debug("Serving SPA fallback", "size", stat.Size())
 	http.ServeContent(w, r, "index.html", stat.ModTime(), seeker)
+}
+
+func (h *Handler) looksLikeStaticAsset(path string) bool {
+	// Static assets typically have extensions
+	// Exclude HTML (SPA routes) and directories
+	exts := []string{".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".eot", ".map", ".txt", ".xml", ".json", ".webmanifest", ".webp", ".avif"}
+	// Check if path has a known static asset extension
+	for _, ext := range exts {
+		if strings.HasSuffix(strings.ToLower(path), ext) {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Handler) loggingMiddleware(next http.Handler) http.Handler {

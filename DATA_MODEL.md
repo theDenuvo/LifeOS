@@ -298,7 +298,7 @@ Message 1 ──< PendingAction
 |--------|----------|
 | 001 | Создание таблиц: tasks, inbox_items, task_events, conversations, messages, pending_actions, app_settings |
 | 002 | Индексы для inbox_items |
-| 003 | Таблица task_events с append-only триггерами |
+| 003 | Таблица task_events |
 | 004 | Таблица conversations |
 | 005 | Таблица messages |
 | 006 | Таблица pending_actions |

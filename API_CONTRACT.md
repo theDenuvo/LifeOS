@@ -211,7 +211,6 @@ PATCH /api/v1/tasks/{id}
 
 **Валидация:**
 - `status` переходит только по разрешённым переходам
-- `due_at` ≥ now если меняется
 - Optimistic locking через `If-Match: <updated_at>` или `ETag`
 
 **Response 200:** Task (обновлённая)

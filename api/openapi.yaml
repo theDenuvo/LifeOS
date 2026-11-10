@@ -6,19 +6,21 @@ info:
   contact:
     name: LifeOS Team
     url: https://github.com/theDenuvo/LifeOS
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
 servers:
-  - url: http://127.0.0.1:8787/api/v1
-    description: Development server
-  - url: https://lifeos.example.ts.net/api/v1
-    description: Production server (Tailscale)
-
+- url: http://127.0.0.1:8787
+  description: Development server
+- url: https://lifeos.example.ts.net
+  description: Production server (Tailscale)
 paths:
   /healthz:
     get:
       summary: Health check endpoint
       operationId: healthz
       tags:
-        - System
+      - System
       responses:
         '200':
           description: Service is healthy
@@ -26,73 +28,75 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HealthResponse'
-
-  /tasks:
+  /api/v1/tasks:
     get:
       summary: List tasks with filtering and pagination
       operationId: listTasks
       tags:
-        - Tasks
+      - Tasks
       parameters:
-        - name: status
-          in: query
-          schema:
-            type: string
-            enum: [open, completed, cancelled]
-          description: Filter by task status (repeatable)
-        - name: priority
-          in: query
-          schema:
-            type: string
-            enum: [low, medium, high]
-          description: Filter by priority
-        - name: planned_date
-          in: query
-          schema:
-            type: string
-            format: date
-          description: Filter by planned date (YYYY-MM-DD)
-        - name: due_date
-          in: query
-          schema:
-            type: string
-            format: date
-          description: Filter by calendar deadline (YYYY-MM-DD)
-        - name: overdue
-          in: query
-          schema:
-            type: boolean
-          description: Filter only overdue tasks
-        - name: search
-          in: query
-          schema:
-            type: string
-          description: Full-text search in title and note
-        - name: tags
-          in: query
-          schema:
-            type: string
-          description: Comma-separated tags (AND logic)
-        - name: sort
-          in: query
-          schema:
-            type: string
-            pattern: '^(-?)(created_at|updated_at|due_at|priority|title)$'
-          description: Sort field with optional - prefix for DESC
-          default: -created_at
-        - name: limit
-          in: query
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 100
-          default: 50
-        - name: offset
-          in: query
-          schema:
-            type: integer
-            minimum: 0
-          default: 0
+      - name: status
+        in: query
+        schema:
+          type: string
+          enum:
+          - open
+          - completed
+          - cancelled
+        description: Filter by task status (repeatable)
+      - name: priority
+        in: query
+        schema:
+          type: string
+          enum:
+          - low
+          - medium
+          - high
+        description: Filter by priority
+      - name: planned_date
+        in: query
+        schema:
+          type: string
+          format: date
+        description: Filter by planned date (YYYY-MM-DD)
+      - name: due_date
+        in: query
+        schema:
+          type: string
+          format: date
+        description: Filter by calendar deadline (YYYY-MM-DD)
+      - name: overdue
+        in: query
+        schema:
+          type: boolean
+        description: Filter only overdue tasks
+      - name: search
+        in: query
+        schema:
+          type: string
+        description: Full-text search in title and note
+      - name: tags
+        in: query
+        schema:
+          type: string
+        description: Comma-separated tags (AND logic)
+      - name: sort
+        in: query
+        schema:
+          type: string
+          pattern: ^(-?)(created_at|updated_at|due_at|priority|title)$
+        description: Sort field with optional - prefix for DESC
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+      - name: offset
+        in: query
+        schema:
+          type: integer
+          minimum: 0
       responses:
         '200':
           description: List of tasks
@@ -102,12 +106,13 @@ paths:
                 $ref: '#/components/schemas/TaskListResponse'
         '400':
           $ref: '#/components/responses/ValidationError'
-
+        '501':
+          $ref: '#/components/responses/NotImplementedError'
     post:
       summary: Create a new task
       operationId: createTask
       tags:
-        - Tasks
+      - Tasks
       requestBody:
         required: true
         content:
@@ -125,20 +130,21 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '409':
           $ref: '#/components/responses/ConflictError'
-
-  /tasks/{id}:
+        '501':
+          $ref: '#/components/responses/NotImplementedError'
+  /api/v1/tasks/{id}:
     get:
       summary: Get a task by ID
       operationId: getTask
       tags:
-        - Tasks
+      - Tasks
       parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: integer
-            format: int64
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
       responses:
         '200':
           description: Task found
@@ -148,24 +154,25 @@ paths:
                 $ref: '#/components/schemas/TaskResponse'
         '404':
           $ref: '#/components/responses/NotFoundError'
-
+        '501':
+          $ref: '#/components/responses/NotImplementedError'
     patch:
       summary: Partially update a task
       operationId: updateTask
       tags:
-        - Tasks
+      - Tasks
       parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: integer
-            format: int64
-        - name: If-Match
-          in: header
-          schema:
-            type: string
-          description: Optimistic locking - must match current updated_at
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: If-Match
+        in: header
+        schema:
+          type: string
+        description: Optimistic locking - must match current updated_at
       requestBody:
         required: true
         content:
@@ -187,20 +194,21 @@ paths:
           $ref: '#/components/responses/ConflictError'
         '412':
           $ref: '#/components/responses/PreconditionFailedError'
-
-  /tasks/{id}/complete:
+        '501':
+          $ref: '#/components/responses/NotImplementedError'
+  /api/v1/tasks/{id}/complete:
     post:
       summary: Mark task as completed
       operationId: completeTask
       tags:
-        - Tasks
+      - Tasks
       parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: integer
-            format: int64
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
       responses:
         '200':
           description: Task completed
@@ -212,20 +220,21 @@ paths:
           $ref: '#/components/responses/NotFoundError'
         '412':
           $ref: '#/components/responses/PreconditionFailedError'
-
-  /tasks/{id}/cancel:
+        '501':
+          $ref: '#/components/responses/NotImplementedError'
+  /api/v1/tasks/{id}/cancel:
     post:
       summary: Mark task as cancelled
       operationId: cancelTask
       tags:
-        - Tasks
+      - Tasks
       parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: integer
-            format: int64
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
       responses:
         '200':
           description: Task cancelled
@@ -237,20 +246,21 @@ paths:
           $ref: '#/components/responses/NotFoundError'
         '412':
           $ref: '#/components/responses/PreconditionFailedError'
-
-  /tasks/{id}/restore:
+        '501':
+          $ref: '#/components/responses/NotImplementedError'
+  /api/v1/tasks/{id}/restore:
     post:
       summary: Restore a completed or cancelled task
       operationId: restoreTask
       tags:
-        - Tasks
+      - Tasks
       parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: integer
-            format: int64
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
       responses:
         '200':
           description: Task restored to open
@@ -262,20 +272,21 @@ paths:
           $ref: '#/components/responses/NotFoundError'
         '412':
           $ref: '#/components/responses/PreconditionFailedError'
-
-  /tasks/{id}/reschedule:
+        '501':
+          $ref: '#/components/responses/NotImplementedError'
+  /api/v1/tasks/{id}/reschedule:
     post:
       summary: Reschedule a task
       operationId: rescheduleTask
       tags:
-        - Tasks
+      - Tasks
       parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: integer
-            format: int64
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
       requestBody:
         required: true
         content:
@@ -295,32 +306,30 @@ paths:
           $ref: '#/components/responses/NotFoundError'
         '412':
           $ref: '#/components/responses/PreconditionFailedError'
-
-  /inbox:
+        '501':
+          $ref: '#/components/responses/NotImplementedError'
+  /api/v1/inbox:
     get:
       summary: List inbox items
       operationId: listInbox
       tags:
-        - Inbox
+      - Inbox
       parameters:
-        - name: limit
-          in: query
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 100
-          default: 50
-        - name: offset
-          in: query
-          schema:
-            type: integer
-            minimum: 0
-          default: 0
-        - name: unprocessed_only
-          in: query
-          schema:
-            type: boolean
-          default: true
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+      - name: offset
+        in: query
+        schema:
+          type: integer
+          minimum: 0
+      - name: unprocessed_only
+        in: query
+        schema:
+          type: boolean
       responses:
         '200':
           description: List of inbox items
@@ -328,12 +337,15 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/InboxListResponse'
-
+        '501':
+          $ref: '#/components/responses/NotImplementedError'
+        '400':
+          $ref: '#/components/responses/ValidationError'
     post:
       summary: Capture a new inbox item
       operationId: captureInbox
       tags:
-        - Inbox
+      - Inbox
       requestBody:
         required: true
         content:
@@ -349,20 +361,21 @@ paths:
                 $ref: '#/components/schemas/InboxItemResponse'
         '400':
           $ref: '#/components/responses/ValidationError'
-
-  /inbox/{id}/convert:
+        '501':
+          $ref: '#/components/responses/NotImplementedError'
+  /api/v1/inbox/{id}/convert:
     post:
       summary: Convert inbox item to task
       operationId: convertInbox
       tags:
-        - Inbox
+      - Inbox
       parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: integer
-            format: int64
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
       requestBody:
         content:
           application/json:
@@ -379,32 +392,34 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '404':
           $ref: '#/components/responses/NotFoundError'
-
-  /inbox/{id}:
+        '501':
+          $ref: '#/components/responses/NotImplementedError'
+  /api/v1/inbox/{id}:
     delete:
       summary: Dismiss an inbox item
       operationId: dismissInbox
       tags:
-        - Inbox
+      - Inbox
       parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: integer
-            format: int64
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
       responses:
         '204':
           description: Inbox item dismissed
         '404':
           $ref: '#/components/responses/NotFoundError'
-
-  /summary/today:
+        '501':
+          $ref: '#/components/responses/NotImplementedError'
+  /api/v1/summary/today:
     get:
       summary: Get today's summary (main screen data)
       operationId: todaySummary
       tags:
-        - Summary
+      - Summary
       responses:
         '200':
           description: Today's summary
@@ -412,13 +427,16 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SummaryResponse'
-
-  /assistant/messages:
+        '501':
+          $ref: '#/components/responses/NotImplementedError'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/assistant/messages:
     post:
       summary: Send message to assistant
       operationId: assistantMessage
       tags:
-        - Assistant
+      - Assistant
       requestBody:
         required: true
         content:
@@ -434,27 +452,26 @@ paths:
                 $ref: '#/components/schemas/AssistantMessageResponse'
         '400':
           $ref: '#/components/responses/ValidationError'
-
-  /assistant/conversations:
+        '501':
+          $ref: '#/components/responses/NotImplementedError'
+  /api/v1/assistant/conversations:
     get:
       summary: List conversations
       operationId: listConversations
       tags:
-        - Assistant
+      - Assistant
       parameters:
-        - name: limit
-          in: query
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 100
-          default: 50
-        - name: offset
-          in: query
-          schema:
-            type: integer
-            minimum: 0
-          default: 0
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+      - name: offset
+        in: query
+        schema:
+          type: integer
+          minimum: 0
       responses:
         '200':
           description: List of conversations
@@ -462,20 +479,23 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ConversationListResponse'
-
-  /assistant/conversations/{id}:
+        '501':
+          $ref: '#/components/responses/NotImplementedError'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/assistant/conversations/{id}:
     get:
       summary: Get conversation with messages
       operationId: getConversation
       tags:
-        - Assistant
+      - Assistant
       parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: integer
-            format: int64
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
       responses:
         '200':
           description: Conversation with messages
@@ -485,20 +505,21 @@ paths:
                 $ref: '#/components/schemas/ConversationResponse'
         '404':
           $ref: '#/components/responses/NotFoundError'
-
-  /assistant/pending-actions/{id}/confirm:
+        '501':
+          $ref: '#/components/responses/NotImplementedError'
+  /api/v1/assistant/pending-actions/{id}/confirm:
     post:
       summary: Confirm a pending action
       operationId: confirmPendingAction
       tags:
-        - Assistant
+      - Assistant
       parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: integer
-            format: int64
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
       responses:
         '200':
           description: Action confirmed and executed
@@ -510,20 +531,21 @@ paths:
           $ref: '#/components/responses/NotFoundError'
         '409':
           $ref: '#/components/responses/ConflictError'
-
-  /assistant/pending-actions/{id}/reject:
+        '501':
+          $ref: '#/components/responses/NotImplementedError'
+  /api/v1/assistant/pending-actions/{id}/reject:
     post:
       summary: Reject a pending action
       operationId: rejectPendingAction
       tags:
-        - Assistant
+      - Assistant
       parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: integer
-            format: int64
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
       responses:
         '200':
           description: Action rejected
@@ -533,19 +555,20 @@ paths:
                 $ref: '#/components/schemas/PendingActionResponse'
         '404':
           $ref: '#/components/responses/NotFoundError'
-
-  /events:
+        '501':
+          $ref: '#/components/responses/NotImplementedError'
+  /api/v1/events:
     get:
       summary: Server-Sent Events stream for real-time updates
       operationId: events
       tags:
-        - Events
+      - Events
       parameters:
-        - name: Last-Event-ID
-          in: header
-          schema:
-            type: string
-          description: Resume from last received event ID
+      - name: Last-Event-ID
+        in: header
+        schema:
+          type: string
+        description: Resume from last received event ID
       responses:
         '200':
           description: Event stream
@@ -555,19 +578,20 @@ paths:
                 type: string
         '501':
           $ref: '#/components/responses/NotImplementedError'
-
-  /settings/{key}:
+        '400':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/settings/{key}:
     get:
       summary: Get a setting value
       operationId: getSetting
       tags:
-        - Settings
+      - Settings
       parameters:
-        - name: key
-          in: path
-          required: true
-          schema:
-            type: string
+      - name: key
+        in: path
+        required: true
+        schema:
+          type: string
       responses:
         '200':
           description: Setting value
@@ -577,18 +601,19 @@ paths:
                 $ref: '#/components/schemas/SettingResponse'
         '404':
           $ref: '#/components/responses/NotFoundError'
-
+        '501':
+          $ref: '#/components/responses/NotImplementedError'
     put:
       summary: Set a setting value
       operationId: putSetting
       tags:
-        - Settings
+      - Settings
       parameters:
-        - name: key
-          in: path
-          required: true
-          schema:
-            type: string
+      - name: key
+        in: path
+        required: true
+        schema:
+          type: string
       requestBody:
         required: true
         content:
@@ -602,37 +627,40 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SettingResponse'
-
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '501':
+          $ref: '#/components/responses/NotImplementedError'
 components:
   schemas:
     HealthResponse:
       type: object
       required:
-        - status
-        - version
-        - time
+      - status
+      - version
+      - time
       properties:
         status:
           type: string
-          enum: [ok]
+          enum:
+          - ok
         version:
           type: string
         time:
           type: string
           format: date-time
-
     TaskResponse:
       type: object
       required:
-        - id
-        - title
-        - priority
-        - status
-        - timezone
-        - tags
-        - created_at
-        - updated_at
-        - overdue
+      - id
+      - title
+      - priority
+      - status
+      - timezone
+      - tags
+      - created_at
+      - updated_at
+      - overdue
       properties:
         id:
           type: integer
@@ -643,25 +671,27 @@ components:
         note:
           type: string
           maxLength: 5000
-          nullable: true
         priority:
           type: string
-          enum: [low, medium, high]
+          enum:
+          - low
+          - medium
+          - high
         status:
           type: string
-          enum: [open, completed, cancelled]
+          enum:
+          - open
+          - completed
+          - cancelled
         planned_date:
           type: string
           format: date
-          nullable: true
         due_date:
           type: string
           format: date
-          nullable: true
         due_at:
           type: string
           format: date-time
-          nullable: true
         timezone:
           type: string
           default: Europe/Moscow
@@ -679,18 +709,15 @@ components:
         completed_at:
           type: string
           format: date-time
-          nullable: true
         cancelled_at:
           type: string
           format: date-time
-          nullable: true
         overdue:
           type: boolean
-
     TaskCreateRequest:
       type: object
       required:
-        - title
+      - title
       properties:
         title:
           type: string
@@ -699,23 +726,22 @@ components:
         note:
           type: string
           maxLength: 5000
-          nullable: true
         priority:
           type: string
-          enum: [low, medium, high]
+          enum:
+          - low
+          - medium
+          - high
           default: medium
         planned_date:
           type: string
           format: date
-          nullable: true
         due_date:
           type: string
           format: date
-          nullable: true
         due_at:
           type: string
           format: date-time
-          nullable: true
         timezone:
           type: string
           default: Europe/Moscow
@@ -725,7 +751,6 @@ components:
             type: string
             maxLength: 50
           default: []
-
     TaskUpdateRequest:
       type: object
       properties:
@@ -736,22 +761,21 @@ components:
         note:
           type: string
           maxLength: 5000
-          nullable: true
         priority:
           type: string
-          enum: [low, medium, high]
+          enum:
+          - low
+          - medium
+          - high
         planned_date:
           type: string
           format: date
-          nullable: true
         due_date:
           type: string
           format: date
-          nullable: true
         due_at:
           type: string
           format: date-time
-          nullable: true
         timezone:
           type: string
         tags:
@@ -759,31 +783,25 @@ components:
           items:
             type: string
             maxLength: 50
-
     TaskRescheduleRequest:
       type: object
       properties:
         planned_date:
           type: string
           format: date
-          nullable: true
         due_date:
           type: string
           format: date
-          nullable: true
         due_at:
           type: string
           format: date-time
-          nullable: true
         timezone:
           type: string
-          nullable: true
-
     TaskListResponse:
       type: object
       required:
-        - data
-        - meta
+      - data
+      - meta
       properties:
         data:
           type: array
@@ -792,9 +810,9 @@ components:
         meta:
           type: object
           required:
-            - limit
-            - offset
-            - total
+          - limit
+          - offset
+          - total
           properties:
             limit:
               type: integer
@@ -802,13 +820,12 @@ components:
               type: integer
             total:
               type: integer
-
     InboxItemResponse:
       type: object
       required:
-        - id
-        - text
-        - created_at
+      - id
+      - text
+      - created_at
       properties:
         id:
           type: integer
@@ -819,19 +836,16 @@ components:
         meta:
           type: object
           additionalProperties: true
-          nullable: true
         created_at:
           type: string
           format: date-time
         processed_at:
           type: string
           format: date-time
-          nullable: true
-
     InboxCaptureRequest:
       type: object
       required:
-        - text
+      - text
       properties:
         text:
           type: string
@@ -840,29 +854,27 @@ components:
         meta:
           type: object
           additionalProperties: true
-          nullable: true
-
     InboxConvertRequest:
       type: object
       properties:
         priority:
           type: string
-          enum: [low, medium, high]
+          enum:
+          - low
+          - medium
+          - high
           default: medium
         planned_date:
           type: string
           format: date
-          nullable: true
         due_date:
           type: string
           format: date
-          nullable: true
-
     InboxListResponse:
       type: object
       required:
-        - data
-        - meta
+      - data
+      - meta
       properties:
         data:
           type: array
@@ -871,9 +883,9 @@ components:
         meta:
           type: object
           required:
-            - limit
-            - offset
-            - total
+          - limit
+          - offset
+          - total
           properties:
             limit:
               type: integer
@@ -881,14 +893,13 @@ components:
               type: integer
             total:
               type: integer
-
     SummaryResponse:
       type: object
       required:
-        - today
-        - overdue
-        - high_priority
-        - stats
+      - today
+      - overdue
+      - high_priority
+      - stats
       properties:
         today:
           type: array
@@ -906,15 +917,13 @@ components:
           $ref: '#/components/schemas/SummaryStats'
         focus_task:
           $ref: '#/components/schemas/TaskSummaryItem'
-          nullable: true
-
     TaskSummaryItem:
       type: object
       required:
-        - id
-        - title
-        - time
-        - priority
+      - id
+      - title
+      - time
+      - priority
       properties:
         id:
           type: integer
@@ -925,16 +934,18 @@ components:
           type: string
         priority:
           type: string
-          enum: [low, medium, high]
-
+          enum:
+          - low
+          - medium
+          - high
     SummaryStats:
       type: object
       required:
-        - active_total
-        - overdue_count
-        - high_priority_count
-        - completed_today
-        - inbox_count
+      - active_total
+      - overdue_count
+      - high_priority_count
+      - completed_today
+      - inbox_count
       properties:
         active_total:
           type: integer
@@ -946,25 +957,22 @@ components:
           type: integer
         inbox_count:
           type: integer
-
     AssistantMessageRequest:
       type: object
       required:
-        - content
+      - content
       properties:
         content:
           type: string
         conversation_id:
           type: integer
           format: int64
-          nullable: true
-
     AssistantMessageResponse:
       type: object
       required:
-        - message_id
-        - conversation_id
-        - status
+      - message_id
+      - conversation_id
+      - status
       properties:
         message_id:
           type: integer
@@ -974,26 +982,24 @@ components:
           format: int64
         status:
           type: string
-          enum: [processing]
-
+          enum:
+          - processing
     ConversationResponse:
       type: object
       required:
-        - id
-        - title
-        - messages
-        - created_at
-        - updated_at
+      - id
+      - title
+      - messages
+      - created_at
+      - updated_at
       properties:
         id:
           type: integer
           format: int64
         title:
           type: string
-          nullable: true
         context_screen:
           type: string
-          nullable: true
         messages:
           type: array
           items:
@@ -1007,16 +1013,14 @@ components:
         ended_at:
           type: string
           format: date-time
-          nullable: true
-
     MessageResponse:
       type: object
       required:
-        - id
-        - conversation_id
-        - role
-        - content
-        - created_at
+      - id
+      - conversation_id
+      - role
+      - content
+      - created_at
       properties:
         id:
           type: integer
@@ -1026,46 +1030,44 @@ components:
           format: int64
         role:
           type: string
-          enum: [user, assistant, tool]
+          enum:
+          - user
+          - assistant
+          - tool
         content:
           type: string
         tool_calls:
           type: object
           additionalProperties: true
-          nullable: true
         tool_results:
           type: object
           additionalProperties: true
-          nullable: true
         metadata:
           type: object
           additionalProperties: true
-          nullable: true
         created_at:
           type: string
           format: date-time
-
     ConversationListResponse:
       type: object
       required:
-        - data
+      - data
       properties:
         data:
           type: array
           items:
             $ref: '#/components/schemas/ConversationResponse'
-
     PendingActionResponse:
       type: object
       required:
-        - id
-        - conversation_id
-        - message_id
-        - tool_name
-        - arguments
-        - preview
-        - status
-        - created_at
+      - id
+      - conversation_id
+      - message_id
+      - tool_name
+      - arguments
+      - preview
+      - status
+      - created_at
       properties:
         id:
           type: integer
@@ -1084,48 +1086,50 @@ components:
           type: string
         status:
           type: string
-          enum: [pending, confirmed, rejected, expired]
+          enum:
+          - pending
+          - confirmed
+          - rejected
+          - expired
         created_at:
           type: string
           format: date-time
         resolved_at:
           type: string
           format: date-time
-          nullable: true
         resolution:
           type: string
-          enum: [confirmed, rejected, expired]
-          nullable: true
-
+          enum:
+          - confirmed
+          - rejected
+          - expired
     SettingResponse:
       type: object
       required:
-        - key
-        - value
+      - key
+      - value
       properties:
         key:
           type: string
         value:
           type: object
           additionalProperties: true
-
     SettingRequest:
       type: object
       required:
-        - value
+      - value
       properties:
         value:
           type: object
           additionalProperties: true
-
     ProblemDetails:
       type: object
       required:
-        - type
-        - title
-        - status
-        - detail
-        - instance
+      - type
+      - title
+      - status
+      - detail
+      - instance
       properties:
         type:
           type: string
@@ -1142,13 +1146,12 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/FieldError'
-
     FieldError:
       type: object
       required:
-        - field
-        - code
-        - message
+      - field
+      - code
+      - message
       properties:
         field:
           type: string
@@ -1156,7 +1159,6 @@ components:
           type: string
         message:
           type: string
-
   responses:
     ValidationError:
       description: Validation failed
@@ -1165,19 +1167,18 @@ components:
           schema:
             $ref: '#/components/schemas/ProblemDetails'
           example:
-            type: "https://lifeos.dev/errors/validation-failed"
-            title: "Validation Failed"
+            type: https://lifeos.dev/errors/validation-failed
+            title: Validation Failed
             status: 400
-            detail: "Request validation failed"
-            instance: "/api/v1/tasks"
+            detail: Request validation failed
+            instance: /api/v1/tasks
             errors:
-              - field: "title"
-                code: "required"
-                message: "Title is required"
-              - field: "priority"
-                code: "invalid"
-                message: "Priority must be low|medium|high"
-
+            - field: title
+              code: required
+              message: Title is required
+            - field: priority
+              code: invalid
+              message: Priority must be low|medium|high
     NotFoundError:
       description: Resource not found
       content:
@@ -1185,12 +1186,11 @@ components:
           schema:
             $ref: '#/components/schemas/ProblemDetails'
           example:
-            type: "https://lifeos.dev/errors/not-found"
-            title: "Not Found"
+            type: https://lifeos.dev/errors/not-found
+            title: Not Found
             status: 404
-            detail: "Resource not found"
-            instance: "/api/v1/tasks/999"
-
+            detail: Resource not found
+            instance: /api/v1/tasks/999
     ConflictError:
       description: Concurrent modification conflict
       content:
@@ -1198,12 +1198,11 @@ components:
           schema:
             $ref: '#/components/schemas/ProblemDetails'
           example:
-            type: "https://lifeos.dev/errors/conflict"
-            title: "Conflict"
+            type: https://lifeos.dev/errors/conflict
+            title: Conflict
             status: 409
-            detail: "Resource was modified by another request"
-            instance: "/api/v1/tasks/1"
-
+            detail: Resource was modified by another request
+            instance: /api/v1/tasks/1
     PreconditionFailedError:
       description: Precondition failed (e.g., invalid status transition)
       content:
@@ -1211,12 +1210,11 @@ components:
           schema:
             $ref: '#/components/schemas/ProblemDetails'
           example:
-            type: "https://lifeos.dev/errors/precondition-failed"
-            title: "Precondition Failed"
+            type: https://lifeos.dev/errors/precondition-failed
+            title: Precondition Failed
             status: 412
-            detail: "Cannot complete task: status is not open"
-            instance: "/api/v1/tasks/1/complete"
-
+            detail: 'Cannot complete task: status is not open'
+            instance: /api/v1/tasks/1/complete
     NotImplementedError:
       description: Endpoint not yet implemented
       content:
@@ -1224,8 +1222,8 @@ components:
           schema:
             $ref: '#/components/schemas/ProblemDetails'
           example:
-            type: "https://lifeos.dev/errors/not-implemented"
-            title: "Not Implemented"
+            type: https://lifeos.dev/errors/not-implemented
+            title: Not Implemented
             status: 501
-            detail: "This endpoint is not yet implemented"
-            instance: "/api/v1/tasks"
+            detail: This endpoint is not yet implemented
+            instance: /api/v1/tasks

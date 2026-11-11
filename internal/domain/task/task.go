@@ -260,9 +260,13 @@ func (t *Task) Location() (*time.Location, error) {
 // OverdueAt returns the instant at which the task becomes overdue, or nil when
 // the task has no deadline.
 //
-// An exact due timestamp is used as-is. A calendar due date becomes overdue at
-// the local midnight that starts the following calendar day, so the whole local
-// day is still allowed. The value is the exact boundary used by IsOverdue.
+// An exact due timestamp is returned as-is. A calendar due date yields the local
+// midnight that starts the following calendar day, so the whole local day is
+// still allowed.
+//
+// Note that the boundary is compared differently per deadline type, see
+// IsOverdue: for an exact timestamp the boundary itself is still on time, for a
+// calendar date the boundary is already overdue.
 func (t *Task) OverdueAt() *time.Time {
 	if t.DueAt != nil {
 		dueAt := t.DueAt.UTC()
@@ -285,18 +289,32 @@ func (t *Task) OverdueAt() *time.Time {
 
 // IsOverdue determines whether the task is overdue at the given time.
 //
-// Completed and cancelled tasks are never overdue. The task is overdue at exactly
-// the boundary returned by OverdueAt (for a calendar due date that is the next
-// local midnight); an instant one nanosecond earlier is not overdue yet.
+// Completed and cancelled tasks are never overdue.
+//
+// The two deadline types deliberately use different comparisons:
+//
+//   - Exact timestamp (DueAt): strict comparison. The task is overdue only
+//     strictly after the deadline, so at exactly DueAt it is still on time.
+//   - Calendar date (DueDate): inclusive boundary. The whole local calendar day
+//     is allowed, and the task is overdue from the start of the next local day
+//     (next local midnight) onwards, so at exactly that midnight it is overdue.
+//
+// When both are set, DueAt wins.
 func (t *Task) IsOverdue(now time.Time) bool {
 	if t.Status != StatusOpen {
 		return false
 	}
-	boundary := t.OverdueAt()
-	if boundary == nil {
-		return false
+	if t.DueAt != nil {
+		return now.After(*t.DueAt)
 	}
-	return !now.Before(*boundary)
+	if t.DueDate != nil {
+		boundary := t.OverdueAt()
+		if boundary == nil {
+			return false
+		}
+		return !now.Before(*boundary)
+	}
+	return false
 }
 
 // Complete marks the task as completed.

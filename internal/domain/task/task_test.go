@@ -696,6 +696,8 @@ func TestWithTags_Unicode(t *testing.T) {
 
 // --- Deadline semantics -------------------------------------------------------
 
+// TestTask_IsOverdue_DueAt covers the strict comparison required for an exact
+// deadline: only strictly after DueAt is the task overdue.
 func TestTask_IsOverdue_DueAt(t *testing.T) {
 	task := newTestTask(t)
 	dueAt := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
@@ -708,10 +710,12 @@ func TestTask_IsOverdue_DueAt(t *testing.T) {
 		now  time.Time
 		want bool
 	}{
-		{"before due", dueAt.Add(-time.Hour), false},
+		{"well before due", dueAt.Add(-time.Hour), false},
 		{"one nanosecond before due", dueAt.Add(-time.Nanosecond), false},
-		{"exactly at due", dueAt, true},
-		{"after due", dueAt.Add(time.Second), true},
+		{"exactly at due (strict: still on time)", dueAt, false},
+		{"one nanosecond after due", dueAt.Add(time.Nanosecond), true},
+		{"one second after due", dueAt.Add(time.Second), true},
+		{"well after due", dueAt.Add(time.Hour), true},
 	}
 
 	for _, tt := range tests {
@@ -719,14 +723,26 @@ func TestTask_IsOverdue_DueAt(t *testing.T) {
 			if got := task.IsOverdue(tt.now); got != tt.want {
 				t.Errorf("IsOverdue(%v) = %v, want %v", tt.now, got, tt.want)
 			}
-			overdueAt := task.OverdueAt()
-			if overdueAt == nil {
-				t.Fatal("OverdueAt must not be nil")
-			}
-			if got := !tt.now.Before(*overdueAt); got != tt.want {
-				t.Errorf("IsOverdue disagrees with OverdueAt at %v", tt.now)
-			}
 		})
+	}
+
+	// OverdueAt must keep reporting the exact deadline value.
+	overdueAt := task.OverdueAt()
+	if overdueAt == nil || !overdueAt.Equal(dueAt) {
+		t.Fatalf("OverdueAt() = %v, want %v", overdueAt, dueAt)
+	}
+
+	// Consistency: IsOverdue is true exactly when now is strictly after OverdueAt.
+	for _, now := range []time.Time{
+		dueAt.Add(-time.Nanosecond),
+		dueAt,
+		dueAt.Add(time.Nanosecond),
+		dueAt.Add(time.Hour),
+	} {
+		want := now.After(*overdueAt)
+		if got := task.IsOverdue(now); got != want {
+			t.Errorf("IsOverdue(%v) = %v, want %v (now.After(OverdueAt))", now, got, want)
+		}
 	}
 }
 
@@ -793,6 +809,70 @@ func TestTask_OverdueAt_MatchesIsOverdue(t *testing.T) {
 	}
 }
 
+// TestTask_IsOverdue_ComparisonDiffersByDeadlineType pins the deliberate
+// asymmetry between the two deadline types: the exact deadline uses a strict
+// comparison (equality is still on time) while the calendar deadline uses an
+// inclusive boundary (equality is already overdue).
+func TestTask_IsOverdue_ComparisonDiffersByDeadlineType(t *testing.T) {
+	loc, err := time.LoadLocation("Europe/Moscow")
+	if err != nil {
+		t.Fatalf("LoadLocation failed: %v", err)
+	}
+
+	// Same wall-clock instant for both deadline kinds: 2026-11-10T12:00:00Z.
+	instant := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+
+	t.Run("due_at strict", func(t *testing.T) {
+		task := newTestTask(t)
+		if err := task.Update(fixedNow, WithDueAt(instant)); err != nil {
+			t.Fatalf("Update failed: %v", err)
+		}
+		if task.IsOverdue(instant) {
+			t.Error("at exactly due_at the task must NOT be overdue (strict comparison)")
+		}
+		if !task.IsOverdue(instant.Add(time.Nanosecond)) {
+			t.Error("one nanosecond after due_at the task must be overdue")
+		}
+	})
+
+	t.Run("due_date inclusive at next local midnight", func(t *testing.T) {
+		task := newTestTask(t)
+		due := CalendarDate{Year: 2026, Month: 11, Day: 10}
+		if err := task.Update(fixedNow, WithDueDate(due)); err != nil {
+			t.Fatalf("Update failed: %v", err)
+		}
+		boundary := time.Date(2026, 11, 11, 0, 0, 0, 0, loc)
+		if task.IsOverdue(boundary.Add(-time.Nanosecond)) {
+			t.Error("one nanosecond before next local midnight must NOT be overdue")
+		}
+		if !task.IsOverdue(boundary) {
+			t.Error("exactly at next local midnight the task must be overdue (inclusive)")
+		}
+	})
+
+	t.Run("overdue_at reports the right instant for each type", func(t *testing.T) {
+		exact := newTestTask(t)
+		if err := exact.Update(fixedNow, WithDueAt(instant)); err != nil {
+			t.Fatalf("Update failed: %v", err)
+		}
+		got := exact.OverdueAt()
+		if got == nil || !got.Equal(instant) {
+			t.Errorf("due_at: OverdueAt() = %v, want %v", got, instant)
+		}
+
+		calendar := newTestTask(t)
+		if err := calendar.Update(fixedNow, WithDueDate(CalendarDate{Year: 2026, Month: 11, Day: 10})); err != nil {
+			t.Fatalf("Update failed: %v", err)
+		}
+		got = calendar.OverdueAt()
+		want := time.Date(2026, 11, 11, 0, 0, 0, 0, loc)
+		if got == nil || !got.Equal(want) {
+			t.Errorf("due_date: OverdueAt() = %v, want %v", got, want)
+		}
+	})
+}
+
+// TestTask_IsOverdue_DueAtTakesPriority tests that an exact deadline wins over a calendar one.
 func TestTask_IsOverdue_DueAtTakesPriority(t *testing.T) {
 	task := newTestTask(t)
 	dueAt := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)

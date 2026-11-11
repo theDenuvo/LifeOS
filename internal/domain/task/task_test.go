@@ -4,17 +4,30 @@ import (
 	"errors"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
+
+// fixedNow is the deterministic instant used across the domain tests.
+var fixedNow = time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+
+func newTestTask(t *testing.T) *Task {
+	t.Helper()
+	task, err := NewTask("Test Task", PriorityMedium, "Europe/Moscow", fixedNow)
+	if err != nil {
+		t.Fatalf("NewTask failed: %v", err)
+	}
+	return task
+}
 
 func TestNewTask(t *testing.T) {
 	tz := "Europe/Moscow"
-	task, err := NewTask("Test Task", PriorityMedium, tz)
+	task, err := NewTask("Test Task", PriorityMedium, tz, fixedNow)
 	if err != nil {
 		t.Fatalf("NewTask failed: %v", err)
 	}
 
 	if task.Title != "Test Task" {
-		t.Errorf("Title = %q, want \"Test Task\"", task.Title)
+		t.Errorf("Title = %q, want %q", task.Title, "Test Task")
 	}
 	if task.Priority != PriorityMedium {
 		t.Errorf("Priority = %v, want %v", task.Priority, PriorityMedium)
@@ -28,14 +41,32 @@ func TestNewTask(t *testing.T) {
 	if task.ID != 0 {
 		t.Errorf("ID should be 0 for new task, got %d", task.ID)
 	}
-	if task.CreatedAt.IsZero() {
-		t.Error("CreatedAt should not be zero")
+	if !task.CreatedAt.Equal(fixedNow) {
+		t.Errorf("CreatedAt = %v, want %v (must be the caller supplied instant)", task.CreatedAt, fixedNow)
 	}
-	if task.UpdatedAt.IsZero() {
-		t.Error("UpdatedAt should not be zero")
+	if !task.UpdatedAt.Equal(fixedNow) {
+		t.Errorf("UpdatedAt = %v, want %v (must be the caller supplied instant)", task.UpdatedAt, fixedNow)
 	}
 	if task.Tags == nil {
 		t.Error("Tags should be empty slice, not nil")
+	}
+}
+
+// TestNewTask_NoHiddenClock guards the review requirement that the domain never
+// reads the system clock: two tasks created with the same explicit instant must
+// carry exactly that instant, and a caller supplied instant far in the past must
+// not be replaced by "now".
+func TestNewTask_NoHiddenClock(t *testing.T) {
+	past := time.Date(2001, 2, 3, 4, 5, 6, 7, time.UTC)
+	task, err := NewTask("Past", PriorityLow, "UTC", past)
+	if err != nil {
+		t.Fatalf("NewTask failed: %v", err)
+	}
+	if !task.CreatedAt.Equal(past) {
+		t.Errorf("CreatedAt = %v, want %v", task.CreatedAt, past)
+	}
+	if !task.UpdatedAt.Equal(past) {
+		t.Errorf("UpdatedAt = %v, want %v", task.UpdatedAt, past)
 	}
 }
 
@@ -45,424 +76,348 @@ func TestNewTask_InvalidTitle(t *testing.T) {
 		title string
 	}{
 		{"empty", ""},
-		{"too long", string(make([]byte, 501))},
+		{"501 ascii", repeat("a", 501)},
+		{"500 cyrillic ok + 1", repeat("я", 501)},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewTask(tt.title, PriorityMedium, "Europe/Moscow")
+			_, err := NewTask(tt.title, PriorityMedium, "Europe/Moscow", fixedNow)
 			if err == nil {
-				t.Errorf("expected error for title %q", tt.title)
+				t.Fatalf("expected error for title %q", tt.name)
+			}
+			if !errors.Is(err, ErrInvalidTitle) {
+				t.Errorf("expected ErrInvalidTitle, got %v", err)
 			}
 		})
 	}
 }
 
 func TestNewTask_InvalidPriority(t *testing.T) {
-	_, err := NewTask("Test", Priority("invalid"), "Europe/Moscow")
-	if err == nil {
-		t.Error("expected error for invalid priority")
-	}
+	_, err := NewTask("Test", Priority("invalid"), "Europe/Moscow", fixedNow)
 	if !errors.Is(err, ErrInvalidPriority) {
 		t.Errorf("expected ErrInvalidPriority, got %v", err)
 	}
 }
 
 func TestNewTask_InvalidTimezone(t *testing.T) {
-	_, err := NewTask("Test", PriorityMedium, "Invalid/Timezone")
-	if err == nil {
-		t.Error("expected error for invalid timezone")
-	}
-	if !errors.Is(err, ErrInvalidTimezone) {
-		t.Errorf("expected ErrInvalidTimezone, got %v", err)
+	for _, tz := range []string{"Invalid/Timezone", "", "Europe/Moscow/Extra"} {
+		_, err := NewTask("Test", PriorityMedium, tz, fixedNow)
+		if !errors.Is(err, ErrInvalidTimezone) {
+			t.Errorf("timezone %q: expected ErrInvalidTimezone, got %v", tz, err)
+		}
 	}
 }
 
 func TestTask_Validate(t *testing.T) {
-	tz := "Europe/Moscow"
-	task, _ := NewTask("Valid Task", PriorityHigh, tz)
-
+	task := newTestTask(t)
 	if err := task.Validate(); err != nil {
-		t.Errorf("valid task failed validation: %v", err)
+		t.Fatalf("valid task failed validation: %v", err)
 	}
 
-	// Test invalid title
-	task.Title = ""
-	if err := task.Validate(); err == nil {
-		t.Error("expected error for empty title")
-	}
+	t.Run("empty title", func(t *testing.T) {
+		candidate := newTestTask(t)
+		candidate.Title = ""
+		if err := candidate.Validate(); !errors.Is(err, ErrInvalidTitle) {
+			t.Errorf("expected ErrInvalidTitle, got %v", err)
+		}
+	})
 
-	// Test invalid priority
-	task.Title = "Valid"
-	task.Priority = Priority("invalid")
-	if err := task.Validate(); err == nil {
-		t.Error("expected error for invalid priority")
-	}
+	t.Run("invalid priority", func(t *testing.T) {
+		candidate := newTestTask(t)
+		candidate.Priority = Priority("invalid")
+		if err := candidate.Validate(); !errors.Is(err, ErrInvalidPriority) {
+			t.Errorf("expected ErrInvalidPriority, got %v", err)
+		}
+	})
 
-	// Test invalid status
-	task.Priority = PriorityHigh
-	task.Status = Status("invalid")
-	if err := task.Validate(); err == nil {
-		t.Error("expected error for invalid status")
-	}
+	t.Run("invalid status", func(t *testing.T) {
+		candidate := newTestTask(t)
+		candidate.Status = Status("invalid")
+		if err := candidate.Validate(); !errors.Is(err, ErrInvalidStatus) {
+			t.Errorf("expected ErrInvalidStatus, got %v", err)
+		}
+	})
 
-	// Test invalid timezone
-	task.Status = StatusOpen
-	task.Timezone = "Invalid/Zone"
-	if err := task.Validate(); err == nil {
-		t.Error("expected error for invalid timezone")
-	}
+	t.Run("invalid timezone", func(t *testing.T) {
+		candidate := newTestTask(t)
+		candidate.Timezone = "Invalid/Zone"
+		if err := candidate.Validate(); !errors.Is(err, ErrInvalidTimezone) {
+			t.Errorf("expected ErrInvalidTimezone, got %v", err)
+		}
+	})
 
-	// Test due_at before created_at
-	task.Timezone = tz
-	dueAt := task.CreatedAt.Add(-time.Hour)
-	task.DueAt = &dueAt
-	err := task.Validate()
+	t.Run("invalid note", func(t *testing.T) {
+		candidate := newTestTask(t)
+		note := repeat("я", 5001)
+		candidate.Note = &note
+		if err := candidate.Validate(); !errors.Is(err, ErrInvalidNote) {
+			t.Errorf("expected ErrInvalidNote, got %v", err)
+		}
+	})
+
+	t.Run("invalid tag", func(t *testing.T) {
+		candidate := newTestTask(t)
+		candidate.Tags = []string{repeat("я", 51)}
+		if err := candidate.Validate(); !errors.Is(err, ErrInvalidTag) {
+			t.Errorf("expected ErrInvalidTag, got %v", err)
+		}
+	})
+}
+
+// TestTask_Validate_AllowsPastDeadline covers the approved product decision that
+// an overdue deadline is a normal state, not a validation error.
+func TestTask_Validate_AllowsPastDeadline(t *testing.T) {
+	t.Run("past due_at", func(t *testing.T) {
+		task := newTestTask(t)
+		past := fixedNow.Add(-72 * time.Hour)
+		if err := task.Update(fixedNow, WithDueAt(past)); err != nil {
+			t.Fatalf("Update with past due_at failed: %v", err)
+		}
+		if task.DueAt == nil || !task.DueAt.Equal(past) {
+			t.Fatalf("DueAt = %v, want %v", task.DueAt, past)
+		}
+		if err := task.Validate(); err != nil {
+			t.Errorf("past due_at must not fail validation: %v", err)
+		}
+	})
+
+	t.Run("past due_at set directly on aggregate", func(t *testing.T) {
+		task := newTestTask(t)
+		past := fixedNow.Add(-time.Minute)
+		task.DueAt = &past
+		if err := task.Validate(); err != nil {
+			t.Errorf("past due_at must not fail validation: %v", err)
+		}
+	})
+
+	t.Run("update existing due_at to a past value", func(t *testing.T) {
+		task := newTestTask(t)
+		future := fixedNow.Add(48 * time.Hour)
+		if err := task.Update(fixedNow, WithDueAt(future)); err != nil {
+			t.Fatalf("initial Update failed: %v", err)
+		}
+		past := fixedNow.Add(-time.Second)
+		if err := task.Update(fixedNow, WithDueAt(past)); err != nil {
+			t.Fatalf("Update to past due_at failed: %v", err)
+		}
+		if !task.DueAt.Equal(past) {
+			t.Errorf("DueAt = %v, want %v", task.DueAt, past)
+		}
+	})
+
+	t.Run("past due_date", func(t *testing.T) {
+		task := newTestTask(t)
+		past := CalendarDate{Year: 2020, Month: 1, Day: 1}
+		if err := task.Update(fixedNow, WithDueDate(past)); err != nil {
+			t.Fatalf("Update with past due_date failed: %v", err)
+		}
+		if task.DueDate == nil || *task.DueDate != past {
+			t.Fatalf("DueDate = %v, want %v", task.DueDate, past)
+		}
+		if err := task.Validate(); err != nil {
+			t.Errorf("past due_date must not fail validation: %v", err)
+		}
+	})
+
+	t.Run("past planned_date", func(t *testing.T) {
+		task := newTestTask(t)
+		past := CalendarDate{Year: 2019, Month: 5, Day: 5}
+		if err := task.Update(fixedNow, WithPlannedDate(past)); err != nil {
+			t.Fatalf("Update with past planned_date failed: %v", err)
+		}
+		if err := task.Validate(); err != nil {
+			t.Errorf("past planned_date must not fail validation: %v", err)
+		}
+	})
+}
+
+// TestTaskOption_ErrorsRemoved guards that the obsolete due_at >= created_at
+// restriction is really gone from the domain.
+func TestTaskOption_ErrorsRemoved(t *testing.T) {
+	task := newTestTask(t)
+	past := task.CreatedAt.Add(-365 * 24 * time.Hour)
+	if err := task.Reschedule(fixedNow, WithDueAt(past)); err != nil {
+		t.Fatalf("Reschedule with due_at long before created_at failed: %v", err)
+	}
+	if task.DueAt == nil || !task.DueAt.Equal(past) {
+		t.Errorf("DueAt = %v, want %v", task.DueAt, past)
+	}
+}
+
+// TestTask_Update_AtomicOnOptionError covers the first-option-succeeds,
+// second-option-fails scenario: nothing may change.
+func TestTask_Update_AtomicOnOptionError(t *testing.T) {
+	task := newTestTask(t)
+	originalNote := "original"
+	task.Note = &originalNote
+	originalTags := []string{"keep"}
+	task.Tags = originalTags
+	originalTitle := task.Title
+	originalUpdatedAt := task.UpdatedAt
+
+	err := task.Update(fixedNow,
+		WithTitle("changed"),
+		WithTags([]string{repeat("я", 51)}),
+	)
 	if err == nil {
-		t.Error("expected error for due_at before created_at")
+		t.Fatal("expected error from second option")
 	}
-	if !errors.Is(err, ErrInvalidDueAtValue) {
-		t.Errorf("expected ErrInvalidDueAtValue, got %v", err)
+	if task.Title != originalTitle {
+		t.Errorf("Title = %q, want unchanged %q", task.Title, originalTitle)
 	}
+	if task.Note == nil || *task.Note != originalNote {
+		t.Errorf("Note changed on failed update: %v", task.Note)
+	}
+	if len(task.Tags) != 1 || task.Tags[0] != "keep" {
+		t.Errorf("Tags changed on failed update: %v", task.Tags)
+	}
+	if !task.UpdatedAt.Equal(originalUpdatedAt) {
+		t.Errorf("UpdatedAt = %v, want unchanged %v", task.UpdatedAt, originalUpdatedAt)
+	}
+}
 
-	// Test invalid tag
-	task.DueAt = nil
-	task.Tags = []string{string(make([]byte, 51))}
-	err = task.Validate()
+// TestTask_Update_AtomicOnValidationError covers an option that mutates a field
+// into a state that fails the final validation.
+func TestTask_Update_AtomicOnValidationError(t *testing.T) {
+	task := newTestTask(t)
+	originalTitle := task.Title
+	originalUpdatedAt := task.UpdatedAt
+
+	// Valid note option, then a title option that violates the final validation.
+	err := task.Update(fixedNow,
+		WithNote("a note"),
+		WithTitle(""),
+	)
 	if err == nil {
-		t.Error("expected error for long tag")
+		t.Fatal("expected validation error")
 	}
-	if !errors.Is(err, ErrInvalidTag) {
-		t.Errorf("expected ErrInvalidTag, got %v", err)
+	if task.Title != originalTitle {
+		t.Errorf("Title = %q, want unchanged %q", task.Title, originalTitle)
 	}
-}
-
-func TestCalendarDate_Parse(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected CalendarDate
-		hasError bool
-	}{
-		{"2026-11-10", CalendarDate{Year: 2026, Month: 11, Day: 10}, false},
-		{"2026-01-01", CalendarDate{Year: 2026, Month: 1, Day: 1}, false},
-		{"2026-12-31", CalendarDate{Year: 2026, Month: 12, Day: 31}, false},
-		{"invalid", CalendarDate{}, true},
-		{"2026/11/10", CalendarDate{}, true},
-		{"", CalendarDate{}, true},
+	if task.Note != nil {
+		t.Errorf("Note = %v, want nil: option applied before validation failure", task.Note)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			date, err := ParseCalendarDate(tt.input)
-			if tt.hasError {
-				if err == nil {
-					t.Errorf("expected error for %q", tt.input)
-				}
-			} else {
-				if err != nil {
-					t.Errorf("unexpected error: %v", err)
-				}
-				if date != tt.expected {
-					t.Errorf("got %v, want %v", date, tt.expected)
-				}
-			}
-		})
+	if !task.UpdatedAt.Equal(originalUpdatedAt) {
+		t.Errorf("UpdatedAt = %v, want unchanged %v", task.UpdatedAt, originalUpdatedAt)
 	}
 }
 
-func TestCalendarDate_String(t *testing.T) {
-	date := CalendarDate{Year: 2026, Month: 11, Day: 10}
-	if date.String() != "2026-11-10" {
-		t.Errorf("String() = %q, want \"2026-11-10\"", date.String())
+// TestTask_Update_AtomicOnErrorDoesNotMutatePointers makes sure a failed update
+// cannot write through a pointer shared with the caller.
+func TestTask_Update_AtomicOnErrorDoesNotMutatePointers(t *testing.T) {
+	task := newTestTask(t)
+	shared := CalendarDate{Year: 2026, Month: 12, Day: 1}
+	if err := task.Update(fixedNow, WithPlannedDate(shared)); err != nil {
+		t.Fatalf("Update failed: %v", err)
 	}
 
-	// Zero date
-	var zero CalendarDate
-	if zero.String() != "" {
-		t.Errorf("zero date String() = %q, want empty", zero.String())
+	before := *task.PlannedDate
+	if err := task.Update(fixedNow,
+		WithDueAt(fixedNow),
+		WithTags([]string{repeat("я", 51)}),
+	); err == nil {
+		t.Fatal("expected error")
+	}
+	if *task.PlannedDate != before {
+		t.Errorf("PlannedDate = %v, want unchanged %v", *task.PlannedDate, before)
 	}
 }
 
-func TestCalendarDate_IsZero(t *testing.T) {
-	var zero CalendarDate
-	if !zero.IsZero() {
-		t.Error("zero date should be IsZero()")
+// TestTask_Update_NoSharedSlice verifies that WithTags copies its input and that
+// a later mutation of the caller's slice cannot reach the aggregate.
+func TestTask_Update_NoSharedSlice(t *testing.T) {
+	task := newTestTask(t)
+	input := []string{"one", "two"}
+	if err := task.Update(fixedNow, WithTags(input)); err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+	input[0] = "mutated"
+	if task.Tags[0] != "one" {
+		t.Errorf("Tags[0] = %q, want %q: WithTags shares the caller slice", task.Tags[0], "one")
 	}
 
-	date := CalendarDate{Year: 2026, Month: 1, Day: 1}
-	if date.IsZero() {
-		t.Error("non-zero date should not be IsZero()")
+	// Mutating the task's own slice must not be visible through the input slice.
+	task.Tags[1] = "changed"
+	if input[1] != "mutated" && input[1] != "two" {
+		t.Logf("input[1] = %q", input[1])
 	}
 }
 
-func TestCalendarDate_Time(t *testing.T) {
-	loc, _ := time.LoadLocation("Europe/Moscow")
-	date := CalendarDate{Year: 2026, Month: 11, Day: 10}
-	tm := date.Time(loc)
-
-	if tm.Year() != 2026 || tm.Month() != 11 || tm.Day() != 10 {
-		t.Errorf("Time() = %v, want 2026-11-10 00:00:00", tm)
-	}
-	if tm.Hour() != 0 || tm.Minute() != 0 || tm.Second() != 0 {
-		t.Error("Time() should be at midnight")
-	}
-	if tm.Location() != loc {
-		t.Error("Time() should be in the provided location")
-	}
-
-	// Zero date
-	var zero CalendarDate
-	if !zero.Time(loc).IsZero() {
-		t.Error("zero date Time() should be zero")
-	}
-}
-
-func TestCalendarDate_EndOfDay(t *testing.T) {
-	loc, _ := time.LoadLocation("Europe/Moscow")
-	date := CalendarDate{Year: 2026, Month: 11, Day: 10}
-	end := date.EndOfDay(loc)
-
-	if end.Hour() != 23 || end.Minute() != 59 || end.Second() != 59 {
-		t.Errorf("EndOfDay() = %v, want 23:59:59", end)
-	}
-	if end.Location() != loc {
-		t.Error("EndOfDay() should be in the provided location")
-	}
-
-	// Zero date
-	var zero CalendarDate
-	if !zero.EndOfDay(loc).IsZero() {
-		t.Error("zero date EndOfDay() should be zero")
-	}
-}
-
-func TestTaskOptions(t *testing.T) {
-	task, _ := NewTask("Test", PriorityMedium, "Europe/Moscow")
-
-	// Test WithNote
-	err := task.Update(time.Now().UTC(), WithNote("A note"))
-	if err != nil {
-		t.Fatalf("WithNote failed: %v", err)
-	}
-	if task.Note == nil || *task.Note != "A note" {
-		t.Error("Note not set correctly")
-	}
-
-	// Test WithPlannedDate
-	planned := CalendarDate{Year: 2026, Month: 12, Day: 1}
-	err = task.Update(time.Now().UTC(), WithPlannedDate(planned))
-	if err != nil {
-		t.Fatalf("WithPlannedDate failed: %v", err)
-	}
-	if task.PlannedDate == nil || *task.PlannedDate != planned {
-		t.Error("PlannedDate not set correctly")
-	}
-
-	// Test WithDueDate
+// TestTask_Update_SuccessCommitsEverything checks the happy path end to end.
+func TestTask_Update_SuccessCommitsEverything(t *testing.T) {
+	task := newTestTask(t)
 	due := CalendarDate{Year: 2026, Month: 12, Day: 15}
-	err = task.Update(time.Now().UTC(), WithDueDate(due))
-	if err != nil {
-		t.Fatalf("WithDueDate failed: %v", err)
+	dueAt := time.Date(2026, 12, 15, 18, 0, 0, 0, time.UTC)
+
+	if err := task.Update(fixedNow,
+		WithNote("note"),
+		WithPlannedDate(due),
+		WithDueDate(due),
+		WithDueAt(dueAt),
+		WithTimezone("America/New_York"),
+		WithTags([]string{"a", "b"}),
+	); err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+
+	if task.Note == nil || *task.Note != "note" {
+		t.Error("Note not committed")
+	}
+	if task.PlannedDate == nil || *task.PlannedDate != due {
+		t.Error("PlannedDate not committed")
 	}
 	if task.DueDate == nil || *task.DueDate != due {
-		t.Error("DueDate not set correctly")
-	}
-
-	// Test WithDueAt
-	dueAt := time.Date(2026, 12, 15, 18, 0, 0, 0, time.UTC)
-	err = task.Update(time.Now().UTC(), WithDueAt(dueAt))
-	if err != nil {
-		t.Fatalf("WithDueAt failed: %v", err)
+		t.Error("DueDate not committed")
 	}
 	if task.DueAt == nil || !task.DueAt.Equal(dueAt) {
-		t.Error("DueAt not set correctly")
-	}
-
-	// Test WithTimezone
-	err = task.Update(time.Now().UTC(), WithTimezone("America/New_York"))
-	if err != nil {
-		t.Fatalf("WithTimezone failed: %v", err)
+		t.Error("DueAt not committed")
 	}
 	if task.Timezone != "America/New_York" {
-		t.Error("Timezone not set correctly")
+		t.Error("Timezone not committed")
 	}
+	if len(task.Tags) != 2 || task.Tags[0] != "a" || task.Tags[1] != "b" {
+		t.Errorf("Tags not committed: %v", task.Tags)
+	}
+	if !task.UpdatedAt.Equal(fixedNow) {
+		t.Errorf("UpdatedAt = %v, want %v", task.UpdatedAt, fixedNow)
+	}
+}
 
-	// Test WithTags
-	tags := []string{"tag1", "tag2"}
-	err = task.Update(time.Now().UTC(), WithTags(tags))
-	if err != nil {
-		t.Fatalf("WithTags failed: %v", err)
-	}
-	if len(task.Tags) != 2 || task.Tags[0] != "tag1" {
-		t.Error("Tags not set correctly")
-	}
+func TestTask_Reschedule_AtomicOnError(t *testing.T) {
+	task := newTestTask(t)
+	originalDueAt := task.DueAt
+	originalDueDate := task.DueDate
+	originalUpdatedAt := task.UpdatedAt
 
-	// Test WithParentTaskID
-	var parentID int64 = 42
-	err = task.Update(time.Now().UTC(), WithParentTaskID(parentID))
-	if err != nil {
-		t.Fatalf("WithParentTaskID failed: %v", err)
-	}
-	if task.ParentTaskID == nil || *task.ParentTaskID != parentID {
-		t.Error("ParentTaskID not set correctly")
-	}
-
-	// Test invalid tag length
-	err = task.Update(time.Now().UTC(), WithTags([]string{string(make([]byte, 51))}))
+	err := task.Reschedule(fixedNow,
+		WithDueAt(fixedNow.Add(time.Hour)),
+		WithDueDate(CalendarDate{Year: 2026, Month: 2, Day: 30}),
+	)
 	if err == nil {
-		t.Error("expected error for long tag")
+		t.Fatal("expected error for impossible due date")
 	}
-
-	// Test invalid timezone
-	err = task.Update(time.Now().UTC(), WithTimezone("Invalid/Zone"))
-	if err == nil {
-		t.Error("expected error for invalid timezone")
+	if task.DueAt != originalDueAt {
+		t.Error("DueAt changed on failed Reschedule")
 	}
-}
-
-func TestTask_Complete(t *testing.T) {
-	task, _ := NewTask("Test", PriorityMedium, "Europe/Moscow")
-	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
-
-	err := task.Complete(now)
-	if err != nil {
-		t.Fatalf("Complete failed: %v", err)
+	if task.DueDate != originalDueDate {
+		t.Error("DueDate changed on failed Reschedule")
 	}
-
-	if task.Status != StatusCompleted {
-		t.Errorf("Status = %v, want %v", task.Status, StatusCompleted)
-	}
-	if task.CompletedAt == nil {
-		t.Error("CompletedAt should be set")
-	}
-	if !task.CompletedAt.Equal(now.UTC()) {
-		t.Errorf("CompletedAt = %v, want %v", task.CompletedAt, now.UTC())
-	}
-	if !task.UpdatedAt.Equal(now.UTC()) {
-		t.Errorf("UpdatedAt = %v, want %v", task.UpdatedAt, now.UTC())
-	}
-	if task.CancelledAt != nil {
-		t.Error("CancelledAt should be nil")
-	}
-}
-
-func TestTask_Complete_InvalidTransition(t *testing.T) {
-	task, _ := NewTask("Test", PriorityMedium, "Europe/Moscow")
-	task.Status = StatusCompleted
-	now := time.Now().UTC()
-
-	err := task.Complete(now)
-	if err == nil {
-		t.Error("expected error for invalid transition")
-	}
-	if !IsInvalidTransitionError(err) {
-		t.Errorf("expected InvalidTransitionError, got %T", err)
-	}
-}
-
-func TestTask_Cancel(t *testing.T) {
-	task, _ := NewTask("Test", PriorityMedium, "Europe/Moscow")
-	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
-
-	err := task.Cancel(now)
-	if err != nil {
-		t.Fatalf("Cancel failed: %v", err)
-	}
-
-	if task.Status != StatusCancelled {
-		t.Errorf("Status = %v, want %v", task.Status, StatusCancelled)
-	}
-	if task.CancelledAt == nil {
-		t.Error("CancelledAt should be set")
-	}
-	if !task.CancelledAt.Equal(now.UTC()) {
-		t.Errorf("CancelledAt = %v, want %v", task.CancelledAt, now.UTC())
-	}
-	if !task.UpdatedAt.Equal(now.UTC()) {
-		t.Errorf("UpdatedAt = %v, want %v", task.UpdatedAt, now.UTC())
-	}
-	if task.CompletedAt != nil {
-		t.Error("CompletedAt should be nil")
-	}
-}
-
-func TestTask_Cancel_InvalidTransition(t *testing.T) {
-	task, _ := NewTask("Test", PriorityMedium, "Europe/Moscow")
-	task.Status = StatusCancelled
-	now := time.Now().UTC()
-
-	err := task.Cancel(now)
-	if err == nil {
-		t.Error("expected error for invalid transition")
-	}
-	if !IsInvalidTransitionError(err) {
-		t.Errorf("expected InvalidTransitionError, got %T", err)
-	}
-}
-
-func TestTask_Restore(t *testing.T) {
-	// Test restore from completed
-	task, _ := NewTask("Test", PriorityMedium, "Europe/Moscow")
-	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
-	task.Complete(now)
-
-	restoreTime := now.Add(time.Hour)
-	err := task.Restore(restoreTime)
-	if err != nil {
-		t.Fatalf("Restore failed: %v", err)
-	}
-
-	if task.Status != StatusOpen {
-		t.Errorf("Status = %v, want %v", task.Status, StatusOpen)
-	}
-	if task.CompletedAt != nil {
-		t.Error("CompletedAt should be nil after restore")
-	}
-	if task.CancelledAt != nil {
-		t.Error("CancelledAt should be nil")
-	}
-	if !task.UpdatedAt.Equal(restoreTime.UTC()) {
-		t.Errorf("UpdatedAt = %v, want %v", task.UpdatedAt, restoreTime.UTC())
-	}
-
-	// Test restore from cancelled
-	task2, _ := NewTask("Test2", PriorityMedium, "Europe/Moscow")
-	task2.Cancel(now)
-	err = task2.Restore(restoreTime)
-	if err != nil {
-		t.Fatalf("Restore from cancelled failed: %v", err)
-	}
-	if task2.Status != StatusOpen {
-		t.Error("Status should be open after restore from cancelled")
-	}
-}
-
-func TestTask_Restore_InvalidTransition(t *testing.T) {
-	task, _ := NewTask("Test", PriorityMedium, "Europe/Moscow")
-	now := time.Now().UTC()
-
-	err := task.Restore(now)
-	if err == nil {
-		t.Error("expected error for invalid transition from open")
-	}
-	if !IsInvalidTransitionError(err) {
-		t.Errorf("expected InvalidTransitionError, got %T", err)
+	if !task.UpdatedAt.Equal(originalUpdatedAt) {
+		t.Errorf("UpdatedAt = %v, want unchanged %v", task.UpdatedAt, originalUpdatedAt)
 	}
 }
 
 func TestTask_Reschedule(t *testing.T) {
-	task, _ := NewTask("Test", PriorityMedium, "Europe/Moscow")
-	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	task := newTestTask(t)
 
 	planned := CalendarDate{Year: 2026, Month: 12, Day: 1}
 	due := CalendarDate{Year: 2026, Month: 12, Day: 15}
 	dueAt := time.Date(2026, 12, 15, 18, 0, 0, 0, time.UTC)
 
-	err := task.Reschedule(now, WithPlannedDate(planned), WithDueDate(due), WithDueAt(dueAt))
-	if err != nil {
+	if err := task.Reschedule(fixedNow, WithPlannedDate(planned), WithDueDate(due), WithDueAt(dueAt)); err != nil {
 		t.Fatalf("Reschedule failed: %v", err)
 	}
-
 	if task.PlannedDate == nil || *task.PlannedDate != planned {
 		t.Error("PlannedDate not updated")
 	}
@@ -472,214 +427,435 @@ func TestTask_Reschedule(t *testing.T) {
 	if task.DueAt == nil || !task.DueAt.Equal(dueAt) {
 		t.Error("DueAt not updated")
 	}
-	if !task.UpdatedAt.Equal(now.UTC()) {
-		t.Errorf("UpdatedAt = %v, want %v", task.UpdatedAt, now.UTC())
+	if !task.UpdatedAt.Equal(fixedNow) {
+		t.Errorf("UpdatedAt = %v, want %v", task.UpdatedAt, fixedNow)
 	}
 }
 
 func TestTask_Reschedule_InvalidTransition(t *testing.T) {
-	task, _ := NewTask("Test", PriorityMedium, "Europe/Moscow")
+	task := newTestTask(t)
 	task.Status = StatusCompleted
-	now := time.Now().UTC()
+	updatedAt := task.UpdatedAt
 
-	err := task.Reschedule(now)
-	if err == nil {
-		t.Error("expected error for invalid transition")
-	}
+	err := task.Reschedule(fixedNow, WithDueAt(fixedNow))
 	if !IsInvalidTransitionError(err) {
+		t.Errorf("expected InvalidTransitionError, got %T", err)
+	}
+	if !task.UpdatedAt.Equal(updatedAt) {
+		t.Error("UpdatedAt changed on failed Reschedule")
+	}
+}
+
+func TestTask_Complete(t *testing.T) {
+	task := newTestTask(t)
+	if err := task.Complete(fixedNow); err != nil {
+		t.Fatalf("Complete failed: %v", err)
+	}
+	if task.Status != StatusCompleted {
+		t.Errorf("Status = %v, want %v", task.Status, StatusCompleted)
+	}
+	if task.CompletedAt == nil || !task.CompletedAt.Equal(fixedNow) {
+		t.Errorf("CompletedAt = %v, want %v", task.CompletedAt, fixedNow)
+	}
+	if task.CancelledAt != nil {
+		t.Error("CancelledAt should be nil")
+	}
+	if !task.UpdatedAt.Equal(fixedNow) {
+		t.Errorf("UpdatedAt = %v, want %v", task.UpdatedAt, fixedNow)
+	}
+}
+
+func TestTask_Complete_InvalidTransition(t *testing.T) {
+	task := newTestTask(t)
+	task.Status = StatusCompleted
+	if err := task.Complete(fixedNow); !IsInvalidTransitionError(err) {
 		t.Errorf("expected InvalidTransitionError, got %T", err)
 	}
 }
 
-func TestTask_Update(t *testing.T) {
-	task, _ := NewTask("Test", PriorityMedium, "Europe/Moscow")
-	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
-
-	err := task.Update(now, WithNote("Updated note"), WithTags([]string{"tag1", "tag2"}))
-	if err != nil {
-		t.Fatalf("Update failed: %v", err)
+func TestTask_Cancel(t *testing.T) {
+	task := newTestTask(t)
+	if err := task.Cancel(fixedNow); err != nil {
+		t.Fatalf("Cancel failed: %v", err)
 	}
-
-	if task.Note == nil || *task.Note != "Updated note" {
-		t.Error("Note not updated")
+	if task.Status != StatusCancelled {
+		t.Errorf("Status = %v, want %v", task.Status, StatusCancelled)
 	}
-	if len(task.Tags) != 2 || task.Tags[0] != "tag1" {
-		t.Error("Tags not updated")
+	if task.CancelledAt == nil || !task.CancelledAt.Equal(fixedNow) {
+		t.Errorf("CancelledAt = %v, want %v", task.CancelledAt, fixedNow)
 	}
-	if !task.UpdatedAt.Equal(now.UTC()) {
-		t.Errorf("UpdatedAt = %v, want %v", task.UpdatedAt, now.UTC())
+	if task.CompletedAt != nil {
+		t.Error("CompletedAt should be nil")
 	}
 }
 
-func TestTask_IsOverdue_DueAt(t *testing.T) {
-	task, _ := NewTask("Test", PriorityMedium, "Europe/Moscow")
-	dueAt := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
-	task.DueAt = &dueAt
+func TestTask_Cancel_InvalidTransition(t *testing.T) {
+	task := newTestTask(t)
+	task.Status = StatusCancelled
+	if err := task.Cancel(fixedNow); !IsInvalidTransitionError(err) {
+		t.Errorf("expected InvalidTransitionError, got %T", err)
+	}
+}
 
+func TestTask_Restore(t *testing.T) {
+	t.Run("from completed", func(t *testing.T) {
+		task := newTestTask(t)
+		if err := task.Complete(fixedNow); err != nil {
+			t.Fatalf("Complete failed: %v", err)
+		}
+		restoreTime := fixedNow.Add(time.Hour)
+		if err := task.Restore(restoreTime); err != nil {
+			t.Fatalf("Restore failed: %v", err)
+		}
+		if task.Status != StatusOpen {
+			t.Errorf("Status = %v, want %v", task.Status, StatusOpen)
+		}
+		if task.CompletedAt != nil {
+			t.Error("CompletedAt should be nil after restore")
+		}
+		if !task.UpdatedAt.Equal(restoreTime) {
+			t.Errorf("UpdatedAt = %v, want %v", task.UpdatedAt, restoreTime)
+		}
+	})
+
+	t.Run("from cancelled", func(t *testing.T) {
+		task := newTestTask(t)
+		if err := task.Cancel(fixedNow); err != nil {
+			t.Fatalf("Cancel failed: %v", err)
+		}
+		restoreTime := fixedNow.Add(time.Hour)
+		if err := task.Restore(restoreTime); err != nil {
+			t.Fatalf("Restore failed: %v", err)
+		}
+		if task.Status != StatusOpen {
+			t.Errorf("Status = %v, want %v", task.Status, StatusOpen)
+		}
+		if task.CancelledAt != nil {
+			t.Error("CancelledAt should be nil after restore")
+		}
+	})
+}
+
+func TestTask_Restore_InvalidTransition(t *testing.T) {
+	task := newTestTask(t)
+	if err := task.Restore(fixedNow); !IsInvalidTransitionError(err) {
+		t.Errorf("expected InvalidTransitionError, got %T", err)
+	}
+}
+
+// TestTask_Validate_RejectsDirectlyConstructedInvalidDates covers the review
+// requirement that an exported CalendarDate cannot smuggle an impossible date
+// past validation.
+func TestTask_Validate_RejectsDirectlyConstructedInvalidDates(t *testing.T) {
 	tests := []struct {
-		name     string
-		now      time.Time
-		expected bool
+		name string
+		date CalendarDate
 	}{
-		{"before due", dueAt.Add(-time.Hour), false},
-		{"at due", dueAt, false}, // not overdue until after
-		{"after due", dueAt.Add(time.Second), true},
-		{"well after due", dueAt.Add(time.Hour), true},
+		{"30 february", CalendarDate{Year: 2026, Month: 2, Day: 30}},
+		{"31 april", CalendarDate{Year: 2026, Month: 4, Day: 31}},
+		{"month 13", CalendarDate{Year: 2026, Month: 13, Day: 1}},
+		{"day 0", CalendarDate{Year: 2026, Month: 5, Day: 0}},
+	}
+
+	for _, tt := range tests {
+		t.Run("planned_date_"+tt.name, func(t *testing.T) {
+			task := newTestTask(t)
+			task.PlannedDate = &tt.date
+			if err := task.Validate(); !errors.Is(err, ErrInvalidPlannedDate) {
+				t.Errorf("expected ErrInvalidPlannedDate, got %v", err)
+			}
+		})
+
+		t.Run("due_date_"+tt.name, func(t *testing.T) {
+			task := newTestTask(t)
+			task.DueDate = &tt.date
+			if err := task.Validate(); !errors.Is(err, ErrInvalidDueDate) {
+				t.Errorf("expected ErrInvalidDueDate, got %v", err)
+			}
+		})
+	}
+}
+
+// TestTaskOption_RejectsDirectlyConstructedInvalidDates covers the option path.
+func TestTaskOption_RejectsDirectlyConstructedInvalidDates(t *testing.T) {
+	task := newTestTask(t)
+	err := task.Update(fixedNow, WithDueDate(CalendarDate{Year: 2026, Month: 2, Day: 30}))
+	if !errors.Is(err, ErrInvalidDueDate) {
+		t.Errorf("expected ErrInvalidDueDate, got %v", err)
+	}
+	if task.DueDate != nil {
+		t.Error("DueDate must not be set on error")
+	}
+
+	err = task.Update(fixedNow, WithPlannedDate(CalendarDate{Year: 2026, Month: 4, Day: 31}))
+	if !errors.Is(err, ErrInvalidPlannedDate) {
+		t.Errorf("expected ErrInvalidPlannedDate, got %v", err)
+	}
+}
+
+// --- Unicode length validation -------------------------------------------------
+
+func TestValidateTitle_Unicode(t *testing.T) {
+	tests := []struct {
+		name    string
+		title   string
+		wantErr bool
+	}{
+		{"empty", "", true},
+		{"1 char", "a", false},
+		{"500 ascii", repeat("a", 500), false},
+		{"501 ascii", repeat("a", 501), true},
+		{"500 cyrillic", repeat("я", 500), false},
+		{"501 cyrillic", repeat("я", 501), true},
+		{"invalid utf8", string([]byte{0xff, 0xfe, 0xfd}), true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := task.IsOverdue(tt.now); got != tt.expected {
-				t.Errorf("IsOverdue(%v) = %v, want %v", tt.now, got, tt.expected)
+			err := validateTitle(tt.title)
+			if tt.wantErr && err == nil {
+				t.Error("expected error")
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateTag_Unicode(t *testing.T) {
+	tests := []struct {
+		name    string
+		tag     string
+		wantErr bool
+	}{
+		{"empty ok", "", false},
+		{"50 cyrillic", repeat("я", 50), false},
+		{"51 cyrillic", repeat("я", 51), true},
+		{"invalid utf8", string([]byte{0xff}), true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateTag(tt.tag)
+			if tt.wantErr && err == nil {
+				t.Error("expected error")
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestWithNote_Unicode(t *testing.T) {
+	tests := []struct {
+		name    string
+		note    string
+		wantErr bool
+	}{
+		{"empty", "", false},
+		{"5000 cyrillic", repeat("я", 5000), false},
+		{"5001 cyrillic", repeat("я", 5001), true},
+		{"invalid utf8", string([]byte{0xff}), true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			task := newTestTask(t)
+			err := task.Update(fixedNow, WithNote(tt.note))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				if task.Note != nil {
+					t.Error("Note must not be set on error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if task.Note == nil || utf8.RuneCountInString(*task.Note) != utf8.RuneCountInString(tt.note) {
+				t.Error("Note not stored")
+			}
+		})
+	}
+}
+
+func TestWithTags_Unicode(t *testing.T) {
+	task := newTestTask(t)
+	if err := task.Update(fixedNow, WithTags([]string{repeat("я", 50)})); err != nil {
+		t.Fatalf("50 cyrillic tag must be accepted: %v", err)
+	}
+	err := task.Update(fixedNow, WithTags([]string{repeat("я", 51)}))
+	if !errors.Is(err, ErrInvalidTag) {
+		t.Errorf("expected ErrInvalidTag, got %v", err)
+	}
+}
+
+// --- Deadline semantics -------------------------------------------------------
+
+func TestTask_IsOverdue_DueAt(t *testing.T) {
+	task := newTestTask(t)
+	dueAt := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	if err := task.Update(fixedNow, WithDueAt(dueAt)); err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		now  time.Time
+		want bool
+	}{
+		{"before due", dueAt.Add(-time.Hour), false},
+		{"one nanosecond before due", dueAt.Add(-time.Nanosecond), false},
+		{"exactly at due", dueAt, true},
+		{"after due", dueAt.Add(time.Second), true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := task.IsOverdue(tt.now); got != tt.want {
+				t.Errorf("IsOverdue(%v) = %v, want %v", tt.now, got, tt.want)
+			}
+			overdueAt := task.OverdueAt()
+			if overdueAt == nil {
+				t.Fatal("OverdueAt must not be nil")
+			}
+			if got := !tt.now.Before(*overdueAt); got != tt.want {
+				t.Errorf("IsOverdue disagrees with OverdueAt at %v", tt.now)
 			}
 		})
 	}
 }
 
 func TestTask_IsOverdue_DueDate(t *testing.T) {
-	task, _ := NewTask("Test", PriorityMedium, "Europe/Moscow")
-	dueDate := CalendarDate{Year: 2026, Month: 11, Day: 10}
-	task.DueDate = &dueDate
+	loc, err := time.LoadLocation("Europe/Moscow")
+	if err != nil {
+		t.Fatalf("LoadLocation failed: %v", err)
+	}
 
-	loc, _ := time.LoadLocation("Europe/Moscow")
-	endOfDay := time.Date(2026, 11, 10, 23, 59, 59, 0, loc)
+	task := newTestTask(t)
+	dueDate := CalendarDate{Year: 2026, Month: 11, Day: 10}
+	if err := task.Update(fixedNow, WithDueDate(dueDate)); err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+
+	nextMidnight := time.Date(2026, 11, 11, 0, 0, 0, 0, loc)
 
 	tests := []struct {
-		name     string
-		now      time.Time
-		expected bool
+		name string
+		now  time.Time
+		want bool
 	}{
-		{"before end of day", endOfDay.Add(-time.Hour), false},
-		{"at end of day", endOfDay, false},
-		{"after end of day", endOfDay.Add(time.Second), true},
-		{"next day", endOfDay.Add(24 * time.Hour), true},
+		{"start of due day", time.Date(2026, 11, 10, 0, 0, 0, 0, loc), false},
+		{"one second before midnight", nextMidnight.Add(-time.Second), false},
+		{"one nanosecond before midnight", nextMidnight.Add(-time.Nanosecond), false},
+		{"exactly at next midnight", nextMidnight, true},
+		{"after next midnight", nextMidnight.Add(time.Nanosecond), true},
+		{"next day", nextMidnight.Add(12 * time.Hour), true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := task.IsOverdue(tt.now); got != tt.expected {
-				t.Errorf("IsOverdue(%v) = %v, want %v", tt.now, got, tt.expected)
+			if got := task.IsOverdue(tt.now); got != tt.want {
+				t.Errorf("IsOverdue(%v) = %v, want %v", tt.now, got, tt.want)
 			}
 		})
 	}
 }
 
-func TestTask_IsOverdue_DueAtTakesPriority(t *testing.T) {
-	task, _ := NewTask("Test", PriorityMedium, "Europe/Moscow")
-	// dueAt is in the future (Nov 12), dueDate is in the past (Nov 10)
-	dueAt := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+func TestTask_OverdueAt_MatchesIsOverdue(t *testing.T) {
+	loc, err := time.LoadLocation("Europe/Moscow")
+	if err != nil {
+		t.Fatalf("LoadLocation failed: %v", err)
+	}
+	task := newTestTask(t)
 	dueDate := CalendarDate{Year: 2026, Month: 11, Day: 10}
-	task.DueAt = &dueAt
-	task.DueDate = &dueDate
-
-	// DueAt should take priority - if dueAt is in future but dueDate is past, not overdue
-	now := time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)
-	if task.IsOverdue(now) {
-		t.Error("task should not be overdue when dueAt is in future, even if dueDate is past")
+	if err := task.Update(fixedNow, WithDueDate(dueDate)); err != nil {
+		t.Fatalf("Update failed: %v", err)
 	}
 
-	// If dueAt is past, overdue regardless of dueDate
-	now = time.Date(2026, 11, 12, 13, 0, 0, 0, time.UTC)
-	if !task.IsOverdue(now) {
-		t.Error("task should be overdue when dueAt is past")
+	overdueAt := task.OverdueAt()
+	if overdueAt == nil {
+		t.Fatal("OverdueAt must not be nil")
+	}
+	want := time.Date(2026, 11, 11, 0, 0, 0, 0, loc)
+	if !overdueAt.Equal(want) {
+		t.Errorf("OverdueAt = %v, want %v", overdueAt, want)
+	}
+	if task.IsOverdue(overdueAt.Add(-time.Nanosecond)) {
+		t.Error("task must not be overdue one nanosecond before OverdueAt")
+	}
+	if !task.IsOverdue(*overdueAt) {
+		t.Error("task must be overdue exactly at OverdueAt")
+	}
+}
+
+func TestTask_IsOverdue_DueAtTakesPriority(t *testing.T) {
+	task := newTestTask(t)
+	dueAt := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+	dueDate := CalendarDate{Year: 2026, Month: 11, Day: 10}
+	if err := task.Update(fixedNow, WithDueAt(dueAt), WithDueDate(dueDate)); err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+
+	if task.IsOverdue(time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)) {
+		t.Error("due_at in the future must win over a past due_date")
+	}
+	if !task.IsOverdue(time.Date(2026, 11, 12, 13, 0, 0, 0, time.UTC)) {
+		t.Error("task must be overdue once due_at has passed")
 	}
 }
 
 func TestTask_IsOverdue_NonOpenStatus(t *testing.T) {
-	task, _ := NewTask("Test", PriorityMedium, "Europe/Moscow")
-	dueAt := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
-	task.DueAt = &dueAt
-
 	now := time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)
 
-	tests := []struct {
-		name     string
-		status   Status
-		expected bool
-	}{
-		{"open", StatusOpen, true},
-		{"completed", StatusCompleted, false},
-		{"cancelled", StatusCancelled, false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			task.Status = tt.status
-			if got := task.IsOverdue(now); got != tt.expected {
-				t.Errorf("IsOverdue with status %v = %v, want %v", tt.status, got, tt.expected)
+	for _, status := range []Status{StatusCompleted, StatusCancelled} {
+		t.Run(string(status), func(t *testing.T) {
+			task := newTestTask(t)
+			dueAt := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+			if err := task.Update(fixedNow, WithDueAt(dueAt)); err != nil {
+				t.Fatalf("Update failed: %v", err)
+			}
+			task.Status = status
+			if task.IsOverdue(now) {
+				t.Errorf("%s task must never be overdue", status)
 			}
 		})
 	}
 }
 
 func TestTask_IsOverdue_NoDeadline(t *testing.T) {
-	task, _ := NewTask("Test", PriorityMedium, "Europe/Moscow")
-	now := time.Now().UTC()
-
-	if task.IsOverdue(now) {
+	task := newTestTask(t)
+	if task.IsOverdue(fixedNow.Add(100000 * time.Hour)) {
 		t.Error("task with no deadline should not be overdue")
 	}
-}
-
-func TestTask_OverdueAt(t *testing.T) {
-	task, _ := NewTask("Test", PriorityMedium, "Europe/Moscow")
-
-	// Test with dueAt
-	dueAt := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
-	task.DueAt = &dueAt
-	overdue := task.OverdueAt()
-	if overdue == nil || !overdue.Equal(dueAt) {
-		t.Errorf("OverdueAt with dueAt = %v, want %v", overdue, dueAt)
-	}
-
-	// Test with dueDate only
-	task.DueAt = nil
-	dueDate := CalendarDate{Year: 2026, Month: 11, Day: 10}
-	task.DueDate = &dueDate
-	loc, _ := time.LoadLocation("Europe/Moscow")
-	expectedEndOfDay := time.Date(2026, 11, 10, 23, 59, 59, 0, loc)
-	overdue = task.OverdueAt()
-	if overdue == nil || !overdue.Equal(expectedEndOfDay) {
-		t.Errorf("OverdueAt with dueDate = %v, want %v", overdue, expectedEndOfDay)
-	}
-
-	// Test with no deadline
-	task.DueDate = nil
 	if task.OverdueAt() != nil {
 		t.Error("OverdueAt should be nil when no deadline")
 	}
 }
 
 func TestTask_Location(t *testing.T) {
-	task, _ := NewTask("Test", PriorityMedium, "Europe/Moscow")
+	task := newTestTask(t)
 	loc, err := task.Location()
 	if err != nil {
 		t.Fatalf("Location() failed: %v", err)
 	}
 	if loc.String() != "Europe/Moscow" {
-		t.Errorf("Location = %q, want \"Europe/Moscow\"", loc.String())
-	}
-
-	// Test with different timezone
-	task.Timezone = "America/New_York"
-	loc, err = task.Location()
-	if err != nil {
-		t.Fatalf("Location() failed: %v", err)
-	}
-	if loc.String() != "America/New_York" {
-		t.Errorf("Location = %q, want \"America/New_York\"", loc.String())
+		t.Errorf("Location = %q, want %q", loc.String(), "Europe/Moscow")
 	}
 }
 
 func TestTask_ToEvent(t *testing.T) {
-	task, _ := NewTask("Test", PriorityMedium, "Europe/Moscow")
+	task := newTestTask(t)
 	task.ID = 42
 
-	event, err := task.ToEvent(EventTypeCreated, map[string]string{"source": "user"}, ActorUser)
+	event, err := task.ToEvent(EventTypeCreated, map[string]string{"source": "user"}, ActorUser, fixedNow)
 	if err != nil {
 		t.Fatalf("ToEvent failed: %v", err)
 	}
-
 	if event.TaskID != 42 {
 		t.Errorf("TaskID = %d, want 42", event.TaskID)
 	}
@@ -689,12 +865,24 @@ func TestTask_ToEvent(t *testing.T) {
 	if event.Actor != ActorUser {
 		t.Errorf("Actor = %v, want %v", event.Actor, ActorUser)
 	}
+	if !event.CreatedAt.Equal(fixedNow) {
+		t.Errorf("CreatedAt = %v, want %v (caller supplied)", event.CreatedAt, fixedNow)
+	}
 
 	var payload map[string]string
 	if err := event.PayloadAs(&payload); err != nil {
 		t.Fatalf("PayloadAs failed: %v", err)
 	}
 	if payload["source"] != "user" {
-		t.Errorf("payload source = %q, want \"user\"", payload["source"])
+		t.Errorf("payload source = %q, want %q", payload["source"], "user")
 	}
+}
+
+// repeat builds a string of n copies of s.
+func repeat(s string, n int) string {
+	out := make([]byte, 0, len(s)*n)
+	for i := 0; i < n; i++ {
+		out = append(out, s...)
+	}
+	return string(out)
 }

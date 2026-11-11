@@ -84,8 +84,14 @@ type TaskEvent struct {
 	CreatedAt time.Time // UTC
 }
 
-// NewTaskEvent creates a new task event with the current time.
-func NewTaskEvent(taskID int64, eventType EventType, payload interface{}, actor Actor) (*TaskEvent, error) {
+// NewTaskEvent creates a new task event.
+func NewTaskEvent(taskID int64, eventType EventType, payload interface{}, actor Actor, createdAt time.Time) (*TaskEvent, error) {
+	if !eventType.IsValid() {
+		return nil, ErrInvalidEventType
+	}
+	if !actor.IsValid() {
+		return nil, ErrInvalidActor
+	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -95,7 +101,7 @@ func NewTaskEvent(taskID int64, eventType EventType, payload interface{}, actor 
 		Type:      eventType,
 		Payload:   payloadBytes,
 		Actor:     actor,
-		CreatedAt: time.Now().UTC(),
+		CreatedAt: createdAt.UTC(),
 	}, nil
 }
 

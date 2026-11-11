@@ -47,27 +47,23 @@
 
 **Валидация (Domain):**
 - `title` не пустой, ≤ 500 символов
+- `note` ≤ 5000 символов
 - `priority` ∈ {low, medium, high}
 - `status` ∈ {open, completed, cancelled}
 - Переходы статусов: `open → completed`, `open → cancelled`, `completed → open`, `cancelled → open`
-- `due_at` если задан — должен быть ≥ `created_at`
-- `planned_date` и `due_date` — календарные даты (DATE), не смещаются при смене TZ
+- `planned_date` и `due_date` — реальные календарные даты (год 1–9999, месяц 1–12, день в пределах месяца с учётом високосных лет); zero value означает «дата не задана»
 - `timezone` — валидная IANA TZ
+- **Прошедший дедлайн не является ошибкой.** `due_at` и `due_date` могут быть в прошлом как при создании, так и при обновлении; просроченность вычисляется через `IsOverdue`
+- Ограничения длины строк измеряются в **Unicode code points** (`utf8.RuneCountInString`), не в байтах
 
 **Просроченность (вычисляется, не хранится):**
-```go
-func (t *Task) IsOverdue(now time.Time) bool {
-    if t.Status != "open" { return false }
-    if t.DueAt != nil { return now.After(*t.DueAt) }
-    if t.DueDate != nil {
-        // due_date — конец дня в таймзоне задачи
-        loc, _ := time.LoadLocation(t.Timezone)
-        endOfDay := time.Date(t.DueDate.Year(), t.DueDate.Month(), t.DueDate.Day(), 23, 59, 59, 0, loc)
-        return now.After(endOfDay)
-    }
-    return false
-}
-```
+
+`OverdueAt()` возвращает момент, начиная с которого задача считается просроченной:
+- если задан `due_at` — это ровно `due_at`;
+- если задан только `due_date` — это **начало следующего календарного дня** (локальная полночь) в таймзоне задачи, вычисленное календарной арифметикой (учитывает DST: локальный день может длиться 23 или 25 часов);
+- если дедлайна нет — `nil`.
+
+`IsOverdue(now)` возвращает `true`, начиная ровно с `OverdueAt()` (включительно). Завершённые и отменённые задачи никогда не считаются просроченными. Приоритет `due_at` над `due_date` сохраняется.
 
 ---
 

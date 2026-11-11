@@ -191,11 +191,14 @@ POST /api/v1/tasks
 
 **Валидация:**
 - `title` required, 1-500 chars
+- `note` ≤ 5000 chars
 - `priority` ∈ {low,medium,high}, default medium
-- `planned_date`, `due_date` — валидные DATE
+- `planned_date`, `due_date` — валидные календарные DATE (реальная дата, без «тихой» нормализации)
 - `due_at` — валидный RFC3339 UTC
 - `timezone` — валидная IANA TZ, default Europe/Moscow
 - `tags` — массив строк, каждая ≤ 50 chars
+- `due_at` / `due_date` в прошлом допустимы — это не ошибка валидации (см. `overdue`)
+- Ограничения длины строк измеряются в Unicode code points
 
 **Response 201:** Task (с заполненными `id`, `created_at`, `updated_at`, `status: "open"`)
 

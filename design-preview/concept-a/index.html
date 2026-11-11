@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LifeOS — Premium Workspace</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/main.css">
+</head>
+<body data-concept="premium-workspace" data-screen="today">
+<div class="app">
+<!-- Command Palette Overlay -->
+<div id="command-palette" class="command-palette" role="dialog" aria-modal="true" aria-label="Командная палитра">
+<div class="command-palette__backdrop"></div>
+<div class="command-palette__window">
+<div class="command-palette__header">
+<kbd class="command-palette__shortcut">⌘K</kbd>
+<input type="text" class="command-palette__input" placeholder="Поиск команд, задач, проектов…" autocomplete="off" spellcheck="false" aria-label="Поиск">
+<kbd class="command-palette__shortcut">↵</kbd>
+</div>
+<div class="command-palette__results" role="listbox" aria-label="Результаты поиска"></div>
+<div class="command-palette__footer">
+<span class="command-palette__hint">↑↓ навигация · ↵ выполнить · Esc закрыть</span>
+</div>
+</div>
+</div>
+
+<!-- Top Chrome -->
+<header class="chrome" role="banner">
+<div class="chrome__left">
+<button class="chrome__menu" aria-label="Меню навигации" aria-expanded="false" aria-controls="nav-panel">
+<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+</button>
+<div class="chrome__brand" aria-label="LifeOS Premium Workspace">
+<svg class="chrome__logo" width="28" height="28" viewBox="0 0 28 28" fill="none" aria-hidden="true"><rect width="28" height="28" rx="6" fill="currentColor"/><path d="M9 10h10M9 14h7M9 18h4" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>
+<span class="chrome__title">LifeOS</span>
+<span class="chrome__badge">Premium</span>
+</div>
+</div>
+
+<div class="chrome__center" role="navigation" aria-label="Основные разделы">
+<nav class="chrome__tabs" role="tablist">
+<button role="tab" class="chrome__tab is-active" data-screen="today" aria-selected="true" aria-controls="panel-today">
+<span class="chrome__tab-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 4h10v8H3zM7 8h6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+<span class="chrome__tab-label">Сегодня</span>
+<span class="chrome__tab-count" aria-label="5 активных задач">5</span>
+</button>
+<button role="tab" class="chrome__tab" data-screen="inbox" aria-selected="false" aria-controls="panel-inbox">
+<span class="chrome__tab-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M12 4H4a2 2 0 00-2 2v8a2 2 0 002 2h8a2 2 0 002-2V8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M8 12h4M8 8h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></span>
+<span class="chrome__tab-label">Входящие</span>
+<span class="chrome__tab-count" aria-label="5 новых элементов">5</span>
+</button>
+<button role="tab" class="chrome__tab" data-screen="all" aria-selected="false" aria-controls="panel-all">
+<span class="chrome__tab-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="10" rx="1" stroke="currentColor" stroke-width="1.5"/><path d="M2 7h12M6 3v10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></span>
+<span class="chrome__tab-label">Все задачи</span>
+<span class="chrome__tab-count" aria-label="10 задач всего">10</span>
+</button>
+<button role="tab" class="chrome__tab" data-screen="assistant" aria-selected="false" aria-controls="panel-assistant">
+<span class="chrome__tab-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 2a6 6 0 100 12A6 6 0 008 2zm0 1a5 5 0 110 10 5 5 0 010-10z" stroke="currentColor" stroke-width="1.5"/><path d="M8 6v4M8 10v.01" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></span>
+<span class="chrome__tab-label">Ассистент</span>
+</button>
+</nav>
+</div>
+
+<div class="chrome__right">
+<div class="chrome__search" role="search">
+<svg class="chrome__search-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.5"/><path d="M11 11l4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+<input type="search" class="chrome__search-input" placeholder="Найти задачу, проект, тег…" aria-label="Поиск по задачам" autocomplete="off">
+<kbd class="chrome__search-shortcut" aria-hidden="true">⌘F</kbd>
+</div>
+<button class="chrome__quick-add" aria-label="Быстрое добавление задачи" aria-expanded="false" aria-controls="quick-add-panel">
+<svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true"><circle cx="9" cy="9" r="8" stroke="currentColor" stroke-width="1.5"/><path d="M9 5v8M5 9h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+</button>
+<div class="chrome__user" role="button" aria-label="Профиль пользователя" tabindex="0">
+<svg class="chrome__avatar" width="28" height="28" viewBox="0 0 28 28" fill="none" aria-hidden="true"><circle cx="14" cy="14" r="14" fill="currentColor"/><path d="M14 10a4 4 0 100 8 4 4 0 000-8zM14 22a8 8 0 01-8-8h16a8 8 0 01-8 8z" fill="white"/></svg>
+</div>
+</div>
+</header>
+
+<!-- Nav Panel (Mobile/Responsive) -->
+<aside id="nav-panel" class="nav-panel" role="navigation" aria-label="Навигация" aria-hidden="true">
+<div class="nav-panel__backdrop"></div>
+<div class="nav-panel__content">
+<nav class="nav-panel__list" role="list">
+<button class="nav-panel__item is-active" data-screen="today" role="listitem">
+<svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M4 5h12v10H4zM8 9h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+<span>Сегодня</span>
+<span class="nav-panel__count">5</span>
+</button>
+<button class="nav-panel__item" data-screen="inbox" role="listitem">
+<svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M14 5H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2V10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 14h4M10 10h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+<span>Входящие</span>
+<span class="nav-panel__count">5</span>
+</button>
+<button class="nav-panel__item" data-screen="all" role="listitem">
+<svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><rect x="3" y="4" width="14" height="12" rx="1.5" stroke="currentColor" stroke-width="1.5"/><path d="M3 9h14M8 4v12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+<span>Все задачи</span>
+<span class="nav-panel__count">10</span>
+</button>
+<button class="nav-panel__item" data-screen="assistant" role="listitem">
+<svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 3a7 7 0 100 14A7 7 0 0010 3zm0 1a6 6 0 110 12 6 6 0 010-12z" stroke="currentColor" stroke-width="1.5"/><path d="M10 7v5M10 12v.01" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+<span>Ассистент</span>
+</button>
+</nav>
+<div class="nav-panel__shortcuts">
+<h3 class="nav-panel__section">Быстрые действия</h3>
+<ul role="list">
+<li><kbd>⌘N</kbd> Новая задача</li>
+<li><kbd>⌘K</kbd> Командная палитра</li>
+<li><kbd>⌘F</kbd> Поиск</li>
+<li><kbd>⌘/</kbd> Справка</li>
+</ul>
+</div>
+</div>
+</aside>
+
+<!-- Quick Add Panel -->
+<aside id="quick-add-panel" class="quick-add" role="dialog" aria-modal="true" aria-label="Быстрое добавление задачи" aria-hidden="true">
+<div class="quick-add__backdrop"></div>
+<div class="quick-add__window">
+<header class="quick-add__header">
+<h2>Новая задача</h2>
+<button class="quick-add__close" aria-label="Закрыть">&times;</button>
+</header>
+<form class="quick-add__form" id="quick-add-form">
+<div class="field">
+<label for="qa-title">Название <span class="field__required" aria-hidden="true">*</span></label>
+<input type="text" id="qa-title" name="title" required placeholder="Что нужно сделать?" autocomplete="off" aria-describedby="qa-title-hint">
+<span id="qa-title-hint" class="field__hint">Enter — сохранить, Shift+Enter — новая строка</span>
+</div>
+<div class="field-row">
+<div class="field">
+<label for="qa-priority">Приоритет</label>
+<select id="qa-priority" name="priority">
+<option value="low">Низкий</option>
+<option value="medium" selected>Средний</option>
+<option value="high">Высокий</option>
+</select>
+</div>
+<div class="field">
+<label for="qa-deadline">Дедлайн</label>
+<input type="date" id="qa-deadline" name="deadline">
+</div>
+</div>
+<div class="field">
+<label for="qa-project">Проект</label>
+<select id="qa-project" name="project">
+<option value="">Без проекта</option>
+<option value="Работа">Работа</option>
+<option value="Личное">Личное</option>
+<option value="Обучение">Обучение</option>
+<option value="Финансы">Финансы</option>
+<option value="Здоровье">Здоровье</option>
+<option value="LifeOS">LifeOS</option>
+</select>
+</div>
+<div class="field">
+<label for="qa-tags">Теги</label>
+<input type="text" id="qa-tags" name="tags" placeholder="через запятую: дизайн, презентация" autocomplete="off">
+</div>
+<div class="field">
+<label for="qa-note">Заметка</label>
+<textarea id="qa-note" name="note" rows="3" placeholder="Дополнительные детали…"></textarea>
+</div>
+<div class="quick-add__actions">
+<button type="button" class="btn btn--ghost quick-add__cancel">Отмена</button>
+<button type="submit" class="btn btn--primary">Создать задачу</button>
+</div>
+</form>
+</div>
+</aside>
+
+<!-- Main Content -->
+<main class="main" role="main">
+<!-- Screen: Today -->
+<section id="panel-today" class="screen screen--today is-active" role="tabpanel" aria-labelledby="tab-today">
+<div class="screen__header">
+<div class="screen__title-group">
+<h1 class="screen__title">Сегодня</h1>
+<p class="screen__subtitle">Понедельник, 9 ноября 2026</p>
+</div>
+<div class="screen__actions">
+<button class="btn btn--ghost btn--icon" aria-label="Фокус-режим" data-action="focus-mode">
+<svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true"><path d="M4 9h10M9 4v10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M14 9h2M9 14v2M2 9h2M9 2v2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+</button>
+<button class="btn btn--ghost btn--icon" aria-label="Настройки вида" data-action="view-options">
+<svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true"><circle cx="9" cy="9" r="2" fill="currentColor"/><path d="M9 2v2M9 14v2M2 9h2M14 9h2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+</button>
+</div>
+</div>
+
+<!-- Today Stats Bar -->
+<div class="today-stats" role="status" aria-live="polite">
+<div class="today-stat">
+<span class="today-stat__value" id="stat-active">5</span>
+<span class="today-stat__label">Активных</span>
+</div>
+<div class="today-stat today-stat--warn">
+<span class="today-stat__value" id="stat-overdue">1</span>
+<span class="today-stat__label">Просрочено</span>
+</div>
+<div class="today-stat today-stat--high">
+<span class="today-stat__value" id="stat-high">3</span>
+<span class="today-stat__label">Высокий приоритет</span>
+</div>
+<div class="today-stat">
+<span class="today-stat__value" id="stat-done">1</span>
+<span class="today-stat__label">Выполнено</span>
+</div>
+<div class="today-stat today-stat--time">
+<span class="today-stat__value" id="stat-time">~4ч 30м</span>
+<span class="today-stat__label">Оценка времени</span>
+</div>
+</div>
+
+<!-- Task List -->
+<ul class="task-list" role="list" aria-label="Задачи на сегодня" id="today-list">
+<!-- Tasks rendered by JS -->
+</ul>
+
+<!-- Empty State -->
+<div class="empty-state" id="today-empty" hidden>
+<svg class="empty-state__icon" width="64" height="64" viewBox="0 0 64 64" fill="none" aria-hidden="true"><circle cx="32" cy="32" r="28" stroke="currentColor" stroke-width="2"/><path d="M32 20v24M20 32h24" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+<h2 class="empty-state__title">На сегодня задач нет</h2>
+<p class="empty-state__text">Всё сделано. Добавьте задачу через <kbd>⌘N</kbd> или попросите ассистента спланировать день.</p>
+<button class="btn btn--primary" data-action="quick-add">Добавить задачу</button>
+</div>
+</section>
+
+<!-- Screen: Inbox -->
+<section id="panel-inbox" class="screen screen--inbox" role="tabpanel" aria-labelledby="tab-inbox" hidden>
+<div class="screen__header">
+<div class="screen__title-group">
+<h1 class="screen__title">Входящие</h1>
+<p class="screen__subtitle">5 элементов к обработке</p>
+</div>
+<div class="screen__actions">
+<button class="btn btn--primary" data-action="inbox-process-all">Обработать всё</button>
+</div>
+</div>
+
+<div class="inbox" role="list" aria-label="Входящие задачи" id="inbox-list">
+<!-- Inbox items rendered by JS -->
+</div>
+
+<div class="empty-state" id="inbox-empty" hidden>
+<svg class="empty-state__icon" width="64" height="64" viewBox="0 0 64 64" fill="none" aria-hidden="true"><path d="M44 18H20a4 4 0 00-4 4v20a4 4 0 004 4h24a4 4 0 004-4V28" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M32 12v6M24 18h16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+<h2 class="empty-state__title">Входящие пусты</h2>
+<p class="empty-state__text">Быстрый ввод: <kbd>⌘N</kbd> или перетащите письмо, скриншот, голосовое сообщение.</p>
+</div>
+</section>
+
+<!-- Screen: All Tasks -->
+<section id="panel-all" class="screen screen--all" role="tabpanel" aria-labelledby="tab-all" hidden>
+<div class="screen__header">
+<div class="screen__title-group">
+<h1 class="screen__title">Все задачи</h1>
+<p class="screen__subtitle">10 задач · 5 проектов</p>
+</div>
+<div class="screen__toolbar">
+<div class="toolbar__group" role="group" aria-label="Вид">
+<button class="toolbar__btn is-active" data-view="table" aria-label="Таблица" aria-pressed="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="1" y="1" width="14" height="14" rx="1" stroke="currentColor" stroke-width="1.5"/><path d="M1 6h14M6 1v14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
+<button class="toolbar__btn" data-view="board" aria-label="Доска" aria-pressed="false"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="1" y="1" width="4" height="14" rx="1" stroke="currentColor" stroke-width="1.5"/><rect x="6" y="1" width="4" height="14" rx="1" stroke="currentColor" stroke-width="1.5"/><rect x="11" y="1" width="4" height="14" rx="1" stroke="currentColor" stroke-width="1.5"/></svg></button>
+<button class="toolbar__btn" data-view="list" aria-label="Список" aria-pressed="false"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
+</div>
+<div class="toolbar__group" role="group" aria-label="Фильтры">
+<select class="toolbar__select" id="filter-project" aria-label="Фильтр по проекту"><option value="">Все проекты</option></select>
+<select class="toolbar__select" id="filter-status" aria-label="Фильтр по статусу"><option value="">Все статусы</option><option value="active">Активные</option><option value="overdue">Просроченные</option><option value="completed">Выполненные</option></select>
+<select class="toolbar__select" id="filter-priority" aria-label="Фильтр по приоритету"><option value="">Все приоритеты</option><option value="high">Высокий</option><option value="medium">Средний</option><option value="low">Низкий</option></select>
+</div>
+<div class="toolbar__group">
+<button class="btn btn--ghost btn--icon" aria-label="Массовые действия" data-action="bulk-actions"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="4" cy="8" r="1.5" fill="currentColor"/><circle cx="12" cy="8" r="1.5" fill="currentColor"/><circle cx="8" cy="8" r="1.5" fill="currentColor"/></svg></button>
+</div>
+</div>
+</div>
+
+<!-- Table View -->
+<div class="tasks-table-wrapper" id="tasks-table-view">
+<table class="tasks-table" role="grid" aria-label="Таблица задач">
+<thead>
+<tr role="row">
+<th scope="col" aria-sort="none"><input type="checkbox" class="table__select-all" aria-label="Выбрать все"></th>
+<th scope="col" aria-sort="ascending">Задача</th>
+<th scope="col">Проект</th>
+<th scope="col">Приоритет</th>
+<th scope="col">Дедлайн</th>
+<th scope="col">Статус</th>
+<th scope="col"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M12 4l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></th>
+</tr>
+</thead>
+<tbody id="tasks-table-body" role="rowgroup">
+<!-- Rows rendered by JS -->
+</tbody>
+</table>
+</div>
+
+<!-- Board View -->
+<div class="tasks-board" id="tasks-board-view" hidden role="list" aria-label="Доска задач">
+<!-- Columns rendered by JS -->
+</div>
+
+<!-- List View -->
+<ul class="task-list task-list--compact" id="tasks-list-view" hidden role="list" aria-label="Список задач">
+<!-- Items rendered by JS -->
+</ul>
+
+<div class="empty-state" id="all-empty" hidden>
+<svg class="empty-state__icon" width="64" height="64" viewBox="0 0 64 64" fill="none" aria-hidden="true"><rect x="10" y="12" width="44" height="40" rx="3" stroke="currentColor" stroke-width="2"/><path d="M18 20h28M18 28h20M18 36h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+<h2 class="empty-state__title">Задач нет</h2>
+<p class="empty-state__text">Создайте первую задачу: <kbd>⌘N</kbd></p>
+<button class="btn btn--primary" data-action="quick-add">Новая задача</button>
+</div>
+</section>
+
+<!-- Screen: Assistant -->
+<section id="panel-assistant" class="screen screen--assistant" role="tabpanel" aria-labelledby="tab-assistant" hidden>
+<div class="screen__header">
+<div class="screen__title-group">
+<h1 class="screen__title">Ассистент</h1>
+<p class="screen__subtitle">Готов помочь с задачами и планированием</p>
+</div>
+<div class="screen__actions">
+<button class="btn btn--ghost btn--icon" aria-label="Очистить историю" data-action="assistant-clear"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true"><path d="M5 5l8 8M13 5l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
+</div>
+</div>
+
+<div class="assistant" role="log" aria-live="polite" aria-label="Диалог с ассистентом" id="assistant-messages">
+<!-- Messages rendered by JS -->
+</div>
+
+<form class="assistant__composer" id="assistant-composer" aria-label="Сообщение ассистенту">
+<div class="assistant__composer-input">
+<svg class="assistant__mic" width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 4a4 4 0 014 4v6a2 2 0 01-2 2h-4v4h-4v-4H8a2 2 0 01-2-2V8a4 4 0 014-4zM10 2a6 6 0 00-6 6v6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+<textarea id="assistant-input" name="message" rows="1" placeholder="Напишите задачу, вопрос или просьбу…" aria-label="Ваше сообщение" data-autosize></textarea>
+</div>
+<div class="assistant__composer-actions">
+<button type="button" class="btn btn--ghost btn--icon" aria-label="Прикрепить файл" data-action="assistant-attach"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true"><path d="M13.5 4.5L9 9l-4.5-4.5M9 9v9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+<button type="submit" class="btn btn--primary assistant__send" aria-label="Отправить">
+<svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true"><path d="M14 9l-6 6-6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+</button>
+</div>
+<div class="assistant__hints" aria-label="Подсказки команд">
+<span class="assistant__hint" data-insert="@today">@today</span>
+<span class="assistant__hint" data-insert="@inbox">@inbox</span>
+<span class="assistant__hint" data-insert="@plan">@plan</span>
+<span class="assistant__hint" data-insert="@summary">@summary</span>
+</div>
+</form>
+</section>
+</main>
+
+<!-- Focus Mode Overlay -->
+<div id="focus-overlay" class="focus-overlay" role="dialog" aria-modal="true" aria-label="Фокус-режим" aria-hidden="true">
+<div class="focus-overlay__backdrop"></div>
+<div class="focus-overlay__window">
+<header class="focus-overlay__header">
+<h2 class="focus-overlay__title">Фокус: <span id="focus-task-title">—</span></h2>
+<div class="focus-overlay__timer" role="timer" aria-live="off" id="focus-timer">25:00</div>
+<button class="focus-overlay__close" aria-label="Выйти из фокуса">&times;</button>
+</header>
+<div class="focus-overlay__body">
+<div class="focus-overlay__task" id="focus-task-content">
+<!-- Task details rendered by JS -->
+</div>
+<div class="focus-overlay__actions">
+<button class="btn btn--primary" id="focus-start">Начать</button>
+<button class="btn btn--ghost" id="focus-pause" disabled>Пауза</button>
+<button class="btn btn--ghost" id="focus-skip">Пропустить</button>
+<button class="btn btn--ghost btn--danger" id="focus-end">Завершить</button>
+</div>
+</div>
+</div>
+</div>
+
+<!-- Toast Container -->
+<div id="toast-container" class="toast-container" role="status" aria-live="polite" aria-atomic="true"></div>
+</div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

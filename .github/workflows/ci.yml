@@ -1,0 +1,153 @@
+name: CI
+
+on:
+  push:
+    branches: [main, design/phase-0-concepts, architecture/*]
+  pull_request:
+    branches: [main, design/phase-0-concepts]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: TypeScript check
+        working-directory: web
+        run: npm run check
+
+      - name: Build
+        working-directory: web
+        run: npm run build
+
+      - name: Upload frontend build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build
+          path: web/build/
+          retention-days: 1
+
+  openapi-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OpenAPI validator
+        run: npm install -g @redocly/cli@latest
+
+      - name: Validate OpenAPI spec
+        run: redocly lint api/openapi.yaml --config=api/redocly.yaml
+
+  go-build-windows:
+    runs-on: windows-latest
+    needs: [frontend-check]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: true
+
+      - name: Download frontend build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-build
+          path: web/build
+
+      - name: Verify Go version
+        run: |
+          go version
+          go env GOTOOLCHAIN
+
+      - name: Go mod verify
+        run: go mod verify
+
+      - name: gofmt
+        shell: bash
+        run: |
+          if [ -n "$(gofmt -l .)" ]; then
+            echo "gofmt failures:"
+            gofmt -l .
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Sync frontend build to embed directory
+        shell: bash
+        run: |
+          rm -rf internal/web/dist/build
+          cp -r web/build internal/web/dist/build
+
+      - name: Build Windows
+        run: go build -trimpath -ldflags="-s -w" -o lifeos.exe ./cmd/lifeos
+
+      - name: Test
+        run: go test -v -race ./...
+
+  go-build-linux:
+    runs-on: ubuntu-latest
+    needs: [frontend-check]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: true
+
+      - name: Download frontend build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-build
+          path: web/build
+
+      - name: Go mod verify
+        run: go mod verify
+
+      - name: gofmt
+        run: |
+          if [ -n "$(gofmt -l .)" ]; then
+            echo "gofmt failures:"
+            gofmt -l .
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Sync frontend build to embed directory
+        run: |
+          rm -rf internal/web/dist/build
+          cp -r web/build internal/web/dist/build
+
+      - name: Build Linux AMD64 v1
+        run: |
+          GOOS=linux GOARCH=amd64 GOAMD64=v1 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o lifeos ./cmd/lifeos
+
+      - name: Verify binary
+        run: |
+          file lifeos
+          strings lifeos | grep -E "SSE4|AVX|AES-NI" || echo "No unsupported instructions found"
+
+      - name: Test
+        run: go test -v -race ./...

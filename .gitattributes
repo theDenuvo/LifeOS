@@ -1,0 +1,39 @@
+# Enforce LF line endings for all text files
+* text=auto eol=lf
+
+# Explicitly set line endings for Go files
+*.go text eol=lf
+
+# Other text files
+*.md text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+*.txt text eol=lf
+*.sql text eol=lf
+*.mod text eol=lf
+*.sum text eol=lf
+
+# Frontend files
+*.js text eol=lf
+*.ts text eol=lf
+*.svelte text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.svg text eol=lf
+
+# Binary files - don't touch
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.wasm binary
+*.exe binary
+*.db binary
+*.db-shm binary
+*.db-wal binary

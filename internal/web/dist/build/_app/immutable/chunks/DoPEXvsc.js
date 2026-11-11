@@ -1,0 +1,1 @@
+import{ay as r,h as d,a as m,b4 as _}from"./X2L4cfdR.js";import{a as c}from"./Cc3unNEw.js";function b(t,a,i,n,h){var f,l;if(d&&m(),(f=a.$$host)!=null&&f.$$shadowRoot){const o=r("slot");c(t,o);return}var e=(l=a.$$slots)==null?void 0:l[i],s=!1;e===!0&&(e=a.children,s=!0),e===void 0||e(t,s?()=>n:n)}_();export{b as s};

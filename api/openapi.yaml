@@ -554,12 +554,6 @@ paths:
       parameters:
       - name: Last-Event-ID
         in: header
-        schema:
-          type: string
-        description: Resume from last received event ID
-      parameters:
-      - name: Last-Event-ID
-        in: header
         required: false
         schema:
           type: string

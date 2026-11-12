@@ -253,10 +253,21 @@ export interface SendMessageResult {
 	pending_actions: PendingAction[];
 }
 
-export function sendAssistantMessage(content: string, conversationId?: number): Promise<SendMessageResult> {
+export interface InteractionContext {
+	screen?: string;
+	object_type?: string;
+	object_id?: string;
+	title?: string;
+}
+
+export function sendAssistantMessage(
+	content: string,
+	conversationId?: number,
+	interaction?: InteractionContext
+): Promise<SendMessageResult> {
 	return request<SendMessageResult>('/api/v1/assistant/messages', {
 		method: 'POST',
-		body: JSON.stringify({ content, conversation_id: conversationId ?? 0 })
+		body: JSON.stringify({ content, conversation_id: conversationId ?? 0, interaction })
 	});
 }
 

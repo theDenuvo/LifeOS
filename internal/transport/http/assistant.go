@@ -77,13 +77,24 @@ func (h *Handler) sendAssistantMessage(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Content        string `json:"content"`
 		ConversationID int64  `json:"conversation_id"`
+		Interaction    struct {
+			Screen     string `json:"screen"`
+			ObjectType string `json:"object_type"`
+			ObjectID   string `json:"object_id"`
+			Title      string `json:"title"`
+		} `json:"interaction"`
 	}
 	if err := decodeJSONBody(w, r, &body); err != nil {
 		h.writeProblem(w, r, http.StatusBadRequest, "validation-failed", "Validation Failed", err.Error())
 		return
 	}
 
-	result, err := h.services.Assistant.SendMessage(r.Context(), body.ConversationID, body.Content)
+	result, err := h.services.Assistant.SendMessageWithInteraction(r.Context(), body.ConversationID, body.Content, assistant.InteractionContext{
+		Screen:     body.Interaction.Screen,
+		ObjectType: body.Interaction.ObjectType,
+		ObjectID:   body.Interaction.ObjectID,
+		Title:      body.Interaction.Title,
+	})
 	if err != nil {
 		h.writeAssistantError(w, r, err)
 		return

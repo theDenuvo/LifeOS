@@ -83,7 +83,8 @@
 	async function handleQuery(query: string) {
 		await bootstrap();
 		input = query;
-		await send();
+		const from = $page.url.searchParams.get('from') || '/assistant';
+		await send(from);
 		goto('/assistant', { replaceState: true, noScroll: true });
 	}
 
@@ -95,13 +96,13 @@
 		}
 	}
 
-	async function send() {
+	async function send(screen = '/assistant') {
 		const content = input.trim();
 		if (!content || sending) return;
 		sending = true;
 		error = '';
 		try {
-			const result = await sendAssistantMessage(content, conversationID);
+			const result = await sendAssistantMessage(content, conversationID, { screen });
 			conversationID = result.conversation_id;
 			input = '';
 			await loadConversation();
@@ -248,7 +249,7 @@
 		</div>
 	{/if}
 
-	<form class="composer" on:submit|preventDefault={send}>
+	<form class="composer" on:submit|preventDefault={() => send()}>
 		<textarea
 			bind:value={input}
 			rows="2"

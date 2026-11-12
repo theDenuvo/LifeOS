@@ -20,7 +20,7 @@
 		const text = question.trim();
 		if (!text) return;
 		question = '';
-		goto(`/assistant?q=${encodeURIComponent(text)}`);
+		goto(`/assistant?q=${encodeURIComponent(text)}&from=${encodeURIComponent($page.url.pathname)}`);
 	}
 
 	onMount(startLive);

@@ -121,11 +121,16 @@ type ConfirmResult struct {
 	Result any
 }
 
-// SendMessage runs one assistant turn.
+// SendMessage runs one assistant turn without interaction context.
+func (s *Service) SendMessage(ctx context.Context, conversationID int64, content string) (SendResult, error) {
+	return s.SendMessageWithInteraction(ctx, conversationID, content, InteractionContext{})
+}
+
+// SendMessageWithInteraction runs one assistant turn.
 //
 // The provider is called outside database transactions: a slow model must not
 // hold SQLite's write lock. Each persistence step is its own short transaction.
-func (s *Service) SendMessage(ctx context.Context, conversationID int64, content string) (SendResult, error) {
+func (s *Service) SendMessageWithInteraction(ctx context.Context, conversationID int64, content string, interaction InteractionContext) (SendResult, error) {
 	if s.provider == nil {
 		return SendResult{}, ErrProviderNotConfigured
 	}
@@ -177,13 +182,17 @@ func (s *Service) SendMessage(ctx context.Context, conversationID int64, content
 	}
 
 	snapshot := ""
+	contextUnavailable := false
 	if s.context != nil {
-		if value, err := s.context.Snapshot(ctx); err == nil {
+		value, err := s.context.Snapshot(ctx)
+		if err != nil {
+			contextUnavailable = true
+		} else {
 			snapshot = value
 		}
 	}
 
-	chat := s.buildChat(history, now, snapshot)
+	chat := s.buildChat(history, now, snapshot, contextUnavailable, sanitizeInteraction(interaction))
 	pending := make([]*domainassistant.PendingAction, 0)
 
 	for round := 0; round < s.maxRounds; round++ {
@@ -196,6 +205,9 @@ func (s *Service) SendMessage(ctx context.Context, conversationID int64, content
 			text := strings.TrimSpace(completion.Content)
 			if text == "" {
 				text = "Готово."
+			}
+			if len(pending) > 0 && !mentionsConfirmation(text) {
+				text = strings.TrimSpace(text) + "\n\nДействие ждёт вашего подтверждения."
 			}
 			message, err := s.persistAssistantMessage(ctx, conversationID, text, nil, now)
 			if err != nil {
@@ -241,8 +253,11 @@ func (s *Service) SendMessage(ctx context.Context, conversationID int64, content
 		}
 	}
 
-	message, err := s.persistAssistantMessage(ctx, conversationID,
-		"Не удалось завершить за "+fmt.Sprint(s.maxRounds)+" шагов. Уточните запрос или попробуйте ещё раз.", nil, now)
+	fallback := "Не удалось завершить за " + fmt.Sprint(s.maxRounds) + " шагов. Уточните запрос или попробуйте ещё раз."
+	if len(pending) > 0 {
+		fallback += "\n\nДействие ждёт вашего подтверждения."
+	}
+	message, err := s.persistAssistantMessage(ctx, conversationID, fallback, nil, now)
 	if err != nil {
 		return SendResult{}, err
 	}
@@ -256,6 +271,9 @@ func (s *Service) runTool(ctx context.Context, conversationID, messageID int64, 
 		if err != nil {
 			payload, _ := json.Marshal(map[string]any{"error": err.Error()})
 			return string(payload), nil, nil
+		}
+		if result == nil {
+			return `{"error":"tool returned no data"}`, nil, nil
 		}
 		payload, err := json.Marshal(result)
 		if err != nil {
@@ -329,9 +347,9 @@ func (s *Service) persistAssistantMessage(ctx context.Context, conversationID in
 }
 
 // buildChat converts stored history into provider messages.
-func (s *Service) buildChat(history []*domainassistant.Message, now time.Time, snapshot string) []ChatMessage {
+func (s *Service) buildChat(history []*domainassistant.Message, now time.Time, snapshot string, contextUnavailable bool, interaction InteractionContext) []ChatMessage {
 	chat := make([]ChatMessage, 0, len(history)+1)
-	chat = append(chat, ChatMessage{Role: "system", Content: s.systemPrompt(now, snapshot)})
+	chat = append(chat, ChatMessage{Role: "system", Content: s.systemPrompt(now, snapshot, contextUnavailable, interaction)})
 	for _, message := range history {
 		if message.Role == domainassistant.RoleTool {
 			continue
@@ -347,12 +365,29 @@ func (s *Service) buildChat(history []*domainassistant.Message, now time.Time, s
 	return chat
 }
 
-func (s *Service) systemPrompt(now time.Time, snapshot string) string {
+func (s *Service) systemPrompt(now time.Time, snapshot string, contextUnavailable bool, interaction InteractionContext) string {
 	prompt := "Ты — ассистент LifeOS и главный интерфейс пользователя со своей персональной системой.\n" +
 		"Твоя задача — понять намерение и помочь его выполнить, а не заставлять пользователя искать разделы, поля и связи между модулями.\n" +
 		"Сейчас: " + now.Format(time.RFC3339) + " (" + s.timezone + ").\n"
 	if strings.TrimSpace(snapshot) != "" {
 		prompt += "\nТекущее состояние LifeOS (обновляется автоматически; может быть неполным):\n" + snapshot + "\n"
+	}
+	if contextUnavailable {
+		prompt += "\nКонтекст LifeOS сейчас недоступен. Не утверждай, что знаешь актуальное состояние системы. " +
+			"Если вопрос касается текущих данных, используй инструменты; если они тоже недоступны или вернули ошибку, честно скажи, что данные получить не удалось.\n"
+	}
+	if interaction.Screen != "" {
+		prompt += "\nТекущий экран пользователя: " + interaction.Screen + ".\n"
+	}
+	if interaction.ObjectType != "" {
+		prompt += "Выбранный объект: " + interaction.ObjectType
+		if interaction.ObjectID != "" {
+			prompt += " #" + interaction.ObjectID
+		}
+		if interaction.Title != "" {
+			prompt += " «" + interaction.Title + "»"
+		}
+		prompt += ". Используй это только чтобы понять указания вроде «этого объекта»; данные всё равно проверяй инструментами.\n"
 	}
 	prompt += "\nПравила:\n" +
 		"- Сначала пойми цель. Если для действия не хватает критичного параметра (дата, время, объект, формат), задай один короткий уточняющий вопрос.\n" +
@@ -391,6 +426,9 @@ func (s *Service) ConfirmPendingAction(ctx context.Context, id int64) (ConfirmRe
 	result, err := s.tools.Execute(ctx, action.ToolName, action.Arguments)
 	if err != nil {
 		return ConfirmResult{}, fmt.Errorf("%w: %v", ErrToolFailed, err)
+	}
+	if result == nil {
+		return ConfirmResult{}, fmt.Errorf("%w: tool returned no data", ErrToolFailed)
 	}
 
 	err = s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
@@ -526,6 +564,20 @@ func (s *Service) publish(eventType string, data any) {
 		return
 	}
 	s.publisher.Publish(eventType, data)
+}
+
+func sanitizeInteraction(in InteractionContext) InteractionContext {
+	return InteractionContext{
+		Screen:     truncateRunes(strings.TrimSpace(in.Screen), 200),
+		ObjectType: truncateRunes(strings.TrimSpace(in.ObjectType), 50),
+		ObjectID:   truncateRunes(strings.TrimSpace(in.ObjectID), 50),
+		Title:      truncateRunes(strings.TrimSpace(in.Title), 200),
+	}
+}
+
+func mentionsConfirmation(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "подтвержд") || strings.Contains(lower, "подтверди") || strings.Contains(lower, "ожидает")
 }
 
 func truncateRunes(value string, limit int) string {

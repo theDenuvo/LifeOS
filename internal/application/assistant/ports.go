@@ -44,6 +44,18 @@ type ToolCall struct {
 	Arguments json.RawMessage
 }
 
+// InteractionContext describes where the user is and what is selected.
+//
+// It is advisory context, not evidence: the model may use it to resolve
+// references such as "this task", but must still read authoritative data with
+// tools.
+type InteractionContext struct {
+	Screen     string
+	ObjectType string
+	ObjectID   string
+	Title      string
+}
+
 // ChatMessage is one provider-facing message.
 type ChatMessage struct {
 	Role       string

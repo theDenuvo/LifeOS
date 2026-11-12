@@ -87,6 +87,12 @@ type fakeInsights struct{ value []proactive.Insight }
 
 func (f fakeInsights) Compute(context.Context) ([]proactive.Insight, error) { return f.value, nil }
 
+type failingContext struct{}
+
+func (failingContext) Snapshot(context.Context) (string, error) {
+	return "", errors.New("context unavailable")
+}
+
 func TestSystemPromptIncludesLifeOSContext(t *testing.T) {
 	provider := &scriptedProvider{responses: []assistant.Completion{{Content: "Хорошо."}}}
 	tools := &fakeTools{readOnly: map[string]bool{}}
@@ -123,6 +129,60 @@ func TestSystemPromptIncludesLifeOSContext(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("system prompt does not contain %q:\n%s", want, prompt)
 		}
+	}
+}
+
+func TestSystemPromptMarksUnavailableContext(t *testing.T) {
+	provider := &scriptedProvider{responses: []assistant.Completion{{Content: "Не удалось получить данные."}}}
+	service, _ := newServiceWithOptions(t, provider, &fakeTools{readOnly: map[string]bool{}}, assistant.WithContextProvider(failingContext{}))
+
+	if _, err := service.SendMessage(context.Background(), 0, "Что у меня на сегодня?"); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	prompt := provider.last[0].Content
+	for _, want := range []string{
+		"Контекст LifeOS сейчас недоступен",
+		"Не утверждай, что знаешь актуальное состояние",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("system prompt does not contain %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestSystemPromptIncludesInteractionContext(t *testing.T) {
+	provider := &scriptedProvider{responses: []assistant.Completion{{Content: "Хорошо."}}}
+	service, _ := newService(t, provider, &fakeTools{readOnly: map[string]bool{}})
+
+	if _, err := service.SendMessageWithInteraction(context.Background(), 0, "Перенеси её", assistant.InteractionContext{
+		Screen: "/tasks", ObjectType: "task", ObjectID: "42", Title: "Подготовить отчёт",
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	prompt := provider.last[0].Content
+	for _, want := range []string{"/tasks", "task #42", "«Подготовить отчёт»", "проверяй инструментами"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("system prompt does not contain %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestPendingActionAddsConfirmationGuard(t *testing.T) {
+	provider := &scriptedProvider{responses: []assistant.Completion{
+		{ToolCalls: []assistant.ToolCall{{ID: "call-1", Name: "create_task", Arguments: json.RawMessage(`{"title":"x"}`)}}},
+		{Content: "Готово, задача создана."},
+	}}
+	service, _ := newService(t, provider, &fakeTools{readOnly: map[string]bool{}, previews: map[string]string{"create_task": "Создать задачу «x»"}})
+
+	result, err := service.SendMessage(context.Background(), 0, "Создай задачу x")
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if len(result.PendingActions) != 1 {
+		t.Fatalf("pending actions = %d, want 1", len(result.PendingActions))
+	}
+	if !strings.Contains(result.Message.Content, "ждёт вашего подтверждения") {
+		t.Errorf("confirmation guard missing: %q", result.Message.Content)
 	}
 }
 

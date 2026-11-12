@@ -188,9 +188,11 @@ func TestCancelledContextBeforeCall(t *testing.T) {
 func TestDeadlineExceededContext(t *testing.T) {
 	svc, uow := newTestService(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	// A deadline already in the past is deterministically expired on every
+	// platform; relying on real elapsed time would be flaky because OS timer
+	// granularity varies (Windows timers fire no faster than ~1 ms).
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
-	time.Sleep(time.Millisecond)
 
 	_, err := svc.CreateTask(ctx, CreateTaskInput{Title: "x"}, task.ActorUser)
 	if !errors.Is(err, context.DeadlineExceeded) {

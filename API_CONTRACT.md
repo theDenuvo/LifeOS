@@ -375,16 +375,20 @@ POST /api/v1/assistant/messages
 }
 ```
 
-**Response 202 (Accepted):**
+**Response 200:**
 ```json
 {
-  "message_id": 101,
   "conversation_id": 1,
-  "status": "processing"
+  "message": {"id": 101, "conversation_id": 1, "role": "assistant", "content": "Создание задачи ждёт подтверждения.", "created_at": "..."},
+  "pending_actions": [
+    {"id": 5, "tool_name": "create_task", "arguments": {"title": "Купить молоко"}, "preview": {"summary": "Создать задачу «Купить молоко»"}, "status": "pending"}
+  ]
 }
 ```
 
-> Обработка асинхронна. Результат приходит через SSE или polling.
+Обработка синхронная в рамках запроса. Изменения данных не выполняются сразу: инструменты-мутации создают `pending_action`, который пользователь подтверждает или отклоняет. События `assistant.message` и `pending_action.*` также приходят через SSE.
+
+**Response 503:** провайдер LLM не настроен (`LIFEOS_LLM_API_KEY` пуст и провайдер не `ollama`).
 
 #### Получить историю диалога
 
@@ -418,7 +422,9 @@ POST /api/v1/assistant/pending-actions/{id}/confirm
 POST /api/v1/assistant/pending-actions/{id}/reject
 ```
 
-**Response 200:** PendingAction (resolved)
+**Response 200:** `{"pending_action": PendingAction, "result": <результат инструмента>}`
+
+Подтверждение выполняет инструмент и записывает результат как сообщение `role=tool`. Повторное подтверждение → `409`.
 
 ---
 

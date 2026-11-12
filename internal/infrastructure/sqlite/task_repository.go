@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/theDenuvo/LifeOS/internal/application/assistant"
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	"github.com/theDenuvo/LifeOS/internal/domain/task"
@@ -80,6 +81,8 @@ func (t taskTransaction) Tasks() tasks.TaskRepository { return &taskRepository{t
 func (t taskTransaction) Events() tasks.TaskEventRepository { return &taskEventRepository{tx: t.tx} }
 
 func (t taskTransaction) Inbox() inbox.Repository { return &inboxRepository{tx: t.tx} }
+
+func (t taskTransaction) Assistant() assistant.Repository { return &assistantRepository{tx: t.tx} }
 
 // taskRepository is the SQLite implementation of tasks.TaskRepository.
 type taskRepository struct {

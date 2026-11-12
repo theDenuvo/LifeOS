@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/theDenuvo/LifeOS/internal/agent/tools"
+	"github.com/theDenuvo/LifeOS/internal/application/assistant"
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
 	"github.com/theDenuvo/LifeOS/internal/application/summary"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
@@ -24,6 +26,11 @@ type apiClock struct {
 func (c apiClock) Now() time.Time { return c.now }
 
 func newTaskAPI(t *testing.T, now time.Time) (*Handler, func()) {
+	t.Helper()
+	return newTaskAPIWithProvider(t, now, nil)
+}
+
+func newTaskAPIWithProvider(t *testing.T, now time.Time, provider assistant.Provider) (*Handler, func()) {
 	t.Helper()
 
 	tmpDir := t.TempDir()
@@ -45,11 +52,21 @@ func newTaskAPI(t *testing.T, now time.Time) (*Handler, func()) {
 	service := tasks.NewService(sqlite.NewTaskUnitOfWork(db), clock, tasks.WithDefaultTimezone("Europe/Moscow"), tasks.WithPublisher(broker))
 	inboxService := inbox.NewService(sqlite.NewInboxUnitOfWork(db), clock, "Europe/Moscow", inbox.WithPublisher(broker))
 	summaryService := summary.NewService(service, inboxService, clock, "Europe/Moscow")
+	registry := tools.NewLifeOSTools(service, inboxService, summaryService)
+	assistantService := assistant.NewService(
+		sqlite.NewAssistantUnitOfWork(db),
+		provider,
+		registry,
+		clock,
+		assistant.WithTimezone("Europe/Moscow"),
+		assistant.WithPublisher(broker),
+	)
 	handler := NewHandler(db, cfg, testEmbedFS, Services{
-		Tasks:   service,
-		Inbox:   inboxService,
-		Summary: summaryService,
-		Events:  broker,
+		Tasks:     service,
+		Inbox:     inboxService,
+		Summary:   summaryService,
+		Assistant: assistantService,
+		Events:    broker,
 	})
 	handler.now = func() time.Time { return now }
 

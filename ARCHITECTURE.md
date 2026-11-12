@@ -157,12 +157,16 @@ Transport (HTTP, MCP) ──► Application ──► Domain
 - Streamable HTTP transport
 - Один экземпляр на процесс
 
-### `internal/agent/runtime`
-- `Agent` — оркестрация: получение контекста, вызов LLM, выполнение инструментов
-- `Provider` интерфейс: `Complete`, `Stream`
-- Реализации: `OpenRouterProvider`, `OllamaProvider`
-- Tool registry: регистрация, валидация схем, выполнение
-- Контекст: текущий экран, активные задачи, время (Europe/Moscow)
+### `internal/application/assistant`
+- `SendMessage` — диалог: история, системный промпт, цикл tool calling (до 5 раундов)
+- `ConfirmPendingAction` / `RejectPendingAction` — подтверждение мутаций
+- `ListConversations` / `GetConversation`
+- Провайдер вызывается вне транзакций БД; каждая запись — короткая транзакция
+
+### `internal/agent`
+- `OpenAIProvider` — любой OpenAI-совместимый endpoint (OpenRouter, Ollama `/v1`, локальный шлюз)
+- `internal/agent/tools` — реестр инструментов LifeOS: чтение (`list_tasks`, `get_today_summary`, `list_inbox`) и мутации (`create_task`, `update_task`, `complete_task`, `cancel_task`, `restore_task`, `reschedule_task`, `capture_inbox`, `convert_inbox`, `dismiss_inbox`)
+- Мутации не выполняются моделью напрямую: они создают `pending_action` с превью и ждут подтверждения пользователя
 
 ### `internal/agent/providers`
 - OpenRouter: `openai-go/v3` с base URL

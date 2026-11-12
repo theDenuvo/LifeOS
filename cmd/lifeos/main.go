@@ -12,6 +12,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/theDenuvo/LifeOS/internal/agent"
+	"github.com/theDenuvo/LifeOS/internal/agent/tools"
+	"github.com/theDenuvo/LifeOS/internal/application/assistant"
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
 	"github.com/theDenuvo/LifeOS/internal/application/summary"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
@@ -74,12 +77,28 @@ func main() {
 	inboxService := inbox.NewService(sqlite.NewInboxUnitOfWork(db), clock, cfg.Timezone, inbox.WithPublisher(broker))
 	summaryService := summary.NewService(taskService, inboxService, clock, cfg.Timezone)
 
+	// Assistant runtime: an OpenAI-compatible provider plus the LifeOS tools.
+	var provider assistant.Provider
+	if cfg.LLMAPIKey != "" || cfg.LLMProvider == "ollama" {
+		provider = agent.NewOpenAIProvider(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel)
+	}
+	registry := tools.NewLifeOSTools(taskService, inboxService, summaryService)
+	assistantService := assistant.NewService(
+		sqlite.NewAssistantUnitOfWork(db),
+		provider,
+		registry,
+		clock,
+		assistant.WithTimezone(cfg.Timezone),
+		assistant.WithPublisher(broker),
+	)
+
 	// Create HTTP handler with all routes
 	handler := httptransport.NewHandler(db, cfg, dist.FS, httptransport.Services{
-		Tasks:   taskService,
-		Inbox:   inboxService,
-		Summary: summaryService,
-		Events:  broker,
+		Tasks:     taskService,
+		Inbox:     inboxService,
+		Summary:   summaryService,
+		Assistant: assistantService,
+		Events:    broker,
 	}).Routes()
 
 	// HTTP Server

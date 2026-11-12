@@ -432,16 +432,20 @@ paths:
             schema:
               $ref: '#/components/schemas/AssistantMessageRequest'
       responses:
-        '202':
-          description: Message accepted for processing
+        '200':
+          description: Assistant reply and any actions awaiting confirmation
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/AssistantMessageResponse'
         '400':
           $ref: '#/components/responses/ValidationError'
-        '501':
-          $ref: '#/components/responses/NotImplementedError'
+        '503':
+          description: LLM provider is not configured
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
   /api/v1/assistant/conversations:
     get:
       summary: List conversations
@@ -467,8 +471,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ConversationListResponse'
-        '501':
-          $ref: '#/components/responses/NotImplementedError'
         '400':
           $ref: '#/components/responses/ValidationError'
   /api/v1/assistant/conversations/{id}:
@@ -493,8 +495,6 @@ paths:
                 $ref: '#/components/schemas/ConversationResponse'
         '404':
           $ref: '#/components/responses/NotFoundError'
-        '501':
-          $ref: '#/components/responses/NotImplementedError'
   /api/v1/assistant/pending-actions/{id}/confirm:
     post:
       summary: Confirm a pending action
@@ -519,8 +519,6 @@ paths:
           $ref: '#/components/responses/NotFoundError'
         '409':
           $ref: '#/components/responses/ConflictError'
-        '501':
-          $ref: '#/components/responses/NotImplementedError'
   /api/v1/assistant/pending-actions/{id}/reject:
     post:
       summary: Reject a pending action
@@ -543,8 +541,6 @@ paths:
                 $ref: '#/components/schemas/PendingActionResponse'
         '404':
           $ref: '#/components/responses/NotFoundError'
-        '501':
-          $ref: '#/components/responses/NotImplementedError'
   /api/v1/events:
     get:
       summary: Server-Sent Events stream for real-time updates
@@ -978,20 +974,19 @@ components:
     AssistantMessageResponse:
       type: object
       required:
-      - message_id
       - conversation_id
-      - status
+      - message
+      - pending_actions
       properties:
-        message_id:
-          type: integer
-          format: int64
         conversation_id:
           type: integer
           format: int64
-        status:
-          type: string
-          enum:
-          - processing
+        message:
+          $ref: '#/components/schemas/MessageResponse'
+        pending_actions:
+          type: array
+          items:
+            $ref: '#/components/schemas/PendingActionResponse'
     ConversationResponse:
       type: object
       required:
@@ -1005,13 +1000,21 @@ components:
           type: integer
           format: int64
         title:
-          type: string
+          type:
+          - string
+          - 'null'
         context_screen:
-          type: string
+          type:
+          - string
+          - 'null'
         messages:
           type: array
           items:
             $ref: '#/components/schemas/MessageResponse'
+        pending_actions:
+          type: array
+          items:
+            $ref: '#/components/schemas/PendingActionResponse'
         created_at:
           type: string
           format: date-time
@@ -1060,11 +1063,25 @@ components:
       type: object
       required:
       - data
+      - meta
       properties:
         data:
           type: array
           items:
             $ref: '#/components/schemas/ConversationResponse'
+        meta:
+          type: object
+          required:
+          - limit
+          - offset
+          - total
+          properties:
+            limit:
+              type: integer
+            offset:
+              type: integer
+            total:
+              type: integer
     PendingActionResponse:
       type: object
       required:
@@ -1089,9 +1106,11 @@ components:
         tool_name:
           type: string
         arguments:
-          type: string
+          type: object
+          additionalProperties: true
         preview:
-          type: string
+          type: object
+          additionalProperties: true
         status:
           type: string
           enum:

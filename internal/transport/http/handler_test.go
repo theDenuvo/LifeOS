@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/theDenuvo/LifeOS/internal/agent/tools"
+	"github.com/theDenuvo/LifeOS/internal/application/assistant"
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
 	"github.com/theDenuvo/LifeOS/internal/application/summary"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
@@ -55,11 +57,14 @@ func setupTestHandler(t *testing.T) (*Handler, func()) {
 	taskService := tasks.NewService(sqlite.NewTaskUnitOfWork(db), clock, tasks.WithPublisher(broker))
 	inboxService := inbox.NewService(sqlite.NewInboxUnitOfWork(db), clock, cfg.Timezone, inbox.WithPublisher(broker))
 	summaryService := summary.NewService(taskService, inboxService, clock, cfg.Timezone)
+	registry := tools.NewLifeOSTools(taskService, inboxService, summaryService)
+	assistantService := assistant.NewService(sqlite.NewAssistantUnitOfWork(db), nil, registry, clock)
 	handler := NewHandler(db, cfg, testEmbedFS, Services{
-		Tasks:   taskService,
-		Inbox:   inboxService,
-		Summary: summaryService,
-		Events:  broker,
+		Tasks:     taskService,
+		Inbox:     inboxService,
+		Summary:   summaryService,
+		Assistant: assistantService,
+		Events:    broker,
 	})
 
 	cleanup := func() {
@@ -256,11 +261,6 @@ func TestHandlerAPIEndpointsReturn501(t *testing.T) {
 		method string
 		path   string
 	}{
-		{"POST", "/api/v1/assistant/messages"},
-		{"GET", "/api/v1/assistant/conversations"},
-		{"GET", "/api/v1/assistant/conversations/1"},
-		{"POST", "/api/v1/assistant/pending-actions/1/confirm"},
-		{"POST", "/api/v1/assistant/pending-actions/1/reject"},
 		{"GET", "/api/v1/settings/test"},
 		{"PUT", "/api/v1/settings/test"},
 	}
@@ -425,11 +425,14 @@ func TestHandlerServeFrontendWithRealEmbedFS(t *testing.T) {
 	taskService := tasks.NewService(sqlite.NewTaskUnitOfWork(db), clock, tasks.WithPublisher(broker))
 	inboxService := inbox.NewService(sqlite.NewInboxUnitOfWork(db), clock, cfg.Timezone, inbox.WithPublisher(broker))
 	summaryService := summary.NewService(taskService, inboxService, clock, cfg.Timezone)
+	registry := tools.NewLifeOSTools(taskService, inboxService, summaryService)
+	assistantService := assistant.NewService(sqlite.NewAssistantUnitOfWork(db), nil, registry, clock)
 	handler := NewHandler(db, cfg, dist.FS, Services{
-		Tasks:   taskService,
-		Inbox:   inboxService,
-		Summary: summaryService,
-		Events:  broker,
+		Tasks:     taskService,
+		Inbox:     inboxService,
+		Summary:   summaryService,
+		Assistant: assistantService,
+		Events:    broker,
 	})
 
 	// Test root serves index.html

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/theDenuvo/LifeOS/internal/application/assistant"
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
 	"github.com/theDenuvo/LifeOS/internal/application/summary"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
@@ -19,10 +20,11 @@ import (
 
 // Services groups the application services the HTTP transport exposes.
 type Services struct {
-	Tasks   *tasks.Service
-	Inbox   *inbox.Service
-	Summary *summary.Service
-	Events  *events.Broker
+	Tasks     *tasks.Service
+	Inbox     *inbox.Service
+	Summary   *summary.Service
+	Assistant *assistant.Service
+	Events    *events.Broker
 }
 
 type Handler struct {
@@ -70,11 +72,11 @@ func (h *Handler) apiRoutes() http.Handler {
 	mux.HandleFunc("POST /inbox/{id}/convert", h.convertInbox)
 	mux.HandleFunc("DELETE /inbox/{id}", h.dismissInbox)
 	mux.HandleFunc("GET /summary/today", h.todaySummary)
-	mux.HandleFunc("POST /assistant/messages", h.notImplemented)
-	mux.HandleFunc("GET /assistant/conversations", h.notImplemented)
-	mux.HandleFunc("GET /assistant/conversations/{id}", h.notImplemented)
-	mux.HandleFunc("POST /assistant/pending-actions/{id}/confirm", h.notImplemented)
-	mux.HandleFunc("POST /assistant/pending-actions/{id}/reject", h.notImplemented)
+	mux.HandleFunc("POST /assistant/messages", h.sendAssistantMessage)
+	mux.HandleFunc("GET /assistant/conversations", h.listAssistantConversations)
+	mux.HandleFunc("GET /assistant/conversations/{id}", h.getAssistantConversation)
+	mux.HandleFunc("POST /assistant/pending-actions/{id}/confirm", h.confirmPendingAction)
+	mux.HandleFunc("POST /assistant/pending-actions/{id}/reject", h.rejectPendingAction)
 	mux.HandleFunc("GET /events", h.streamEvents)
 	mux.HandleFunc("GET /settings/{key}", h.notImplemented)
 	mux.HandleFunc("PUT /settings/{key}", h.notImplemented)

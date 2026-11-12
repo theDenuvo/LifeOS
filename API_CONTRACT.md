@@ -58,9 +58,12 @@ REST API v1 для LifeOS. Базовый путь: `/api/v1`
   "updated_at": "2026-11-09T12:00:00Z",
   "completed_at": null,
   "cancelled_at": null,
-  "overdue": false
+  "overdue": false,
+  "version": 3
 }
 ```
+
+**Правило `version`:** `version` — токен optimistic locking. Он возвращается в теле и в заголовке `ETag` (`"3"`). Любая мутация требует `If-Match` с этим токеном; без него сервер отвечает `428 Precondition Required`, с устаревшим — `409 Conflict`.
 
 **Правило `overdue`** (вычисляется на сервере, не хранится):
 
@@ -223,7 +226,8 @@ PATCH /api/v1/tasks/{id}
 
 **Валидация:**
 - `status` переходит только по разрешённым переходам
-- Optimistic locking через `If-Match: <updated_at>` или `ETag`
+- Optimistic locking через `If-Match: <version>` (значение `ETag` из последнего чтения). Заголовок обязателен: без него — `428`, при устаревшей версии — `409`
+- `status` через `PATCH` не меняется: для переходов используйте `/complete`, `/cancel`, `/restore`
 
 **Response 200:** Task (обновлённая)
 **Response 404:** NotFound
@@ -271,10 +275,11 @@ POST /api/v1/tasks/{id}/reschedule
 {
   "planned_date": "2026-11-15",
   "due_date": "2026-11-15",
-  "due_at": "2026-11-15T10:00:00Z",
-  "timezone": "Europe/Moscow"
+  "due_at": "2026-11-15T10:00:00Z"
 }
 ```
+
+`timezone` не принимается этим эндпоинтом — измените часовой пояс через `PATCH`. `null` очищает соответствующее поле.
 
 **Response 200:** Task
 **Response 400:** ValidationFailed
@@ -478,7 +483,7 @@ PUT /api/v1/settings/{key}
 - `POST /api/v1/tasks` — идемпотентен по `Idempotency-Key` header (сохраняется 24ч)
 - `POST /api/v1/inbox` — идемпотентен по `Idempotency-Key`
 - `POST /api/v1/assistant/messages` — **не** идемпотентен (каждое сообщение новое)
-- `PATCH /api/v1/tasks/{id}` — оптимистическая блокировка через `If-Match`
+- `PATCH /api/v1/tasks/{id}` и все переходы статуса — обязательный `If-Match: <version>`
 
 ---
 

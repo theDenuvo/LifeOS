@@ -108,7 +108,7 @@ Transport (HTTP, MCP) ──► Application ──► Domain
 | `inputs.go` | типизированные входные структуры (`CreateTaskInput`, `UpdateTaskInput`, `TaskFilter`), `Optional[T]`, `ParseSort` |
 | `errors.go` | `ErrTaskNotFound`, `ErrVersionConflict`, `ErrInvalidLimit/Offset/Sort`, `TaskWithVersion` |
 
-**Repository ports.** Порты принадлежат Application; Infrastructure реализует их в Phase 2.3.
+**Repository ports.** Порты принадлежат Application; Infrastructure реализует их в `internal/infrastructure/sqlite` (Phase 2.3, реализовано).
 
 - `TaskRepository` — `FindByID`, `List`, `Insert`, `Update(id, expectedVersion, task)`.
   `Update` обязан выполнять сравнение и инкремент одной инструкцией (`WHERE id = ? AND version = ?`, `version = version + 1`).
@@ -135,7 +135,8 @@ Transport (HTTP, MCP) ──► Application ──► Domain
 - `GetTodaySummary` — агрегат для главного экрана: задачи на сегодня, просроченные, высокий приоритет, статистика
 
 ### `internal/infrastructure/sqlite`
-- `sqlc`-генерированные репозитории
+- Репозитории задач и событий на `database/sql` (порты Application)
+- `TaskUnitOfWork`: одна транзакция на use case, task + event атомарны
 - `goose` миграции
 - WAL mode, busy_timeout, foreign_keys=ON
 - Connection pooling (std database/sql)
@@ -143,6 +144,7 @@ Transport (HTTP, MCP) ──► Application ──► Domain
 ### `internal/transport/http`
 - `net/http` (stdlib)
 - REST handlers → Application services
+- Реализованы: `/healthz` и все `/api/v1/tasks*` (фильтры, пагинация, optimistic locking через `If-Match`/`ETag`)
 - SSE endpoint для realtime
 - Embedded frontend serving
 - Error handling: `application/problem+json`

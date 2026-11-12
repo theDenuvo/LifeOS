@@ -36,6 +36,7 @@
 | `completed_at` | TIMESTAMP | NULLABLE | UTC момент завершения (Unix seconds) |
 | `cancelled_at` | TIMESTAMP | NULLABLE | UTC момент отмены (Unix seconds) |
 | `parent_task_id` | INTEGER | FK → tasks(id), NULLABLE | Для будущих подзадач (v1: не используется) |
+| `version` | INTEGER | NOT NULL, DEFAULT 1, CHECK ≥ 1 | Метаданные optimistic locking; не поле домена |
 
 **Индексы:**
 - `idx_tasks_status` (status)
@@ -335,6 +336,12 @@ type Task struct {
 
 **Просроченность** — вычисляемое свойство, не статус. Используется для фильтров и UI.
 
+## Версионирование и временные метки
+
+- `tasks.version` — concurrency metadata на границе Application/Repository. Чтение версию не меняет; каждая успешная мутация увеличивает её ровно на 1; запись условна по `expectedVersion` (`WHERE id = ? AND version = ?`). Устаревшая версия → `ErrVersionConflict`.
+- `updated_at` пишет Application тем же значением часов, что и событие аудита. Триггер `tasks_updated_at` из миграции 008 удалён в 010: он перезаписывал `updated_at` часами БД и расходился с `task_events.created_at`.
+- Временные метки хранятся как целые Unix-секунды. Production-часы (`SystemClock`) усекают время до секунды, чтобы записанное и прочитанное значение совпадали.
+
 ---
 
 ## Связи
@@ -363,6 +370,7 @@ Message 1 ──< PendingAction
 | 007 | Таблица app_settings |
 | 008 | Триггеры updated_at для tasks, conversations |
 | 009 | Защита append-only task_events, защита от удаления tasks с историей, converted_task_id для inbox_items |
+| 010 | `tasks.version` для optimistic locking; удаление триггера `tasks_updated_at` (времена пишет Application) |
 
 > Детальные SQL миграции в `internal/infrastructure/sqlite/migrations/`.
 

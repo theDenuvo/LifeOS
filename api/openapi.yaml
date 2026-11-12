@@ -106,8 +106,6 @@ paths:
                 $ref: '#/components/schemas/TaskListResponse'
         '400':
           $ref: '#/components/responses/ValidationError'
-        '501':
-          $ref: '#/components/responses/NotImplementedError'
     post:
       summary: Create a new task
       operationId: createTask
@@ -128,10 +126,6 @@ paths:
                 $ref: '#/components/schemas/TaskResponse'
         '400':
           $ref: '#/components/responses/ValidationError'
-        '409':
-          $ref: '#/components/responses/ConflictError'
-        '501':
-          $ref: '#/components/responses/NotImplementedError'
   /api/v1/tasks/{id}:
     get:
       summary: Get a task by ID
@@ -154,8 +148,6 @@ paths:
                 $ref: '#/components/schemas/TaskResponse'
         '404':
           $ref: '#/components/responses/NotFoundError'
-        '501':
-          $ref: '#/components/responses/NotImplementedError'
     patch:
       summary: Partially update a task
       operationId: updateTask
@@ -170,9 +162,11 @@ paths:
           format: int64
       - name: If-Match
         in: header
+        required: true
         schema:
           type: string
-        description: Optimistic locking - must match current updated_at
+          pattern: '^"?[1-9][0-9]*"?$'
+        description: Optimistic locking - the task version from the last read (ETag)
       requestBody:
         required: true
         content:
@@ -194,8 +188,8 @@ paths:
           $ref: '#/components/responses/ConflictError'
         '412':
           $ref: '#/components/responses/PreconditionFailedError'
-        '501':
-          $ref: '#/components/responses/NotImplementedError'
+        '428':
+          $ref: '#/components/responses/PreconditionRequiredError'
   /api/v1/tasks/{id}/complete:
     post:
       summary: Mark task as completed
@@ -220,8 +214,8 @@ paths:
           $ref: '#/components/responses/NotFoundError'
         '412':
           $ref: '#/components/responses/PreconditionFailedError'
-        '501':
-          $ref: '#/components/responses/NotImplementedError'
+        '428':
+          $ref: '#/components/responses/PreconditionRequiredError'
   /api/v1/tasks/{id}/cancel:
     post:
       summary: Mark task as cancelled
@@ -246,8 +240,8 @@ paths:
           $ref: '#/components/responses/NotFoundError'
         '412':
           $ref: '#/components/responses/PreconditionFailedError'
-        '501':
-          $ref: '#/components/responses/NotImplementedError'
+        '428':
+          $ref: '#/components/responses/PreconditionRequiredError'
   /api/v1/tasks/{id}/restore:
     post:
       summary: Restore a completed or cancelled task
@@ -272,8 +266,8 @@ paths:
           $ref: '#/components/responses/NotFoundError'
         '412':
           $ref: '#/components/responses/PreconditionFailedError'
-        '501':
-          $ref: '#/components/responses/NotImplementedError'
+        '428':
+          $ref: '#/components/responses/PreconditionRequiredError'
   /api/v1/tasks/{id}/reschedule:
     post:
       summary: Reschedule a task
@@ -306,8 +300,8 @@ paths:
           $ref: '#/components/responses/NotFoundError'
         '412':
           $ref: '#/components/responses/PreconditionFailedError'
-        '501':
-          $ref: '#/components/responses/NotImplementedError'
+        '428':
+          $ref: '#/components/responses/PreconditionRequiredError'
   /api/v1/inbox:
     get:
       summary: List inbox items
@@ -661,6 +655,7 @@ components:
       - created_at
       - updated_at
       - overdue
+      - version
       properties:
         id:
           type: integer
@@ -714,6 +709,10 @@ components:
           format: date-time
         overdue:
           type: boolean
+        version:
+          type: integer
+          minimum: 1
+          description: Optimistic-locking token; send it back in If-Match for mutations
     TaskCreateRequest:
       type: object
       required:
@@ -785,6 +784,7 @@ components:
             maxLength: 50
     TaskRescheduleRequest:
       type: object
+      description: Scheduling fields only; use PATCH to change the task timezone
       properties:
         planned_date:
           type: string
@@ -795,8 +795,6 @@ components:
         due_at:
           type: string
           format: date-time
-        timezone:
-          type: string
     TaskListResponse:
       type: object
       required:
@@ -1215,6 +1213,18 @@ components:
             status: 412
             detail: 'Cannot complete task: status is not open'
             instance: /api/v1/tasks/1/complete
+    PreconditionRequiredError:
+      description: If-Match with the task version is required
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+          example:
+            type: https://lifeos.dev/errors/precondition-required
+            title: Precondition Required
+            status: 428
+            detail: If-Match with the task version is required for mutations
+            instance: /api/v1/tasks/1
     NotImplementedError:
       description: Endpoint not yet implemented
       content:

@@ -143,10 +143,13 @@ func staticHandler() http.Handler {
 
 ### Сборка с встраиванием
 ```bash
-# 1. Собрать frontend
+# 1. Собрать frontend (SPA, fallback index.html)
 cd web && npm ci && npm run build
 
-# 2. Собрать Go с встроенным frontend
+# 2. Скопировать сборку в embed-директорию
+rm -rf internal/web/dist/build && cp -r web/build internal/web/dist/build
+
+# 3. Собрать Go с встроенным frontend
 GOOS=linux GOARCH=amd64 GOAMD64=v1 CGO_ENABLED=0 \
 go build -trimpath -ldflags="-s -w" -o lifeos ./cmd/lifeos
 ```

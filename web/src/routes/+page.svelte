@@ -1,127 +1,407 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { Check, X, Loader2 } from 'lucide-svelte';
+	import { captureInbox, completeTask, getSummary, getTask, type Summary } from '$lib/api';
+	import { errorMessage, formatLongDate, priorityLabel } from '$lib/format';
 
-	let healthStatus = 'checking';
+	let summary: Summary | null = null;
+	let loading = true;
+	let error = '';
+	let captureText = '';
+	let capturing = false;
+	let busyId: number | null = null;
+	$: focus = summary?.focus_task ?? null;
 
-	onMount(async () => {
+	async function load() {
+		loading = true;
 		try {
-			const res = await fetch('/healthz');
-			if (res.ok) {
-				healthStatus = 'ok';
-			} else {
-				healthStatus = 'error';
-			}
-		} catch {
-			healthStatus = 'error';
+			summary = await getSummary();
+			error = '';
+		} catch (err) {
+			error = errorMessage(err);
+		} finally {
+			loading = false;
 		}
-	});
+	}
+
+	async function complete(id: number) {
+		busyId = id;
+		try {
+			const task = await getTask(id);
+			await completeTask(task.id, task.version);
+			await load();
+		} catch (err) {
+			error = errorMessage(err);
+		} finally {
+			busyId = null;
+		}
+	}
+
+	async function capture() {
+		const text = captureText.trim();
+		if (!text || capturing) return;
+		capturing = true;
+		try {
+			await captureInbox(text);
+			captureText = '';
+			await load();
+		} catch (err) {
+			error = errorMessage(err);
+		} finally {
+			capturing = false;
+		}
+	}
+
+	onMount(load);
 </script>
 
-<main class="container">
-	<div class="card">
-		<div class="logo">
-			<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="text-accent">
-				<path d="M12 2L2 7l10 5 10-5-10-5z" />
-				<path d="M2 17l10 5 10-5" />
-				<path d="M2 12l10 5 10-5" />
-			</svg>
-		</div>
-		<h1>LifeOS</h1>
-		<p class="subtitle">Personal Operating System with Intelligent Assistant</p>
+<svelte:head>
+	<title>Сегодня — LifeOS</title>
+</svelte:head>
 
-		<div class="status">
-			{#if healthStatus === 'checking'}
-				<Loader2 class="spin" />
-				<span>Checking backend...</span>
-			{:else if healthStatus === 'ok'}
-				<Check class="text-success" />
-				<span>Backend connected</span>
-			{:else}
-				<X class="text-error" />
-				<span>Backend unavailable</span>
-			{/if}
-		</div>
-
-		<p class="version">Foundation Phase — Task Engine coming next</p>
+<header class="page-header">
+	<div>
+		<h1>Сегодня</h1>
+		<p class="subtitle">{formatLongDate(new Date())}</p>
 	</div>
-</main>
+	<button class="refresh" on:click={load} disabled={loading} aria-label="Обновить">Обновить</button>
+</header>
+
+{#if error}
+	<div class="banner" role="alert">
+		<span>{error}</span>
+		<button on:click={() => (error = '')} aria-label="Закрыть">×</button>
+	</div>
+{/if}
+
+<form class="capture" on:submit|preventDefault={capture}>
+	<input
+		bind:value={captureText}
+		placeholder="Быстрый ввод: задача, мысль, ссылка…"
+		aria-label="Быстрый ввод во входящие"
+		autocomplete="off"
+	/>
+	<button type="submit" disabled={capturing || !captureText.trim()}>
+		{capturing ? 'Сохраняю…' : 'Во входящие'}
+	</button>
+</form>
+
+{#if loading && !summary}
+	<p class="muted">Загружаю…</p>
+{:else if summary}
+	<section class="stats" aria-label="Статистика дня">
+		<div class="stat">
+			<span class="value">{summary.stats.active_total}</span>
+			<span class="label">активных</span>
+		</div>
+		<div class="stat danger">
+			<span class="value">{summary.stats.overdue_count}</span>
+			<span class="label">просрочено</span>
+		</div>
+		<div class="stat warning">
+			<span class="value">{summary.stats.high_priority_count}</span>
+			<span class="label">высокий приоритет</span>
+		</div>
+		<div class="stat success">
+			<span class="value">{summary.stats.completed_today}</span>
+			<span class="label">выполнено сегодня</span>
+		</div>
+		<div class="stat">
+			<span class="value">{summary.stats.inbox_count}</span>
+			<span class="label">во входящих</span>
+		</div>
+	</section>
+
+	{#if focus}
+		<section class="focus">
+			<div class="focus-head">
+				<span class="focus-badge">Фокус</span>
+				<span class="focus-priority">{priorityLabel(focus.priority)}</span>
+			</div>
+			<h2>{focus.title}</h2>
+			<p class="muted">{focus.time === '—' ? 'Без точного времени' : `Сегодня в ${focus.time}`}</p>
+			<button class="primary" disabled={busyId === focus.id} on:click={() => complete(focus.id)}>
+				Завершить
+			</button>
+		</section>
+	{/if}
+
+	<div class="columns">
+		<section>
+			<h2 class="section-title">Задачи на сегодня</h2>
+			{#if summary.today.length === 0}
+				<p class="empty">На сегодня задач нет. Добавьте через быстрый ввод или раздел «Задачи».</p>
+			{:else}
+				<ul class="list">
+					{#each summary.today as item}
+						<li>
+							<div class="item-main">
+								<span class="item-title">{item.title}</span>
+								<span class="item-meta">{item.time === '—' ? 'без времени' : item.time} · {priorityLabel(item.priority)}</span>
+							</div>
+							<button class="ghost" disabled={busyId === item.id} on:click={() => complete(item.id)}>Готово</button>
+						</li>
+					{/each}
+				</ul>
+			{/if}
+		</section>
+
+		<section>
+			<h2 class="section-title">Просроченные</h2>
+			{#if summary.overdue.length === 0}
+				<p class="empty">Просроченных задач нет.</p>
+			{:else}
+				<ul class="list">
+					{#each summary.overdue as item}
+						<li>
+							<div class="item-main">
+								<span class="item-title">{item.title}</span>
+								<span class="item-meta danger-text">
+									{item.days_overdue === 1 ? '1 день' : `${item.days_overdue} дн.`} · {priorityLabel(item.priority)}
+								</span>
+							</div>
+							<button class="ghost" disabled={busyId === item.id} on:click={() => complete(item.id)}>Готово</button>
+						</li>
+					{/each}
+				</ul>
+			{/if}
+		</section>
+	</div>
+{/if}
 
 <style>
-	.container {
-		min-height: 100vh;
+	.page-header {
 		display: flex;
-		align-items: center;
-		justify-content: center;
-		padding: 2rem;
-	}
-
-	.card {
-		background: var(--bg-card, #12121a);
-		border: 1px solid var(--border, #2a2a3a);
-		border-radius: 16px;
-		padding: 3rem 2rem;
-		max-width: 400px;
-		width: 100%;
-		text-align: center;
-		box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
-	}
-
-	.logo {
-		margin-bottom: 1rem;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 1rem;
+		margin-bottom: 1.25rem;
 	}
 
 	h1 {
-		font-size: 2.5rem;
-		font-weight: 700;
-		background: linear-gradient(135deg, #8b5cf6, #06b6d4);
-		-webkit-background-clip: text;
-		-webkit-text-fill-color: transparent;
-		background-clip: text;
-		margin: 0 0 0.5rem;
+		margin: 0;
+		font-size: 1.9rem;
+		letter-spacing: -0.02em;
 	}
 
 	.subtitle {
-		color: var(--fg-muted, #71717a);
-		margin: 0 0 2rem;
-		font-size: 1rem;
+		margin: 0.25rem 0 0;
+		color: var(--fg-muted);
+		font-size: 0.9rem;
 	}
 
-	.status {
+	.refresh {
+		background: transparent;
+		border: 1px solid var(--border);
+		color: var(--fg-muted);
+		border-radius: 8px;
+		padding: 0.4rem 0.7rem;
+		font-size: 0.8rem;
+		cursor: pointer;
+	}
+
+	.banner {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 1rem;
+		padding: 0.7rem 0.9rem;
+		margin-bottom: 1rem;
+		border: 1px solid rgba(248, 113, 113, 0.4);
+		background: rgba(248, 113, 113, 0.08);
+		color: #fca5a5;
+		border-radius: 10px;
+		font-size: 0.85rem;
+	}
+
+	.banner button {
+		background: none;
+		border: none;
+		color: inherit;
+		font-size: 1.1rem;
+		cursor: pointer;
+	}
+
+	.capture {
+		display: flex;
+		gap: 0.5rem;
+		margin-bottom: 1.5rem;
+	}
+
+	.capture input {
+		flex: 1;
+		padding: 0.7rem 0.9rem;
+		border-radius: 10px;
+	}
+
+	.capture button,
+	.primary {
+		background: linear-gradient(135deg, #8b5cf6, #06b6d4);
+		color: #0a0a0f;
+		border: none;
+		border-radius: 10px;
+		padding: 0.7rem 1rem;
+		font-weight: 600;
+		cursor: pointer;
+	}
+
+	.capture button:disabled,
+	.primary:disabled {
+		opacity: 0.55;
+		cursor: default;
+	}
+
+	.stats {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+		gap: 0.6rem;
+		margin-bottom: 1.5rem;
+	}
+
+	.stat {
+		display: flex;
+		flex-direction: column;
+		gap: 0.15rem;
+		padding: 0.8rem 0.9rem;
+		border: 1px solid var(--border);
+		border-radius: 12px;
+		background: var(--bg-card);
+	}
+
+	.stat .value {
+		font-size: 1.4rem;
+		font-weight: 650;
+	}
+
+	.stat .label {
+		font-size: 0.72rem;
+		color: var(--fg-muted);
+	}
+
+	.stat.danger .value {
+		color: #fca5a5;
+	}
+
+	.stat.warning .value {
+		color: #fcd34d;
+	}
+
+	.stat.success .value {
+		color: #86efac;
+	}
+
+	.focus {
+		padding: 1.1rem 1.2rem;
+		border-radius: 14px;
+		border: 1px solid rgba(139, 92, 246, 0.35);
+		background: radial-gradient(120% 140% at 0% 0%, rgba(139, 92, 246, 0.18), rgba(18, 18, 26, 0.9));
+		margin-bottom: 1.75rem;
+	}
+
+	.focus-head {
 		display: flex;
 		align-items: center;
-		justify-content: center;
-		gap: 0.5rem;
-		padding: 1rem;
-		background: var(--bg-primary, #0a0a0f);
-		border-radius: 8px;
-		margin-bottom: 1.5rem;
-		font-family: 'JetBrains Mono', monospace;
-		font-size: 0.875rem;
+		gap: 0.6rem;
+		margin-bottom: 0.4rem;
 	}
 
-	.status svg {
-		width: 20px;
-		height: 20px;
+	.focus-badge {
+		font-size: 0.68rem;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: #c4b5fd;
 	}
 
-	.status .spin {
-		animation: spin 1s linear infinite;
-		color: var(--accent, #8b5cf6);
+	.focus-priority {
+		font-size: 0.72rem;
+		color: var(--fg-muted);
 	}
 
-	@keyframes spin {
-		from { transform: rotate(0deg); }
-		to { transform: rotate(360deg); }
+	.focus h2 {
+		margin: 0 0 0.3rem;
+		font-size: 1.15rem;
 	}
 
-	.text-success { color: #22c55e; }
-	.text-error { color: #ef4444; }
-	.text-accent { color: #8b5cf6; }
+	.focus .primary {
+		margin-top: 0.8rem;
+		padding: 0.5rem 0.9rem;
+		font-size: 0.85rem;
+	}
 
-	.version {
-		color: var(--fg-muted, #71717a);
-		font-size: 0.75rem;
+	.columns {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+		gap: 1.5rem;
+	}
+
+	.section-title {
+		font-size: 0.8rem;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--fg-muted);
+		margin: 0 0 0.6rem;
+	}
+
+	.list {
+		list-style: none;
 		margin: 0;
+		padding: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+	}
+
+	.list li {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.75rem;
+		padding: 0.7rem 0.85rem;
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		background: var(--bg-card);
+	}
+
+	.item-main {
+		display: flex;
+		flex-direction: column;
+		gap: 0.15rem;
+		min-width: 0;
+	}
+
+	.item-title {
+		font-size: 0.9rem;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.item-meta {
+		font-size: 0.74rem;
+		color: var(--fg-muted);
+	}
+
+	.ghost {
+		background: transparent;
+		border: 1px solid var(--border);
+		color: var(--fg-muted);
+		border-radius: 7px;
+		padding: 0.3rem 0.55rem;
+		font-size: 0.75rem;
+		cursor: pointer;
+		flex-shrink: 0;
+	}
+
+	.ghost:hover:not(:disabled) {
+		color: var(--fg-primary);
+	}
+
+	.empty,
+	.muted {
+		color: var(--fg-muted);
+		font-size: 0.85rem;
+	}
+
+	.danger-text {
+		color: #fca5a5;
 	}
 </style>

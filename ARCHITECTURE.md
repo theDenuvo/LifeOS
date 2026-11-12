@@ -181,7 +181,14 @@ Transport (HTTP, MCP) ──► Application ──► Domain
 
 ### `internal/web/dist`
 - `embed.FS` для статических файлов фронтенда
-- Served через HTTP transport
+- Served через HTTP transport; SPA-fallback на `index.html`
+
+### `web` (SvelteKit 2 + Svelte 5)
+- SPA (`ssr = false`), статический adapter, встраивается в Go-бинарник
+- Экраны: `/` (Сегодня), `/inbox` (Входящие), `/tasks` (Все задачи), `/assistant` (заглушка до Stage 5)
+- `web/src/lib/api.ts` — типизированный клиент REST API; мутации отправляют `If-Match` с версией задачи
+- `web/src/lib/components/TaskRow.svelte` — общая карточка задачи (завершение, отмена, восстановление, перенос)
+- Визуальное направление — Concept B (тёмная тема, фиолетово-голубые акценты, боковая навигация, mobile bottom nav)
 
 ---
 

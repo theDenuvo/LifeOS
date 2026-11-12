@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
@@ -155,6 +156,42 @@ func (r *inboxRepository) CountUnprocessed(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("count unprocessed inbox items: %w", err)
 	}
 	return count, nil
+}
+
+// Search looks for text in captured items.
+//
+// Matching happens in Go with Unicode-aware case folding: SQLite's lower()/LIKE
+// only fold ASCII, which would miss "Молоко" for a "молоко" query. The personal
+// inbox is small enough that scanning it is cheaper than maintaining a separate
+// search index.
+func (r *inboxRepository) Search(ctx context.Context, query string, limit int) ([]*domaininbox.Item, int, error) {
+	rows, err := r.tx.QueryContext(ctx,
+		`SELECT `+inboxColumns+` FROM inbox_items ORDER BY created_at DESC, id DESC`)
+	if err != nil {
+		return nil, 0, fmt.Errorf("search inbox: %w", err)
+	}
+	defer rows.Close()
+
+	needle := strings.ToLower(query)
+	matches := make([]*domaininbox.Item, 0, limit)
+	total := 0
+	for rows.Next() {
+		item, err := scanInboxItem(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		if !strings.Contains(strings.ToLower(item.Text), needle) {
+			continue
+		}
+		total++
+		if len(matches) < limit {
+			matches = append(matches, item)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("scan inbox search: %w", err)
+	}
+	return matches, total, nil
 }
 
 // scanInboxItem converts one row into the domain entity.

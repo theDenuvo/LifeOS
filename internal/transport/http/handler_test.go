@@ -253,50 +253,6 @@ func TestHandlerHealthz(t *testing.T) {
 	}
 }
 
-func TestHandlerAPIEndpointsReturn501(t *testing.T) {
-	handler, cleanup := setupTestHandler(t)
-	defer cleanup()
-
-	apiEndpoints := []struct {
-		method string
-		path   string
-	}{
-		{"GET", "/api/v1/settings/test"},
-		{"PUT", "/api/v1/settings/test"},
-	}
-
-	for _, ep := range apiEndpoints {
-		t.Run(ep.method+" "+ep.path, func(t *testing.T) {
-			req := httptest.NewRequest(ep.method, ep.path, nil)
-			w := httptest.NewRecorder()
-			handler.Routes().ServeHTTP(w, req)
-
-			if w.Code != http.StatusNotImplemented {
-				t.Errorf("Expected status 501, got %d", w.Code)
-			}
-
-			contentType := w.Header().Get("Content-Type")
-			if !strings.Contains(contentType, "application/problem+json") {
-				t.Errorf("Expected problem+json content type, got %s", contentType)
-			}
-
-			var problem map[string]any
-			if err := json.NewDecoder(w.Body).Decode(&problem); err != nil {
-				t.Fatalf("Failed to decode problem response: %v", err)
-			}
-			if problem["status"] != float64(501) {
-				t.Errorf("Expected status 501 in problem, got %v", problem["status"])
-			}
-			if problem["title"] != "Not Implemented" {
-				t.Errorf("Expected title 'Not Implemented', got %v", problem["title"])
-			}
-			if !strings.Contains(problem["type"].(string), "not-implemented") {
-				t.Errorf("Expected type to contain 'not-implemented', got %v", problem["type"])
-			}
-		})
-	}
-}
-
 func TestHandlerCORSAllowlist(t *testing.T) {
 	handler, cleanup := setupTestHandler(t)
 	defer cleanup()

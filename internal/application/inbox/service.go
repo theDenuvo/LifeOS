@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -49,6 +50,7 @@ type Repository interface {
 	MarkProcessed(ctx context.Context, id int64, processedAt time.Time, taskID int64) error
 	Delete(ctx context.Context, id int64) error
 	CountUnprocessed(ctx context.Context) (int, error)
+	Search(ctx context.Context, query string, limit int) ([]*domaininbox.Item, int, error)
 }
 
 // Transaction exposes the repositories bound to one transaction.
@@ -194,6 +196,34 @@ func (s *Service) CountUnprocessed(ctx context.Context) (int, error) {
 		return nil
 	})
 	return count, err
+}
+
+// Search looks for captured text.
+func (s *Service) Search(ctx context.Context, query string, limit int) (ListResult, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return ListResult{}, fmt.Errorf("%w: query is required", ErrInvalidLimit)
+	}
+	if limit <= 0 {
+		limit = DefaultPageLimit
+	}
+	if limit > MaxPageLimit {
+		limit = MaxPageLimit
+	}
+
+	var result ListResult
+	err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
+		items, total, err := tx.Inbox().Search(ctx, query, limit)
+		if err != nil {
+			return err
+		}
+		result = ListResult{Items: items, Total: total, Limit: limit, Offset: 0}
+		return nil
+	})
+	if err != nil {
+		return ListResult{}, err
+	}
+	return result, nil
 }
 
 // ConvertToTask turns an inbox item into a task and marks the item processed.

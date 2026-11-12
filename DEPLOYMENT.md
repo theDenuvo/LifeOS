@@ -424,7 +424,7 @@ journalctl -u lifeos -o json | jq '.MESSAGE'
 # Liveness
 curl -f http://127.0.0.1:8787/healthz || exit 1
 
-# Readiness (если добавим проверку БД)
+# Readiness (проверка доступности БД)
 curl -f http://127.0.0.1:8787/readyz || exit 1
 ```
 

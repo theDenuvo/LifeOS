@@ -108,6 +108,7 @@ func main() {
 		Summary:   summaryService,
 		Assistant: assistantService,
 		Proactive: proactiveService,
+		Tools:     registry,
 		Events:    broker,
 	}).Routes()
 

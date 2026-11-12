@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/theDenuvo/LifeOS/internal/agent/tools"
 	"github.com/theDenuvo/LifeOS/internal/application/assistant"
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
 	"github.com/theDenuvo/LifeOS/internal/application/proactive"
@@ -17,6 +18,7 @@ import (
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	"github.com/theDenuvo/LifeOS/internal/config"
 	"github.com/theDenuvo/LifeOS/internal/events"
+	mcptransport "github.com/theDenuvo/LifeOS/internal/transport/mcp"
 )
 
 // Services groups the application services the HTTP transport exposes.
@@ -26,6 +28,7 @@ type Services struct {
 	Summary   *summary.Service
 	Assistant *assistant.Service
 	Proactive *proactive.Service
+	Tools     *tools.Registry
 	Events    *events.Broker
 }
 
@@ -89,9 +92,7 @@ func (h *Handler) apiRoutes() http.Handler {
 }
 
 func (h *Handler) mcpRoutes() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", h.notImplemented)
-	return mux
+	return mcptransport.NewServer(h.services.Tools, h.cfg.MCPAllowWrites, "dev")
 }
 
 func (h *Handler) notImplemented(w http.ResponseWriter, r *http.Request) {

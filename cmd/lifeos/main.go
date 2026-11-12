@@ -16,6 +16,7 @@ import (
 	"github.com/theDenuvo/LifeOS/internal/agent/tools"
 	"github.com/theDenuvo/LifeOS/internal/application/assistant"
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
+	"github.com/theDenuvo/LifeOS/internal/application/proactive"
 	"github.com/theDenuvo/LifeOS/internal/application/summary"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	"github.com/theDenuvo/LifeOS/internal/config"
@@ -92,12 +93,21 @@ func main() {
 		assistant.WithPublisher(broker),
 	)
 
+	proactiveService := proactive.NewService(
+		sqlite.NewInsightUnitOfWork(db),
+		taskService,
+		inboxService,
+		clock,
+		cfg.Timezone,
+	)
+
 	// Create HTTP handler with all routes
 	handler := httptransport.NewHandler(db, cfg, dist.FS, httptransport.Services{
 		Tasks:     taskService,
 		Inbox:     inboxService,
 		Summary:   summaryService,
 		Assistant: assistantService,
+		Proactive: proactiveService,
 		Events:    broker,
 	}).Routes()
 
@@ -121,6 +131,9 @@ func main() {
 			stop()
 		}
 	}()
+
+	// Proactive runner: recompute insights periodically and announce new ones.
+	go proactive.NewRunner(proactiveService, broker, 15*time.Minute).Start(ctx)
 
 	<-ctx.Done()
 	slog.Info("Shutting down...")

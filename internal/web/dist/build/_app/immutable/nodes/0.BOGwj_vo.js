@@ -1,1 +1,0 @@
-import{a as s,f as e}from"../chunks/Cc3unNEw.js";import{s as m}from"../chunks/DoPEXvsc.js";import{B as p,C as f}from"../chunks/X2L4cfdR.js";var i=e('<div class="app svelte-12qhfyh"><!></div>');function n(a,r){var o=i(),t=p(o);m(t,r,"default",{}),f(o),s(a,o)}export{n as component};

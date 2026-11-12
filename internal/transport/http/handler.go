@@ -12,6 +12,7 @@ import (
 
 	"github.com/theDenuvo/LifeOS/internal/application/assistant"
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
+	"github.com/theDenuvo/LifeOS/internal/application/proactive"
 	"github.com/theDenuvo/LifeOS/internal/application/summary"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	"github.com/theDenuvo/LifeOS/internal/config"
@@ -24,6 +25,7 @@ type Services struct {
 	Inbox     *inbox.Service
 	Summary   *summary.Service
 	Assistant *assistant.Service
+	Proactive *proactive.Service
 	Events    *events.Broker
 }
 
@@ -78,6 +80,9 @@ func (h *Handler) apiRoutes() http.Handler {
 	mux.HandleFunc("POST /assistant/pending-actions/{id}/confirm", h.confirmPendingAction)
 	mux.HandleFunc("POST /assistant/pending-actions/{id}/reject", h.rejectPendingAction)
 	mux.HandleFunc("GET /events", h.streamEvents)
+	mux.HandleFunc("GET /insights", h.listInsights)
+	mux.HandleFunc("POST /insights/{key}/dismiss", h.dismissInsight)
+	mux.HandleFunc("POST /insights/{key}/snooze", h.snoozeInsight)
 	mux.HandleFunc("GET /settings/{key}", h.notImplemented)
 	mux.HandleFunc("PUT /settings/{key}", h.notImplemented)
 	return mux

@@ -1,6 +1,8 @@
 <script lang="ts">
 	import '../app.css';
+	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
+	import { startLive } from '$lib/live';
 
 	const nav = [
 		{ href: '/', label: 'Сегодня', icon: 'M12 7v5l3 3M21 12a9 9 0 11-18 0 9 9 0 0118 0z' },
@@ -10,6 +12,8 @@
 	];
 
 	$: current = $page.url.pathname;
+
+	onMount(startLive);
 </script>
 
 <div class="shell">

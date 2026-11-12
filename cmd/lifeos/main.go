@@ -16,6 +16,7 @@ import (
 	"github.com/theDenuvo/LifeOS/internal/application/summary"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	"github.com/theDenuvo/LifeOS/internal/config"
+	"github.com/theDenuvo/LifeOS/internal/events"
 	"github.com/theDenuvo/LifeOS/internal/infrastructure/sqlite"
 	"github.com/theDenuvo/LifeOS/internal/transport/http"
 	"github.com/theDenuvo/LifeOS/internal/web/dist"
@@ -63,12 +64,14 @@ func main() {
 
 	// Application services over the SQLite units of work.
 	clock := tasks.SystemClock()
+	broker := events.NewBroker()
 	taskService := tasks.NewService(
 		sqlite.NewTaskUnitOfWork(db),
 		clock,
 		tasks.WithDefaultTimezone(cfg.Timezone),
+		tasks.WithPublisher(broker),
 	)
-	inboxService := inbox.NewService(sqlite.NewInboxUnitOfWork(db), clock, cfg.Timezone)
+	inboxService := inbox.NewService(sqlite.NewInboxUnitOfWork(db), clock, cfg.Timezone, inbox.WithPublisher(broker))
 	summaryService := summary.NewService(taskService, inboxService, clock, cfg.Timezone)
 
 	// Create HTTP handler with all routes
@@ -76,6 +79,7 @@ func main() {
 		Tasks:   taskService,
 		Inbox:   inboxService,
 		Summary: summaryService,
+		Events:  broker,
 	}).Routes()
 
 	// HTTP Server

@@ -13,6 +13,7 @@
 		type Task
 	} from '$lib/api';
 	import { errorMessage, todayISO } from '$lib/format';
+	import { liveRevision } from '$lib/live';
 
 	const limit = 20;
 
@@ -115,7 +116,19 @@
 		}
 	}
 
-	onMount(load);
+	onMount(() => {
+		load();
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const unsubscribe = liveRevision.subscribe((revision) => {
+			if (revision === 0) return;
+			clearTimeout(timer);
+			timer = setTimeout(load, 200);
+		});
+		return () => {
+			unsubscribe();
+			clearTimeout(timer);
+		};
+	});
 </script>
 
 <svelte:head>

@@ -554,20 +554,17 @@ paths:
       parameters:
       - name: Last-Event-ID
         in: header
+        required: false
         schema:
           type: string
-        description: Resume from last received event ID
+        description: Replay buffered events with a greater id after a reconnect
       responses:
         '200':
-          description: Event stream
+          description: Event stream (SSE). Each frame has id, event and JSON data.
           content:
             text/event-stream:
               schema:
                 type: string
-        '501':
-          $ref: '#/components/responses/NotImplementedError'
-        '400':
-          $ref: '#/components/responses/ValidationError'
   /api/v1/settings/{key}:
     get:
       summary: Get a setting value

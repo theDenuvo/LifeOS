@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/theDenuvo/LifeOS/internal/domain/task"
+	"github.com/theDenuvo/LifeOS/internal/events"
 )
 
 // DefaultPriority and DefaultTimezone are the product defaults for new tasks.
@@ -23,10 +24,19 @@ type Service struct {
 	uow             UnitOfWork
 	clock           Clock
 	defaultTimezone string
+	publisher       events.Publisher
 }
 
 // ServiceOption customises a Service.
 type ServiceOption func(*Service)
+
+// WithPublisher attaches an event publisher. Mutations publish after their
+// transaction commits, so subscribers never observe rolled-back work.
+func WithPublisher(publisher events.Publisher) ServiceOption {
+	return func(s *Service) {
+		s.publisher = publisher
+	}
+}
 
 // WithDefaultTimezone overrides the default IANA timezone for new tasks.
 func WithDefaultTimezone(tz string) ServiceOption {
@@ -130,6 +140,7 @@ func (s *Service) CreateTask(ctx context.Context, in CreateTaskInput, actor task
 		return TaskWithVersion{}, err
 	}
 
+	s.publish("task.created", result)
 	return result, nil
 }
 
@@ -249,6 +260,7 @@ func (s *Service) UpdateTask(ctx context.Context, id int64, expectedVersion int,
 		return TaskWithVersion{}, err
 	}
 
+	s.publish("task.updated", result)
 	return result, nil
 }
 
@@ -331,6 +343,7 @@ func (s *Service) RescheduleTask(ctx context.Context, id int64, expectedVersion 
 		return TaskWithVersion{}, err
 	}
 
+	s.publish("task.rescheduled", result)
 	return result, nil
 }
 
@@ -381,7 +394,20 @@ func (s *Service) transition(
 		return TaskWithVersion{}, err
 	}
 
+	s.publish("task."+string(eventType), result)
 	return result, nil
+}
+
+// publish emits a change notification when a publisher is configured.
+func (s *Service) publish(eventType string, result TaskWithVersion) {
+	if s.publisher == nil || result.Task == nil {
+		return
+	}
+	s.publisher.Publish(eventType, map[string]any{
+		"id":      result.Task.ID,
+		"version": result.Version,
+		"status":  string(result.Task.Status),
+	})
 }
 
 // buildUpdateOptions converts a partial update into domain options.

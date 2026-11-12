@@ -174,6 +174,11 @@ Transport (HTTP, MCP) ──► Application ──► Domain
 - Валидация входных данных
 - Возврат структурированных результатов
 
+### `internal/events`
+- In-process broker для SSE: подписки, буфер последних 256 событий, `Last-Event-ID` replay
+- Application services публикуют события после успешного commit, не после rollback
+- Транспорт не знает о домене: payload — минимальные `{id, version, status}`
+
 ### `internal/config`
 - Чтение `.env` и env vars
 - Defaults, валидация
@@ -211,8 +216,10 @@ User Message → Agent → LLM (с инструментами) → Tool Call →
 
 ### SSE (Realtime)
 ```
-Client → GET /api/v1/events → Server → подписка на внутренние события (task.created, task.updated, inbox.captured) → stream
+Client → GET /api/v1/events (Last-Event-ID) → Broker.Subscribe + Replay → stream
+Application service → commit → Broker.Publish → все подписчики
 ```
+Реализовано: `task.*`, `inbox.*`; фронтенд перезагружает данные по событию (debounce 200 мс).
 
 ### Frontend → Backend
 ```

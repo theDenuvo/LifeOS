@@ -17,6 +17,7 @@ import (
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	domaininbox "github.com/theDenuvo/LifeOS/internal/domain/inbox"
 	"github.com/theDenuvo/LifeOS/internal/domain/task"
+	"github.com/theDenuvo/LifeOS/internal/events"
 )
 
 // Application errors.
@@ -93,17 +94,33 @@ type Service struct {
 	uow             UnitOfWork
 	clock           tasks.Clock
 	defaultTimezone string
+	publisher       events.Publisher
+}
+
+// Option customises an inbox service.
+type Option func(*Service)
+
+// WithPublisher attaches an event publisher. Mutations publish after their
+// transaction commits.
+func WithPublisher(publisher events.Publisher) Option {
+	return func(s *Service) {
+		s.publisher = publisher
+	}
 }
 
 // NewService builds an inbox service.
-func NewService(uow UnitOfWork, clock tasks.Clock, defaultTimezone string) *Service {
+func NewService(uow UnitOfWork, clock tasks.Clock, defaultTimezone string, opts ...Option) *Service {
 	if clock == nil {
 		clock = tasks.SystemClock()
 	}
 	if defaultTimezone == "" {
 		defaultTimezone = tasks.DefaultTimezone
 	}
-	return &Service{uow: uow, clock: clock, defaultTimezone: defaultTimezone}
+	s := &Service{uow: uow, clock: clock, defaultTimezone: defaultTimezone}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Capture stores a new inbox item.
@@ -125,6 +142,7 @@ func (s *Service) Capture(ctx context.Context, text string, meta json.RawMessage
 	if err != nil {
 		return nil, err
 	}
+	s.publish("inbox.captured", map[string]any{"id": item.ID})
 	return item, nil
 }
 
@@ -256,12 +274,17 @@ func (s *Service) ConvertToTask(ctx context.Context, id int64, in ConvertInput) 
 	if err != nil {
 		return tasks.TaskWithVersion{}, err
 	}
+	s.publish("inbox.converted", map[string]any{
+		"inbox_id": id,
+		"task_id":  result.Task.ID,
+		"version":  result.Version,
+	})
 	return result, nil
 }
 
 // Dismiss deletes an unprocessed inbox item.
 func (s *Service) Dismiss(ctx context.Context, id int64) error {
-	return s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
+	err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
 		item, err := tx.Inbox().FindByID(ctx, id)
 		if err != nil {
 			return err
@@ -271,6 +294,19 @@ func (s *Service) Dismiss(ctx context.Context, id int64) error {
 		}
 		return tx.Inbox().Delete(ctx, id)
 	})
+	if err != nil {
+		return err
+	}
+	s.publish("inbox.dismissed", map[string]any{"id": id})
+	return nil
+}
+
+// publish emits a change notification when a publisher is configured.
+func (s *Service) publish(eventType string, data any) {
+	if s.publisher == nil {
+		return
+	}
+	s.publisher.Publish(eventType, data)
 }
 
 // splitCapturedText fits captured text into the task title limit.

@@ -460,7 +460,11 @@ data: {"id": 5, "tool": "create_task", "preview": {...}}
 - `assistant.message` (user/assistant/tool)
 - `pending_action.created`, `pending_action.resolved`
 
-**Переподключение:** Клиент должен переподключаться с `Last-Event-ID` для восстановления пропущенных событий.
+**Переподключение:** Клиент переподключается с `Last-Event-ID`; сервер хранит буфер последних 256 событий и досылает пропущенное. Каждые 15 секунд отправляется комментарий-keepalive (`: keepalive`).
+
+**Payload:** события задач содержат `{"id", "version", "status"}` — этого достаточно, чтобы клиент перечитал задачу по REST и не зависел от формы домена. События входящих: `{"id"}` для `inbox.captured`/`inbox.dismissed`, `{"inbox_id", "task_id", "version"}` для `inbox.converted`.
+
+**Доставка:** in-process broker, доставка неблокирующая. Медленный клиент может пропустить событие и восстановить его при переподключении по `Last-Event-ID`.
 
 ---
 

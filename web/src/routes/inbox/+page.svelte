@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { captureInbox, convertInbox, dismissInbox, listInbox, type InboxItem } from '$lib/api';
 	import { errorMessage, formatTime } from '$lib/format';
+	import { liveRevision } from '$lib/live';
 
 	let items: InboxItem[] = [];
 	let loading = true;
@@ -64,7 +65,19 @@
 		}
 	}
 
-	onMount(load);
+	onMount(() => {
+		load();
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const unsubscribe = liveRevision.subscribe((revision) => {
+			if (revision === 0) return;
+			clearTimeout(timer);
+			timer = setTimeout(load, 200);
+		});
+		return () => {
+			unsubscribe();
+			clearTimeout(timer);
+		};
+	});
 </script>
 
 <svelte:head>

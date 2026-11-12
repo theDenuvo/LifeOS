@@ -74,10 +74,18 @@ type UpdateTaskInput struct {
 }
 
 // RescheduleTaskInput carries the scheduling fields for RescheduleTask.
+//
+// Clearing follows the same rule as UpdateTask: Some(task.CalendarDate{}) clears
+// a calendar deadline and Some(time.Time{}) clears the exact deadline.
 type RescheduleTaskInput struct {
 	PlannedDate Optional[task.CalendarDate]
 	DueDate     Optional[task.CalendarDate]
 	DueAt       Optional[time.Time]
+}
+
+// anySet reports whether the request carries at least one field.
+func (in RescheduleTaskInput) anySet() bool {
+	return in.PlannedDate.IsSet() || in.DueDate.IsSet() || in.DueAt.IsSet()
 }
 
 // TaskSortField is a permitted sort column.
@@ -122,6 +130,13 @@ type TaskFilter struct {
 	Sorts       []TaskSort
 	Limit       Optional[int]
 	Offset      Optional[int]
+
+	// AsOf is the reference instant used to evaluate the Overdue filter. It is
+	// populated by Service.ListTasks from the injected Clock whenever Overdue is
+	// set; a repository must use it rather than reading a clock of its own, so
+	// overdue is deterministic and agrees with Task.IsOverdue. It is ignored when
+	// Overdue is not set.
+	AsOf Optional[time.Time]
 }
 
 // ListTasksResult is a page of tasks plus pagination metadata.

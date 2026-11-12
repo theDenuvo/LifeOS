@@ -19,7 +19,6 @@ var testNow = time.Date(2026, 11, 12, 9, 0, 0, 0, time.UTC)
 func newTestService(t *testing.T, opts ...ServiceOption) (*Service, *FakeUnitOfWork) {
 	t.Helper()
 	uow := NewFakeUnitOfWork()
-	uow.OverdueNow = testNow
 	return NewService(uow, fixedClock{now: testNow}, opts...), uow
 }
 

@@ -47,6 +47,10 @@ type TaskRepository interface {
 
 	// List returns a page of tasks matching the filter, plus the total number
 	// of matching rows (ignoring limit/offset).
+	//
+	// When filter.Overdue is set, filter.AsOf carries the reference instant the
+	// caller chose: evaluate overdue with Task.IsOverdue(asOf) and never read a
+	// clock here. When AsOf is unset the overdue filter must not be applied.
 	List(ctx context.Context, filter TaskFilter) (ListTasksResult, error)
 
 	// Insert stores a new task and returns the generated ID. The stored version

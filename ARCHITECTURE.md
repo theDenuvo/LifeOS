@@ -112,6 +112,9 @@ Transport (HTTP, MCP) ──► Application ──► Domain
 
 - `TaskRepository` — `FindByID`, `List`, `Insert`, `Update(id, expectedVersion, task)`.
   `Update` обязан выполнять сравнение и инкремент одной инструкцией (`WHERE id = ? AND version = ?`, `version = version + 1`).
+- `TaskRepository.List` — при установленном фильтре `overdue` использует `TaskFilter.AsOf`
+  как reference instant для `Task.IsOverdue(asOf)`. Репозиторий не читает часы сам: `AsOf`
+  заполняет `Service.ListTasks` из внедрённого `Clock`. Если `AsOf` не задан, фильтр `overdue` не применяется.
 - `TaskEventRepository` — только `Insert`: история append-only.
 - `UnitOfWork` — `Do(ctx, fn)` открывает транзакцию, передаёт `Transaction` с репозиториями, делает commit при `nil` и rollback при ошибке или отмене контекста.
 - `Clock` — `Now() time.Time`; production-реализация использует `time.Now().UTC()`, в тестах подменяется фиксированным временем.

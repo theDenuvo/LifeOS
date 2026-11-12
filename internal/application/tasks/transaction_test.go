@@ -48,16 +48,18 @@ func (t *failingTx) Events() TaskEventRepository {
 
 func TestEventWriteFailureRollsBackTask(t *testing.T) {
 	inner := NewFakeUnitOfWork()
-	inner.OverdueNow = testNow
-	uow := &erroringUnitOfWork{inner: inner, eventErr: errors.New("event table unavailable")}
+	eventErr := errors.New("event table unavailable")
+	uow := &erroringUnitOfWork{inner: inner, eventErr: eventErr}
 	svc := NewService(uow, fixedClock{now: testNow})
 
-	created, err := svc.CreateTask(context.Background(), CreateTaskInput{Title: "x"}, task.ActorUser)
+	_, err := svc.CreateTask(context.Background(), CreateTaskInput{Title: "x"}, task.ActorUser)
 	if err == nil {
 		t.Fatal("expected the event failure to abort the transaction")
 	}
-	if !errors.Is(err, err) { // the injected error must surface unchanged
-		t.Fatalf("unexpected error: %v", err)
+	// The injected error must reach the caller unchanged, so Infrastructure can
+	// map it and callers can match it.
+	if !errors.Is(err, eventErr) {
+		t.Fatalf("error = %v, want the injected error %v", err, eventErr)
 	}
 
 	// Neither the task nor its version may exist after the rollback.
@@ -67,13 +69,12 @@ func TestEventWriteFailureRollsBackTask(t *testing.T) {
 	if inner.EventCount() != 0 {
 		t.Errorf("event count = %d, want 0", inner.EventCount())
 	}
-	_ = created
 }
 
 func TestEventWriteFailureRollsBackUpdate(t *testing.T) {
 	inner := NewFakeUnitOfWork()
-	inner.OverdueNow = testNow
-	failing := &erroringUnitOfWork{inner: inner, eventErr: errors.New("event write failed")}
+	eventErr := errors.New("event write failed")
+	failing := &erroringUnitOfWork{inner: inner, eventErr: eventErr}
 
 	// Create through the working inner service first.
 	svc := NewService(inner, fixedClock{now: testNow})
@@ -81,6 +82,7 @@ func TestEventWriteFailureRollsBackUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateTask failed: %v", err)
 	}
+	before := inner.EventCount()
 
 	// Now attempt an update through the failing wrapper.
 	failingSvc := NewService(failing, fixedClock{now: testNow})
@@ -89,6 +91,9 @@ func TestEventWriteFailureRollsBackUpdate(t *testing.T) {
 	}, task.ActorUser)
 	if err == nil {
 		t.Fatal("expected an error")
+	}
+	if !errors.Is(err, eventErr) {
+		t.Fatalf("error = %v, want the injected error %v", err, eventErr)
 	}
 
 	// The task must be untouched and the version unchanged.
@@ -101,6 +106,11 @@ func TestEventWriteFailureRollsBackUpdate(t *testing.T) {
 	}
 	if after.Version != created.Version {
 		t.Errorf("Version = %d, want unchanged %d", after.Version, created.Version)
+	}
+
+	// The failed transaction's event must not be committed either.
+	if got := inner.EventCount(); got != before {
+		t.Errorf("events = %d, want %d: the failed update left an event behind", got, before)
 	}
 }
 
@@ -135,7 +145,6 @@ func TestRollbackLeavesNoPartialUpdate(t *testing.T) {
 
 func TestCommitFailureDoesNotPersist(t *testing.T) {
 	uow := NewFakeUnitOfWork()
-	uow.OverdueNow = testNow
 	uow.CommitErr = errors.New("commit failed")
 	svc := NewService(uow, fixedClock{now: testNow})
 
@@ -153,7 +162,6 @@ func TestCommitFailureDoesNotPersist(t *testing.T) {
 
 func TestBeginFailurePropagates(t *testing.T) {
 	uow := NewFakeUnitOfWork()
-	uow.OverdueNow = testNow
 	uow.BeginErr = errors.New("no connection")
 	svc := NewService(uow, fixedClock{now: testNow})
 
@@ -205,7 +213,6 @@ func TestDeadlineExceededContext(t *testing.T) {
 
 func TestCancelledContextDuringTransactionRollsBack(t *testing.T) {
 	uow := NewFakeUnitOfWork()
-	uow.OverdueNow = testNow
 
 	ctx, cancel := context.WithCancel(context.Background())
 	svc := NewService(uow, fixedClock{now: testNow})
@@ -256,7 +263,6 @@ func TestNoHiddenSystemClock(t *testing.T) {
 	// application secretly read the system clock, these values would not match.
 	pinned := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
 	uow := NewFakeUnitOfWork()
-	uow.OverdueNow = pinned
 	svc := NewService(uow, fixedClock{now: pinned})
 
 	created, err := svc.CreateTask(context.Background(), CreateTaskInput{Title: "x"}, task.ActorUser)

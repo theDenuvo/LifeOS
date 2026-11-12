@@ -153,10 +153,19 @@ func (s *Service) GetTask(ctx context.Context, id int64) (TaskWithVersion, error
 }
 
 // ListTasks returns a filtered, sorted page of tasks.
+//
+// When the caller filters by overdue, the reference instant is taken from the
+// injected clock and travels with the filter, so the repository evaluates
+// overdue with the same deterministic semantics as the domain instead of
+// reading a clock of its own.
 func (s *Service) ListTasks(ctx context.Context, filter TaskFilter) (ListTasksResult, error) {
 	normalized, err := normalizeFilter(filter)
 	if err != nil {
 		return ListTasksResult{}, err
+	}
+
+	if normalized.Overdue.IsSet() {
+		normalized.AsOf = Some(s.clock.Now())
 	}
 
 	var result ListTasksResult
@@ -178,9 +187,11 @@ func (s *Service) ListTasks(ctx context.Context, filter TaskFilter) (ListTasksRe
 
 // UpdateTask applies a partial update under optimistic locking.
 //
-// Only supplied fields change. The task is re-read inside the transaction, the
-// options are applied through the domain (which validates and stays atomic),
-// and the write is conditional on the version the caller supplied.
+// Only supplied fields change. The task is re-read inside the transaction, a
+// deep snapshot is taken before any mutation, the options are applied through
+// the domain (which validates and stays atomic), and the write is conditional on
+// the version the caller supplied. The event payload is derived from the
+// snapshot and the final state, never from the request.
 func (s *Service) UpdateTask(ctx context.Context, id int64, expectedVersion int, in UpdateTaskInput, actor task.Actor) (TaskWithVersion, error) {
 	if err := validateActor(actor); err != nil {
 		return TaskWithVersion{}, err
@@ -188,35 +199,31 @@ func (s *Service) UpdateTask(ctx context.Context, id int64, expectedVersion int,
 
 	now := s.clock.Now()
 	var result TaskWithVersion
-	var previous *task.Task
 
 	err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
 		current, err := tx.Tasks().FindByID(ctx, id)
 		if err != nil {
 			return err
 		}
-		previous = current.Task
 
-		opts := buildUpdateOptions(in)
-		if len(opts) > 0 {
+		// Snapshot before mutating: Task.Update writes through the receiver, so
+		// holding the same pointer would compare the task with itself.
+		previous := cloneTask(current.Task)
+
+		if opts := buildUpdateOptions(in); len(opts) > 0 {
 			if err := current.Task.Update(now, opts...); err != nil {
 				return err
 			}
 		}
 
-		// Clearing a nullable field means storing "absent", which the domain
-		// already treats as a valid state (Validate only inspects non-nil
-		// values). The domain has no "clear" option, and the aggregate is the
-		// only place that can express absence, so the nil assignment happens
-		// here rather than by duplicating any validation.
-		applyClearFields(current.Task, in)
+		applyClears(current.Task, updateClears(in))
 
 		updated, err := tx.Tasks().Update(ctx, id, expectedVersion, current.Task)
 		if err != nil {
 			return err
 		}
 
-		event, err := current.Task.ToEvent(task.EventTypeUpdated, updatedPayload(previous, current.Task), actor, now)
+		event, err := current.Task.ToEvent(task.EventTypeUpdated, changesPayload(diffTasks(previous, current.Task)), actor, now)
 		if err != nil {
 			return err
 		}
@@ -251,8 +258,12 @@ func (s *Service) RestoreTask(ctx context.Context, id int64, expectedVersion int
 
 // RescheduleTask changes scheduling fields under optimistic locking.
 //
-// The domain refuses to reschedule a task that is not open; that error is
-// returned as-is so callers can match it with task.IsInvalidTransitionError.
+// Clearing works exactly as in UpdateTask: a zero CalendarDate or the zero
+// time.Time means "remove the deadline" and is never passed to the domain
+// options. A reschedule whose only change is a clear still goes through the
+// domain (so UpdatedAt moves), still bumps the version by one, and still writes
+// its event. The domain refuses to reschedule a task that is not open; that
+// error is returned unchanged.
 func (s *Service) RescheduleTask(ctx context.Context, id int64, expectedVersion int, in RescheduleTaskInput, actor task.Actor) (TaskWithVersion, error) {
 	if err := validateActor(actor); err != nil {
 		return TaskWithVersion{}, err
@@ -267,32 +278,34 @@ func (s *Service) RescheduleTask(ctx context.Context, id int64, expectedVersion 
 			return err
 		}
 
-		opts := make([]task.TaskOption, 0, 3)
-		if value, ok := in.PlannedDate.Get(); ok {
-			opts = append(opts, task.WithPlannedDate(value))
-		}
-		if value, ok := in.DueDate.Get(); ok {
-			opts = append(opts, task.WithDueDate(value))
-		}
-		if value, ok := in.DueAt.Get(); ok {
-			opts = append(opts, task.WithDueAt(value))
-		}
-		if len(opts) == 0 {
+		if !in.anySet() {
 			result = current
 			return nil
 		}
 
-		if err := current.Task.Reschedule(now, opts...); err != nil {
-			return err
+		previous := cloneTask(current.Task)
+
+		if opts := buildRescheduleOptions(in); len(opts) > 0 {
+			if err := current.Task.Reschedule(now, opts...); err != nil {
+				return err
+			}
+		} else {
+			// Only clears were requested. Reschedule with no options still
+			// validates the open status and moves UpdatedAt, so the operation is
+			// not a silent no-op.
+			if err := current.Task.Reschedule(now); err != nil {
+				return err
+			}
 		}
+
+		applyClears(current.Task, rescheduleClears(in))
 
 		updated, err := tx.Tasks().Update(ctx, id, expectedVersion, current.Task)
 		if err != nil {
 			return err
 		}
 
-		payload := map[string]any{"fields": describeReschedule(in)}
-		event, err := current.Task.ToEvent(task.EventTypeRescheduled, payload, actor, now)
+		event, err := current.Task.ToEvent(task.EventTypeRescheduled, changesPayload(diffScheduling(current.Task, previous)), actor, now)
 		if err != nil {
 			return err
 		}
@@ -361,6 +374,9 @@ func (s *Service) transition(
 }
 
 // buildUpdateOptions converts a partial update into domain options.
+//
+// A zero DueAt is a clear request, not a value: WithDueAt rejects the zero time,
+// so it is deliberately omitted here and handled by applyClears.
 func buildUpdateOptions(in UpdateTaskInput) []task.TaskOption {
 	opts := make([]task.TaskOption, 0, 8)
 
@@ -379,7 +395,7 @@ func buildUpdateOptions(in UpdateTaskInput) []task.TaskOption {
 	if value, ok := in.DueDate.Get(); ok {
 		opts = append(opts, task.WithDueDate(value))
 	}
-	if value, ok := in.DueAt.Get(); ok {
+	if value, ok := in.DueAt.Get(); ok && !value.IsZero() {
 		opts = append(opts, task.WithDueAt(value))
 	}
 	if value, ok := in.Timezone.Get(); ok {
@@ -392,81 +408,204 @@ func buildUpdateOptions(in UpdateTaskInput) []task.TaskOption {
 	return opts
 }
 
-// applyClearFields removes nullable fields the caller explicitly cleared.
+// buildRescheduleOptions converts reschedule input into domain options,
+// skipping a zero DueAt for the same reason as buildUpdateOptions.
+func buildRescheduleOptions(in RescheduleTaskInput) []task.TaskOption {
+	opts := make([]task.TaskOption, 0, 3)
+
+	if value, ok := in.PlannedDate.Get(); ok && !value.IsZero() {
+		opts = append(opts, task.WithPlannedDate(value))
+	}
+	if value, ok := in.DueDate.Get(); ok && !value.IsZero() {
+		opts = append(opts, task.WithDueDate(value))
+	}
+	if value, ok := in.DueAt.Get(); ok && !value.IsZero() {
+		opts = append(opts, task.WithDueAt(value))
+	}
+
+	return opts
+}
+
+// nullableClear records which nullable fields a use case was asked to clear.
 //
-// A zero CalendarDate or an empty note means "no value" in the contract; the
-// domain options would store a pointer to that zero value instead of removing
-// it, so the aggregate is normalised here. No validation is duplicated: the
-// values have already passed the domain's option checks, and Validate treats a
-// nil pointer as absent.
-func applyClearFields(t *task.Task, in UpdateTaskInput) {
+// It is the single place where the "explicit zero means absent" rule is
+// interpreted, so UpdateTask and RescheduleTask cannot drift apart.
+type nullableClear struct {
+	note        bool
+	plannedDate bool
+	dueDate     bool
+	dueAt       bool
+	tags        bool
+}
+
+func (c nullableClear) any() bool {
+	return c.note || c.plannedDate || c.dueDate || c.dueAt || c.tags
+}
+
+// updateClears derives the clear set from an UpdateTask request.
+func updateClears(in UpdateTaskInput) nullableClear {
+	var c nullableClear
 	if value, ok := in.Note.Get(); ok && value == "" {
-		t.Note = nil
+		c.note = true
 	}
 	if value, ok := in.PlannedDate.Get(); ok && value.IsZero() {
-		t.PlannedDate = nil
+		c.plannedDate = true
 	}
 	if value, ok := in.DueDate.Get(); ok && value.IsZero() {
-		t.DueDate = nil
+		c.dueDate = true
+	}
+	if value, ok := in.DueAt.Get(); ok && value.IsZero() {
+		c.dueAt = true
 	}
 	if value, ok := in.Tags.Get(); ok && len(value) == 0 {
+		c.tags = true
+	}
+	return c
+}
+
+// rescheduleClears derives the clear set from a RescheduleTask request.
+func rescheduleClears(in RescheduleTaskInput) nullableClear {
+	var c nullableClear
+	if value, ok := in.PlannedDate.Get(); ok && value.IsZero() {
+		c.plannedDate = true
+	}
+	if value, ok := in.DueDate.Get(); ok && value.IsZero() {
+		c.dueDate = true
+	}
+	if value, ok := in.DueAt.Get(); ok && value.IsZero() {
+		c.dueAt = true
+	}
+	return c
+}
+
+// applyClears stores "absent" for the fields the caller explicitly cleared.
+//
+// The domain options have already validated any real value; here the aggregate
+// is only normalised to nil/empty. No validation is duplicated — Validate
+// already treats a nil pointer and an empty slice as absent.
+func applyClears(t *task.Task, c nullableClear) {
+	if c.note {
+		t.Note = nil
+	}
+	if c.plannedDate {
+		t.PlannedDate = nil
+	}
+	if c.dueDate {
+		t.DueDate = nil
+	}
+	if c.dueAt {
+		t.DueAt = nil
+	}
+	if c.tags {
 		t.Tags = []string{}
 	}
 }
 
-// updatedPayload reports which fields a partial update changed.
-//
-// DATA_MODEL.md specifies a single-field shape for `updated` events; a partial
-// update can touch several fields, so the payload lists every changed field
-// under "fields" and keeps the documented keys for the single-field case.
-func updatedPayload(before, after *task.Task) map[string]any {
-	fields := make([]string, 0, 8)
-
-	if before.Title != after.Title {
-		fields = append(fields, "title")
-	}
-	if !equalStringPtr(before.Note, after.Note) {
-		fields = append(fields, "note")
-	}
-	if before.Priority != after.Priority {
-		fields = append(fields, "priority")
-	}
-	if !equalCalendarPtr(before.PlannedDate, after.PlannedDate) {
-		fields = append(fields, "planned_date")
-	}
-	if !equalCalendarPtr(before.DueDate, after.DueDate) {
-		fields = append(fields, "due_date")
-	}
-	if !equalTimePtr(before.DueAt, after.DueAt) {
-		fields = append(fields, "due_at")
-	}
-	if before.Timezone != after.Timezone {
-		fields = append(fields, "timezone")
-	}
-	if !equalStrings(before.Tags, after.Tags) {
-		fields = append(fields, "tags")
-	}
-
-	payload := map[string]any{"fields": fields}
-	if len(fields) == 1 {
-		payload["field"] = fields[0]
-	}
-	return payload
+// fieldChange is one normalised before/after pair in an audit payload.
+type fieldChange struct {
+	Field string `json:"field"`
+	Old   any    `json:"old"`
+	New   any    `json:"new"`
 }
 
-// describeReschedule summarises which scheduling fields were requested.
-func describeReschedule(in RescheduleTaskInput) []string {
-	fields := make([]string, 0, 3)
-	if in.PlannedDate.IsSet() {
-		fields = append(fields, "planned_date")
+// changesPayload renders the audit payload for a set of changed fields.
+//
+// One changed field keeps the documented single-field shape
+// ({field, old, new}); several use {changes: [...]}. Both come from the same
+// structure, so a single-field update is just a one-element list.
+func changesPayload(changes []fieldChange) map[string]any {
+	if len(changes) == 0 {
+		return map[string]any{"changes": []fieldChange{}}
 	}
-	if in.DueDate.IsSet() {
-		fields = append(fields, "due_date")
+	if len(changes) == 1 {
+		return map[string]any{
+			"field": changes[0].Field,
+			"old":   changes[0].Old,
+			"new":   changes[0].New,
+		}
 	}
-	if in.DueAt.IsSet() {
-		fields = append(fields, "due_at")
+	return map[string]any{"changes": changes}
+}
+
+// diffTasks returns the changed fields between two task states, in a stable
+// field order so payloads are reproducible.
+func diffTasks(before, after *task.Task) []fieldChange {
+	changes := make([]fieldChange, 0, 8)
+
+	if before.Title != after.Title {
+		changes = append(changes, fieldChange{Field: "title", Old: before.Title, New: after.Title})
 	}
-	return fields
+	if !equalStringPtr(before.Note, after.Note) {
+		changes = append(changes, fieldChange{Field: "note", Old: normalizeStringPtr(before.Note), New: normalizeStringPtr(after.Note)})
+	}
+	if before.Priority != after.Priority {
+		changes = append(changes, fieldChange{Field: "priority", Old: string(before.Priority), New: string(after.Priority)})
+	}
+	if !equalCalendarPtr(before.PlannedDate, after.PlannedDate) {
+		changes = append(changes, fieldChange{Field: "planned_date", Old: normalizeCalendarDate(before.PlannedDate), New: normalizeCalendarDate(after.PlannedDate)})
+	}
+	if !equalCalendarPtr(before.DueDate, after.DueDate) {
+		changes = append(changes, fieldChange{Field: "due_date", Old: normalizeCalendarDate(before.DueDate), New: normalizeCalendarDate(after.DueDate)})
+	}
+	if !equalTimePtr(before.DueAt, after.DueAt) {
+		changes = append(changes, fieldChange{Field: "due_at", Old: normalizeTime(before.DueAt), New: normalizeTime(after.DueAt)})
+	}
+	if before.Timezone != after.Timezone {
+		changes = append(changes, fieldChange{Field: "timezone", Old: before.Timezone, New: after.Timezone})
+	}
+	if !equalStrings(before.Tags, after.Tags) {
+		changes = append(changes, fieldChange{Field: "tags", Old: normalizeTags(before.Tags), New: normalizeTags(after.Tags)})
+	}
+
+	return changes
+}
+
+// diffScheduling is diffTasks restricted to the scheduling fields, which is all
+// a reschedule may change. The order matches diffTasks so a payload is identical
+// whether it came from an update or a reschedule.
+func diffScheduling(after, before *task.Task) []fieldChange {
+	all := diffTasks(before, after)
+	changes := make([]fieldChange, 0, 3)
+	for _, change := range all {
+		switch change.Field {
+		case "planned_date", "due_date", "due_at":
+			changes = append(changes, change)
+		}
+	}
+	return changes
+}
+
+// Normalised audit values. Domain pointers and structs must never reach the
+// payload: everything is rendered as a JSON scalar, string or array.
+
+func normalizeStringPtr(value *string) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+func normalizeCalendarDate(value *task.CalendarDate) any {
+	if value == nil || value.IsZero() {
+		return nil
+	}
+	return value.String()
+}
+
+func normalizeTime(value *time.Time) any {
+	if value == nil {
+		return nil
+	}
+	return value.UTC().Format(time.RFC3339)
+}
+
+func normalizeTags(value []string) any {
+	if value == nil {
+		return nil
+	}
+	tags := make([]string, len(value))
+	copy(tags, value)
+	return tags
 }
 
 // normalizeFilter applies defaults and validates list parameters.
@@ -511,6 +650,48 @@ func validateActor(actor task.Actor) error {
 		return task.ErrInvalidActor
 	}
 	return nil
+}
+
+// cloneTask returns a deep copy of a task with no shared mutable state.
+//
+// The application needs this to snapshot an aggregate before mutating it; the
+// domain deliberately exposes no Clone, so the copy lives here where the need
+// for it arises.
+func cloneTask(t *task.Task) *task.Task {
+	if t == nil {
+		return nil
+	}
+	copied := *t
+	if t.Note != nil {
+		note := *t.Note
+		copied.Note = &note
+	}
+	if t.DueAt != nil {
+		dueAt := *t.DueAt
+		copied.DueAt = &dueAt
+	}
+	if t.CompletedAt != nil {
+		value := *t.CompletedAt
+		copied.CompletedAt = &value
+	}
+	if t.CancelledAt != nil {
+		value := *t.CancelledAt
+		copied.CancelledAt = &value
+	}
+	if t.PlannedDate != nil {
+		value := *t.PlannedDate
+		copied.PlannedDate = &value
+	}
+	if t.DueDate != nil {
+		value := *t.DueDate
+		copied.DueDate = &value
+	}
+	if t.Tags != nil {
+		tags := make([]string, len(t.Tags))
+		copy(tags, t.Tags)
+		copied.Tags = tags
+	}
+	return &copied
 }
 
 func equalStringPtr(a, b *string) bool {

@@ -305,13 +305,19 @@ func TestRescheduleTask(t *testing.T) {
 	if last.Type != task.EventTypeRescheduled {
 		t.Errorf("event type = %v, want rescheduled", last.Type)
 	}
+	// A single changed field keeps the documented single-field shape.
 	var payload map[string]any
 	if err := last.PayloadAs(&payload); err != nil {
 		t.Fatalf("PayloadAs failed: %v", err)
 	}
-	fields, ok := payload["fields"].([]any)
-	if !ok || len(fields) != 1 || fields[0] != "due_date" {
-		t.Errorf("payload fields = %v, want [due_date]", payload["fields"])
+	if payload["field"] != "due_date" {
+		t.Errorf("payload field = %v, want due_date", payload["field"])
+	}
+	if payload["old"] != nil {
+		t.Errorf("payload old = %v, want nil (no due date before)", payload["old"])
+	}
+	if payload["new"] != "2027-01-15" {
+		t.Errorf("payload new = %v, want 2027-01-15", payload["new"])
 	}
 }
 

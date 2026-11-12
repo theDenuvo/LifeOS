@@ -26,6 +26,11 @@ type fakeData struct {
 type storedTask struct {
 	task    *task.Task
 	version int
+
+	// baseVersion is the committed version this staged write was based on
+	// (0 for an insert, which has no predecessor). The commit-time conflict
+	// check compares it against the committed row.
+	baseVersion int
 }
 
 func newFakeData() *fakeData {
@@ -45,9 +50,11 @@ type FakeUnitOfWork struct {
 	// BeginErr, when set, makes Begin fail.
 	BeginErr error
 
-	// OverdueNow is the instant used to evaluate the `overdue` filter.
-	// It is never read from the system clock; tests set it explicitly.
-	OverdueNow time.Time
+	// BeforeCommit, when set, runs after fn has staged its writes but before
+	// the commit-time conflict check. It lets a test interleave a competing
+	// transaction exactly where a real race would land: between another
+	// writer's read and its commit. It is called without the store lock held.
+	BeforeCommit func()
 }
 
 // NewFakeUnitOfWork returns an empty fake unit of work.
@@ -156,11 +163,33 @@ func (u *FakeUnitOfWork) Do(ctx context.Context, fn func(ctx context.Context, tx
 		return u.CommitErr
 	}
 
+	// Interleaving point for the concurrency test: another transaction commits
+	// here, so this one must fail its commit-time version check.
+	if u.BeforeCommit != nil {
+		u.BeforeCommit()
+	}
+
 	u.data.mu.Lock()
 	defer u.data.mu.Unlock()
 
+	// Re-check every staged write against the committed state while holding the
+	// lock. Staging alone is not enough: two transactions can each read version N
+	// and each stage version N+1, and committing both would lose one write. This
+	// is the fake's stand-in for the repository's conditional UPDATE.
 	for id, stored := range tx.staged {
-		u.data.tasks[id] = stored
+		committed, exists := u.data.tasks[id]
+		if stored.baseVersion > 0 {
+			if !exists {
+				return ErrTaskNotFound
+			}
+			if committed.version != stored.baseVersion {
+				return ErrVersionConflict
+			}
+		}
+	}
+
+	for id, stored := range tx.staged {
+		u.data.tasks[id] = storedTask{task: stored.task, version: stored.version}
 	}
 	u.data.events = append(u.data.events, tx.events...)
 	return nil
@@ -220,7 +249,7 @@ func (r *fakeTaskRepo) Insert(ctx context.Context, t *task.Task) (int64, error) 
 
 	stored := cloneTask(t)
 	stored.ID = id
-	r.tx.staged[id] = storedTask{task: stored, version: 1}
+	r.tx.staged[id] = storedTask{task: stored, version: 1, baseVersion: 0}
 	return id, nil
 }
 
@@ -240,7 +269,7 @@ func (r *fakeTaskRepo) Update(ctx context.Context, id int64, expectedVersion int
 	updated := cloneTask(t)
 	updated.ID = id
 	next := stored.version + 1
-	r.tx.staged[id] = storedTask{task: updated, version: next}
+	r.tx.staged[id] = storedTask{task: updated, version: next, baseVersion: stored.version}
 	return TaskWithVersion{Task: cloneTask(updated), Version: next}, nil
 }
 
@@ -274,7 +303,7 @@ func (r *fakeTaskRepo) List(ctx context.Context, filter TaskFilter) (ListTasksRe
 
 	filtered := make([]TaskWithVersion, 0, len(rows))
 	for _, row := range rows {
-		if matchesFilter(row.Task, filter, r.tx.uow) {
+		if matchesFilter(row.Task, filter) {
 			filtered = append(filtered, row)
 		}
 	}
@@ -332,7 +361,7 @@ func (r *fakeEventRepo) Insert(ctx context.Context, e *task.TaskEvent) error {
 }
 
 // matchesFilter implements the filter semantics the application promises.
-func matchesFilter(t *task.Task, filter TaskFilter, uow *FakeUnitOfWork) bool {
+func matchesFilter(t *task.Task, filter TaskFilter) bool {
 	if len(filter.Statuses) > 0 {
 		found := false
 		for _, status := range filter.Statuses {
@@ -372,10 +401,13 @@ func matchesFilter(t *task.Task, filter TaskFilter, uow *FakeUnitOfWork) bool {
 	}
 
 	if value, ok := filter.Overdue.Get(); ok {
-		// The fake has no clock; overdue filtering is delegated through a
-		// package-level reference instant set by the test.
-		overdue := t.IsOverdue(uow.OverdueNow)
-		if overdue != value {
+		asOf, hasAsOf := filter.AsOf.Get()
+		if !hasAsOf {
+			// A repository must never invent a reference instant: without AsOf
+			// the filter cannot be evaluated, so nothing is filtered out.
+			return true
+		}
+		if t.IsOverdue(asOf) != value {
 			return false
 		}
 	}
@@ -465,44 +497,6 @@ func dueAtFor(t *task.Task) time.Time {
 		return *t.DueAt
 	}
 	return time.Time{}
-}
-
-// cloneTask deep-copies a task so the fake never hands out shared state.
-func cloneTask(t *task.Task) *task.Task {
-	if t == nil {
-		return nil
-	}
-	copied := *t
-	if t.Note != nil {
-		note := *t.Note
-		copied.Note = &note
-	}
-	if t.DueAt != nil {
-		dueAt := *t.DueAt
-		copied.DueAt = &dueAt
-	}
-	if t.CompletedAt != nil {
-		v := *t.CompletedAt
-		copied.CompletedAt = &v
-	}
-	if t.CancelledAt != nil {
-		v := *t.CancelledAt
-		copied.CancelledAt = &v
-	}
-	if t.PlannedDate != nil {
-		v := *t.PlannedDate
-		copied.PlannedDate = &v
-	}
-	if t.DueDate != nil {
-		v := *t.DueDate
-		copied.DueDate = &v
-	}
-	if t.Tags != nil {
-		tags := make([]string, len(t.Tags))
-		copy(tags, t.Tags)
-		copied.Tags = tags
-	}
-	return &copied
 }
 
 // FindTaskMust returns a stored task or fails the test.

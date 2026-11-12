@@ -17,6 +17,10 @@ import (
 
 const maxRequestBodyBytes = 1 << 20
 
+// errEmptyBody marks a request that carried no JSON body at all, which some
+// endpoints treat as "no optional fields supplied".
+var errEmptyBody = errors.New("request body is required")
+
 // taskBody is the shared wire shape for a task.
 //
 // Version and ETag are extensions to the documented Task schema: they expose the
@@ -94,7 +98,7 @@ func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.tasks.ListTasks(r.Context(), filter)
+	result, err := h.services.Tasks.ListTasks(r.Context(), filter)
 	if err != nil {
 		h.writeTaskError(w, r, err)
 		return
@@ -163,7 +167,7 @@ func (h *Handler) createTask(w http.ResponseWriter, r *http.Request) {
 	}
 	in.DueAt = dueAt
 
-	created, err := h.tasks.CreateTask(r.Context(), in, task.ActorUser)
+	created, err := h.services.Tasks.CreateTask(r.Context(), in, task.ActorUser)
 	if err != nil {
 		h.writeTaskError(w, r, err)
 		return
@@ -180,7 +184,7 @@ func (h *Handler) getTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	found, err := h.tasks.GetTask(r.Context(), id)
+	found, err := h.services.Tasks.GetTask(r.Context(), id)
 	if err != nil {
 		h.writeTaskError(w, r, err)
 		return
@@ -207,7 +211,7 @@ func (h *Handler) patchTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	updated, err := h.tasks.UpdateTask(r.Context(), id, expected, in, task.ActorUser)
+	updated, err := h.services.Tasks.UpdateTask(r.Context(), id, expected, in, task.ActorUser)
 	if err != nil {
 		h.writeTaskError(w, r, err)
 		return
@@ -219,17 +223,17 @@ func (h *Handler) patchTask(w http.ResponseWriter, r *http.Request) {
 
 // completeTask handles POST /api/v1/tasks/{id}/complete.
 func (h *Handler) completeTask(w http.ResponseWriter, r *http.Request) {
-	h.applyTransition(w, r, h.tasks.CompleteTask)
+	h.applyTransition(w, r, h.services.Tasks.CompleteTask)
 }
 
 // cancelTask handles POST /api/v1/tasks/{id}/cancel.
 func (h *Handler) cancelTask(w http.ResponseWriter, r *http.Request) {
-	h.applyTransition(w, r, h.tasks.CancelTask)
+	h.applyTransition(w, r, h.services.Tasks.CancelTask)
 }
 
 // restoreTask handles POST /api/v1/tasks/{id}/restore.
 func (h *Handler) restoreTask(w http.ResponseWriter, r *http.Request) {
-	h.applyTransition(w, r, h.tasks.RestoreTask)
+	h.applyTransition(w, r, h.services.Tasks.RestoreTask)
 }
 
 type transitionFunc func(ctx context.Context, id int64, expectedVersion int, actor task.Actor) (tasks.TaskWithVersion, error)
@@ -306,7 +310,7 @@ func (h *Handler) rescheduleTask(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	updated, err := h.tasks.RescheduleTask(r.Context(), id, expected, in, task.ActorUser)
+	updated, err := h.services.Tasks.RescheduleTask(r.Context(), id, expected, in, task.ActorUser)
 	if err != nil {
 		h.writeTaskError(w, r, err)
 		return
@@ -552,7 +556,7 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) error {
 	decoder := json.NewDecoder(r.Body)
 	if err := decoder.Decode(dst); err != nil {
 		if errors.Is(err, io.EOF) {
-			return errors.New("request body is required")
+			return errEmptyBody
 		}
 		return fmt.Errorf("invalid JSON body: %w", err)
 	}

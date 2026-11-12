@@ -126,13 +126,15 @@ Transport (HTTP, MCP) ──► Application ──► Domain
 **Направление зависимостей.** Application зависит только от `internal/domain/task` и стандартной библиотеки. `internal/config` в Application не импортируется — настройки передаются через конструктор (`WithDefaultTimezone`).
 
 ### `internal/application/inbox`
-- `ListInbox` — получение входящих
+- `List` — получение входящих (пагинация, `unprocessed_only`)
 - `Capture` — быстрый захват
-- `ConvertToTask` — преобразование в задачу (удаляет из входящих)
-- `Dismiss` — удаление
+- `ConvertToTask` — преобразование в задачу: task + событие + отметка `processed_at` в одной транзакции
+- `Dismiss` — удаление необработанного элемента
+- `CountUnprocessed` — счётчик для Summary
 
 ### `internal/application/summary`
-- `GetTodaySummary` — агрегат для главного экрана: задачи на сегодня, просроченные, высокий приоритет, статистика
+- `Today` — агрегат для главного экрана: задачи на сегодня, просроченные, высокий приоритет, статистика, focus task
+- Read model: использует те же доменные правила просрочки и локального дня, что и список задач
 
 ### `internal/infrastructure/sqlite`
 - Репозитории задач и событий на `database/sql` (порты Application)
@@ -144,7 +146,7 @@ Transport (HTTP, MCP) ──► Application ──► Domain
 ### `internal/transport/http`
 - `net/http` (stdlib)
 - REST handlers → Application services
-- Реализованы: `/healthz` и все `/api/v1/tasks*` (фильтры, пагинация, optimistic locking через `If-Match`/`ETag`)
+- Реализованы: `/healthz`, все `/api/v1/tasks*` (фильтры, пагинация, optimistic locking через `If-Match`/`ETag`), `/api/v1/inbox*` и `/api/v1/summary/today`
 - SSE endpoint для realtime
 - Embedded frontend serving
 - Error handling: `application/problem+json`

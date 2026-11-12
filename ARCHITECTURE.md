@@ -96,8 +96,31 @@ Transport (HTTP, MCP) ──► Application ──► Domain
 - `GetTask` — получение по ID
 - `CreateTask` — создание с валидацией
 - `UpdateTask` — частичное обновление
-- `CompleteTask` / `CancelTask` — переходы статуса
+- `CompleteTask` / `CancelTask` / `RestoreTask` — переходы статуса
 - `RescheduleTask` — изменение дат с сохранением истории
+
+**Структура пакета:**
+
+| Файл | Содержимое |
+|---|---|
+| `ports.go` | `Clock`, `TaskRepository`, `TaskEventRepository`, `UnitOfWork`, `Transaction` |
+| `service.go` | `Service` и все Use Cases, транзакционная оркестрация, сборка payload событий |
+| `inputs.go` | типизированные входные структуры (`CreateTaskInput`, `UpdateTaskInput`, `TaskFilter`), `Optional[T]`, `ParseSort` |
+| `errors.go` | `ErrTaskNotFound`, `ErrVersionConflict`, `ErrInvalidLimit/Offset/Sort`, `TaskWithVersion` |
+
+**Repository ports.** Порты принадлежат Application; Infrastructure реализует их в Phase 2.3.
+
+- `TaskRepository` — `FindByID`, `List`, `Insert`, `Update(id, expectedVersion, task)`.
+  `Update` обязан выполнять сравнение и инкремент одной инструкцией (`WHERE id = ? AND version = ?`, `version = version + 1`).
+- `TaskEventRepository` — только `Insert`: история append-only.
+- `UnitOfWork` — `Do(ctx, fn)` открывает транзакцию, передаёт `Transaction` с репозиториями, делает commit при `nil` и rollback при ошибке или отмене контекста.
+- `Clock` — `Now() time.Time`; production-реализация использует `time.Now().UTC()`, в тестах подменяется фиксированным временем.
+
+**Версионирование (optimistic locking).** `tasks.version` — concurrency metadata на границе Application/Repository, а не поле домена. `TaskWithVersion` возвращает `Task` и `Version` отдельно. Чтение версию не меняет; каждая успешная мутация увеличивает её ровно на 1; запись условна по `expectedVersion`. Устаревшая версия → `ErrVersionConflict`, отсутствующая задача → `ErrTaskNotFound`. `updated_at` не является механизмом блокировки. Финальная проверка версии выполняется атомарно в репозитории, а не только предварительным чтением в сервисе.
+
+**Атомарность Task + TaskEvent.** Каждая мутация выполняется внутри одного `UnitOfWork`: задача и её событие (`created`, `updated`, `completed`, `cancelled`, `restored`, `rescheduled`) записываются в одной транзакции. Ошибка записи события откатывает и изменение задачи, и версию. Событие создаётся тем же `now`, что и отметка задачи, поэтому `Task.CreatedAt` и `TaskEvent.CreatedAt` совпадают.
+
+**Направление зависимостей.** Application зависит только от `internal/domain/task` и стандартной библиотеки. `internal/config` в Application не импортируется — настройки передаются через конструктор (`WithDefaultTimezone`).
 
 ### `internal/application/inbox`
 - `ListInbox` — получение входящих

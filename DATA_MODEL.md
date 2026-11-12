@@ -127,8 +127,17 @@
 // updated
 {"field": "priority", "old": "medium", "new": "high"}
 
+// updated (несколько полей за одну операцию — partial update)
+{"fields": ["priority", "due_date"], "field": "priority"}
+
 // rescheduled
 {"field": "due_at", "old": "2026-11-10T18:00:00Z", "new": "2026-11-12T09:00:00Z"}
+
+// rescheduled (несколько полей)
+{"fields": ["planned_date", "due_at"]}
+
+// completed / cancelled / restored
+{"status": "completed"}
 
 // converted_from_inbox
 {"inbox_item_id": 42, "inbox_text": "Купить молоко"}

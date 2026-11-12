@@ -79,22 +79,6 @@ func main() {
 	)
 	inboxService := inbox.NewService(sqlite.NewInboxUnitOfWork(db), clock, cfg.Timezone, inbox.WithPublisher(broker))
 	summaryService := summary.NewService(taskService, inboxService, clock, cfg.Timezone)
-
-	// Assistant runtime: an OpenAI-compatible provider plus the LifeOS tools.
-	var provider assistant.Provider
-	if cfg.LLMAPIKey != "" || cfg.LLMProvider == "ollama" {
-		provider = agent.NewOpenAIProvider(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel)
-	}
-	registry := tools.NewLifeOSTools(taskService, inboxService, summaryService)
-	assistantService := assistant.NewService(
-		sqlite.NewAssistantUnitOfWork(db),
-		provider,
-		registry,
-		clock,
-		assistant.WithTimezone(cfg.Timezone),
-		assistant.WithPublisher(broker),
-	)
-
 	proactiveService := proactive.NewService(
 		sqlite.NewInsightUnitOfWork(db),
 		taskService,
@@ -102,8 +86,31 @@ func main() {
 		clock,
 		cfg.Timezone,
 	)
-
 	searchService := search.NewService(taskService, inboxService)
+
+	// Assistant runtime: an OpenAI-compatible provider plus the LifeOS tools.
+	var provider assistant.Provider
+	if cfg.LLMAPIKey != "" || cfg.LLMProvider == "ollama" {
+		provider = agent.NewOpenAIProvider(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel)
+	}
+	registry := tools.NewLifeOSTools(
+		taskService,
+		inboxService,
+		summaryService,
+		tools.WithSearchService(searchService),
+		tools.WithProactiveService(proactiveService),
+	)
+	contextProvider := assistant.NewLifeOSContext(summaryService, proactiveService, cfg.Timezone, clock)
+	assistantService := assistant.NewService(
+		sqlite.NewAssistantUnitOfWork(db),
+		provider,
+		registry,
+		clock,
+		assistant.WithTimezone(cfg.Timezone),
+		assistant.WithPublisher(broker),
+		assistant.WithContextProvider(contextProvider),
+	)
+
 	settingsService := settings.NewService(sqlite.NewSettingsUnitOfWork(db), clock)
 
 	// Create HTTP handler with all routes

@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/theDenuvo/LifeOS/internal/application/assistant"
+	"github.com/theDenuvo/LifeOS/internal/application/proactive"
+	"github.com/theDenuvo/LifeOS/internal/application/summary"
 	domainassistant "github.com/theDenuvo/LifeOS/internal/domain/assistant"
 	"github.com/theDenuvo/LifeOS/internal/infrastructure/sqlite"
 )
@@ -58,6 +61,11 @@ func (c fixedClock) Now() time.Time { return c.now }
 
 func newService(t *testing.T, provider assistant.Provider, tools assistant.ToolRunner) (*assistant.Service, *sqlite.AssistantUnitOfWork) {
 	t.Helper()
+	return newServiceWithOptions(t, provider, tools)
+}
+
+func newServiceWithOptions(t *testing.T, provider assistant.Provider, tools assistant.ToolRunner, opts ...assistant.Option) (*assistant.Service, *sqlite.AssistantUnitOfWork) {
+	t.Helper()
 	db, err := sqlite.Open(t.TempDir() + "/assistant.db")
 	if err != nil {
 		t.Fatalf("open db: %v", err)
@@ -67,8 +75,55 @@ func newService(t *testing.T, provider assistant.Provider, tools assistant.ToolR
 		t.Fatalf("migrate: %v", err)
 	}
 	uow := sqlite.NewAssistantUnitOfWork(db)
-	service := assistant.NewService(uow, provider, tools, fixedClock{now: time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)})
+	service := assistant.NewService(uow, provider, tools, fixedClock{now: time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)}, opts...)
 	return service, uow
+}
+
+type fakeToday struct{ value summary.Summary }
+
+func (f fakeToday) Today(context.Context) (summary.Summary, error) { return f.value, nil }
+
+type fakeInsights struct{ value []proactive.Insight }
+
+func (f fakeInsights) Compute(context.Context) ([]proactive.Insight, error) { return f.value, nil }
+
+func TestSystemPromptIncludesLifeOSContext(t *testing.T) {
+	provider := &scriptedProvider{responses: []assistant.Completion{{Content: "Хорошо."}}}
+	tools := &fakeTools{readOnly: map[string]bool{}}
+	contextProvider := assistant.NewLifeOSContext(
+		fakeToday{value: summary.Summary{
+			Stats: summary.Stats{ActiveTotal: 3, OverdueCount: 1, InboxCount: 2},
+			FocusTask: &summary.FocusTask{
+				ID: 1, Title: "Подготовить отчёт", Time: "14:00", Priority: "high",
+			},
+		}},
+		fakeInsights{value: []proactive.Insight{{
+			Key: "overdue", Severity: proactive.SeverityCritical,
+			Title: "Просроченные задачи", Detail: "1 задача просрочена",
+		}}},
+		"Europe/Moscow",
+		fixedClock{now: time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)},
+	)
+	service, _ := newServiceWithOptions(t, provider, tools, assistant.WithContextProvider(contextProvider))
+
+	if _, err := service.SendMessage(context.Background(), 0, "Что у меня сегодня?"); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if len(provider.last) == 0 {
+		t.Fatal("provider received no messages")
+	}
+	prompt := provider.last[0].Content
+	for _, want := range []string{
+		"Текущее состояние LifeOS",
+		"активных 3",
+		"«Подготовить отчёт»",
+		"Просроченные задачи",
+		"уточняющий вопрос",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("system prompt does not contain %q:\n%s", want, prompt)
+		}
+	}
 }
 
 func TestSendMessageExecutesReadTools(t *testing.T) {

@@ -8,13 +8,37 @@ import (
 
 	"github.com/theDenuvo/LifeOS/internal/application/assistant"
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
+	"github.com/theDenuvo/LifeOS/internal/application/proactive"
+	"github.com/theDenuvo/LifeOS/internal/application/search"
 	"github.com/theDenuvo/LifeOS/internal/application/summary"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	"github.com/theDenuvo/LifeOS/internal/domain/task"
 )
 
+// LifeOSToolOption adds optional capabilities to the registry.
+type LifeOSToolOption func(*lifeOSToolConfig)
+
+type lifeOSToolConfig struct {
+	search    *search.Service
+	proactive *proactive.Service
+}
+
+// WithSearchService exposes unified search to the assistant.
+func WithSearchService(service *search.Service) LifeOSToolOption {
+	return func(config *lifeOSToolConfig) { config.search = service }
+}
+
+// WithProactiveService exposes current insights to the assistant.
+func WithProactiveService(service *proactive.Service) LifeOSToolOption {
+	return func(config *lifeOSToolConfig) { config.proactive = service }
+}
+
 // NewLifeOSTools builds the registry over the application services.
-func NewLifeOSTools(taskService *tasks.Service, inboxService *inbox.Service, summaryService *summary.Service) *Registry {
+func NewLifeOSTools(taskService *tasks.Service, inboxService *inbox.Service, summaryService *summary.Service, opts ...LifeOSToolOption) *Registry {
+	config := lifeOSToolConfig{}
+	for _, opt := range opts {
+		opt(&config)
+	}
 	registry := NewRegistry()
 
 	registry.Register(Tool{
@@ -69,6 +93,26 @@ func NewLifeOSTools(taskService *tasks.Service, inboxService *inbox.Service, sum
 				items = append(items, taskView(item))
 			}
 			return map[string]any{"tasks": items, "total": result.Total}, nil
+		},
+	})
+
+	registry.Register(Tool{
+		Spec: assistantSpec("get_task", "Получить одну задачу по ID, включая версию для последующего изменения.", objectSchema(map[string]any{
+			"id": integerProp("ID задачи"),
+		}, "id")),
+		ReadOnly: true,
+		Execute: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			var args struct {
+				ID int64 `json:"id"`
+			}
+			if err := decodeArgs(raw, &args); err != nil {
+				return nil, err
+			}
+			found, err := taskService.GetTask(ctx, args.ID)
+			if err != nil {
+				return nil, err
+			}
+			return taskView(found), nil
 		},
 	})
 
@@ -375,6 +419,56 @@ func NewLifeOSTools(taskService *tasks.Service, inboxService *inbox.Service, sum
 			return fmt.Sprintf("Удалить входящий #%d", args.ID), nil
 		},
 	})
+
+	if config.search != nil {
+		registry.Register(Tool{
+			Spec: assistantSpec("search", "Единый поиск по задачам и входящим. Используй, когда пользователь упоминает текст, имя или тему.", objectSchema(map[string]any{
+				"query": stringProp("Поисковый запрос"),
+				"limit": integerProp("Сколько результатов вернуть (1-50)"),
+			}, "query")),
+			ReadOnly: true,
+			Execute: func(ctx context.Context, raw json.RawMessage) (any, error) {
+				var args struct {
+					Query string `json:"query"`
+					Limit int    `json:"limit"`
+				}
+				if err := decodeArgs(raw, &args); err != nil {
+					return nil, err
+				}
+				result, err := config.search.Query(ctx, args.Query, args.Limit)
+				if err != nil {
+					return nil, err
+				}
+				taskItems := make([]map[string]any, 0, len(result.Tasks))
+				for _, item := range result.Tasks {
+					taskItems = append(taskItems, taskView(item))
+				}
+				inboxItems := make([]map[string]any, 0, len(result.Inbox))
+				for _, item := range result.Inbox {
+					inboxItems = append(inboxItems, map[string]any{
+						"id":         item.ID,
+						"text":       item.Text,
+						"created_at": item.CreatedAt.Format(time.RFC3339),
+					})
+				}
+				return map[string]any{"tasks": taskItems, "inbox": inboxItems, "total": result.Total}, nil
+			},
+		})
+	}
+
+	if config.proactive != nil {
+		registry.Register(Tool{
+			Spec:     assistantSpec("list_insights", "Текущие наблюдения системы: просрочки, дедлайны, перегрузка, входящие и другие сигналы.", objectSchema(nil)),
+			ReadOnly: true,
+			Execute: func(ctx context.Context, _ json.RawMessage) (any, error) {
+				insights, err := config.proactive.Compute(ctx)
+				if err != nil {
+					return nil, err
+				}
+				return map[string]any{"insights": insights, "total": len(insights)}, nil
+			},
+		})
+	}
 
 	return registry
 }

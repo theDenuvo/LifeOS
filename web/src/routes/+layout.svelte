@@ -1,6 +1,7 @@
 <script lang="ts">
 	import '../app.css';
 	import { onMount } from 'svelte';
+	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { startLive } from '$lib/live';
 
@@ -12,6 +13,15 @@
 	];
 
 	$: current = $page.url.pathname;
+
+	let question = '';
+
+	function ask() {
+		const text = question.trim();
+		if (!text) return;
+		question = '';
+		goto(`/assistant?q=${encodeURIComponent(text)}`);
+	}
 
 	onMount(startLive);
 </script>
@@ -39,6 +49,16 @@
 			{/each}
 		</nav>
 
+		<form class="ask" on:submit|preventDefault={ask}>
+			<input
+				bind:value={question}
+				placeholder="Спросить LifeOS…"
+				aria-label="Спросить LifeOS"
+				autocomplete="off"
+			/>
+			<button type="submit" aria-label="Отправить вопрос">→</button>
+		</form>
+
 		<div class="sidebar-footer">
 			<span class="dot" aria-hidden="true"></span>
 			<span>Локальные данные · SQLite</span>
@@ -48,6 +68,16 @@
 	<main class="content">
 		<slot />
 	</main>
+
+	<form class="mobile-ask" on:submit|preventDefault={ask}>
+		<input
+			bind:value={question}
+			placeholder="Спросить LifeOS…"
+			aria-label="Спросить LifeOS"
+			autocomplete="off"
+		/>
+		<button type="submit" aria-label="Отправить вопрос">→</button>
+	</form>
 
 	<nav class="mobile-nav" aria-label="Мобильная навигация">
 		{#each nav as item}
@@ -138,8 +168,50 @@
 		color: #c4b5fd;
 	}
 
-	.sidebar-footer {
+	.ask {
+		display: flex;
+		align-items: center;
+		gap: 0.35rem;
 		margin-top: auto;
+		padding: 0.25rem;
+		border: 1px solid var(--border);
+		border-radius: 12px;
+		background: rgba(255, 255, 255, 0.03);
+	}
+
+	.ask input,
+	.mobile-ask input {
+		flex: 1;
+		min-width: 0;
+		border: none;
+		background: none;
+		color: var(--fg-primary);
+		font: inherit;
+		font-size: 0.82rem;
+		padding: 0.45rem 0.5rem;
+		outline: none;
+	}
+
+	.ask button,
+	.mobile-ask button {
+		display: grid;
+		place-items: center;
+		width: 30px;
+		height: 30px;
+		border: none;
+		border-radius: 9px;
+		background: rgba(139, 92, 246, 0.2);
+		color: #c4b5fd;
+		font-size: 1rem;
+		cursor: pointer;
+	}
+
+	.ask button:hover,
+	.mobile-ask button:hover {
+		background: rgba(139, 92, 246, 0.32);
+	}
+
+	.sidebar-footer {
 		display: flex;
 		align-items: center;
 		gap: 0.5rem;
@@ -165,6 +237,10 @@
 		display: none;
 	}
 
+	.mobile-ask {
+		display: none;
+	}
+
 	@media (max-width: 760px) {
 		.shell {
 			grid-template-columns: 1fr;
@@ -175,7 +251,23 @@
 		}
 
 		.content {
-			padding: 1.25rem 1rem calc(5rem + env(safe-area-inset-bottom));
+			padding: 1.25rem 1rem calc(8rem + env(safe-area-inset-bottom));
+		}
+
+		.mobile-ask {
+			display: flex;
+			align-items: center;
+			gap: 0.35rem;
+			position: fixed;
+			left: 0.75rem;
+			right: 0.75rem;
+			bottom: calc(4.4rem + env(safe-area-inset-bottom));
+			padding: 0.3rem;
+			border: 1px solid var(--border);
+			border-radius: 12px;
+			background: rgba(18, 18, 26, 0.96);
+			backdrop-filter: blur(12px);
+			z-index: 19;
 		}
 
 		.mobile-nav {

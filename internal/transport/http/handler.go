@@ -1,6 +1,7 @@
 package httptransport
 
 import (
+	"context"
 	"database/sql"
 	"embed"
 	"encoding/json"
@@ -14,6 +15,8 @@ import (
 	"github.com/theDenuvo/LifeOS/internal/application/assistant"
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
 	"github.com/theDenuvo/LifeOS/internal/application/proactive"
+	"github.com/theDenuvo/LifeOS/internal/application/search"
+	"github.com/theDenuvo/LifeOS/internal/application/settings"
 	"github.com/theDenuvo/LifeOS/internal/application/summary"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	"github.com/theDenuvo/LifeOS/internal/config"
@@ -28,6 +31,8 @@ type Services struct {
 	Summary   *summary.Service
 	Assistant *assistant.Service
 	Proactive *proactive.Service
+	Search    *search.Service
+	Settings  *settings.Service
 	Tools     *tools.Registry
 	Events    *events.Broker
 }
@@ -54,9 +59,14 @@ func NewHandler(db *sql.DB, cfg *config.Config, embedFS embed.FS, services Servi
 func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", h.healthz)
+	mux.HandleFunc("/readyz", h.readyz)
 	mux.Handle("/api/v1/", http.StripPrefix("/api/v1", h.apiRoutes()))
 	if h.cfg.MCPEnabled {
-		mux.Handle(h.cfg.MCPPath+"/", http.StripPrefix(h.cfg.MCPPath, h.mcpRoutes()))
+		// Accept both /mcp and /mcp/: a bare /mcp would otherwise get a 307
+		// redirect, and many MCP clients do not follow redirects on POST.
+		mcpHandler := http.StripPrefix(h.cfg.MCPPath, h.mcpRoutes())
+		mux.Handle(h.cfg.MCPPath, mcpHandler)
+		mux.Handle(h.cfg.MCPPath+"/", mcpHandler)
 	}
 	mux.HandleFunc("/", h.serveFrontend)
 	return h.loggingMiddleware(h.corsMiddleware(mux))
@@ -86,8 +96,10 @@ func (h *Handler) apiRoutes() http.Handler {
 	mux.HandleFunc("GET /insights", h.listInsights)
 	mux.HandleFunc("POST /insights/{key}/dismiss", h.dismissInsight)
 	mux.HandleFunc("POST /insights/{key}/snooze", h.snoozeInsight)
-	mux.HandleFunc("GET /settings/{key}", h.notImplemented)
-	mux.HandleFunc("PUT /settings/{key}", h.notImplemented)
+	mux.HandleFunc("GET /search", h.search)
+	mux.HandleFunc("GET /settings", h.listSettings)
+	mux.HandleFunc("GET /settings/{key}", h.getSetting)
+	mux.HandleFunc("PUT /settings/{key}", h.putSetting)
 	return mux
 }
 
@@ -97,6 +109,16 @@ func (h *Handler) mcpRoutes() http.Handler {
 
 func (h *Handler) notImplemented(w http.ResponseWriter, r *http.Request) {
 	h.writeProblem(w, r, http.StatusNotImplemented, "not-implemented", "Not Implemented", "This endpoint is not yet implemented")
+}
+
+func (h *Handler) readyz(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := h.db.PingContext(ctx); err != nil {
+		h.writeProblem(w, r, http.StatusServiceUnavailable, "not-ready", "Not Ready", "Database is not reachable")
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {

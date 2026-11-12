@@ -17,6 +17,8 @@ import (
 	"github.com/theDenuvo/LifeOS/internal/application/assistant"
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
 	"github.com/theDenuvo/LifeOS/internal/application/proactive"
+	"github.com/theDenuvo/LifeOS/internal/application/search"
+	"github.com/theDenuvo/LifeOS/internal/application/settings"
 	"github.com/theDenuvo/LifeOS/internal/application/summary"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	"github.com/theDenuvo/LifeOS/internal/config"
@@ -101,6 +103,9 @@ func main() {
 		cfg.Timezone,
 	)
 
+	searchService := search.NewService(taskService, inboxService)
+	settingsService := settings.NewService(sqlite.NewSettingsUnitOfWork(db), clock)
+
 	// Create HTTP handler with all routes
 	handler := httptransport.NewHandler(db, cfg, dist.FS, httptransport.Services{
 		Tasks:     taskService,
@@ -108,6 +113,8 @@ func main() {
 		Summary:   summaryService,
 		Assistant: assistantService,
 		Proactive: proactiveService,
+		Search:    searchService,
+		Settings:  settingsService,
 		Tools:     registry,
 		Events:    broker,
 	}).Routes()

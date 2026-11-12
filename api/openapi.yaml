@@ -15,6 +15,22 @@ servers:
 - url: https://lifeos.example.ts.net
   description: Production server (Tailscale)
 paths:
+  /readyz:
+    get:
+      summary: Readiness probe (database reachable)
+      operationId: readyz
+      responses:
+        '200':
+          description: Ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+        '503':
+          description: Database is not reachable
   /healthz:
     get:
       summary: Health check endpoint
@@ -615,6 +631,52 @@ paths:
             text/event-stream:
               schema:
                 type: string
+  /api/v1/search:
+    get:
+      summary: Search tasks and inbox items
+      operationId: search
+      tags:
+      - Search
+      parameters:
+      - name: q
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 50
+      responses:
+        '200':
+          description: Combined search results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/settings:
+    get:
+      summary: List all settings
+      operationId: listSettings
+      tags:
+      - Settings
+      responses:
+        '200':
+          description: Setting values keyed by name
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: true
   /api/v1/settings/{key}:
     get:
       summary: Get a setting value
@@ -636,8 +698,6 @@ paths:
                 $ref: '#/components/schemas/SettingResponse'
         '404':
           $ref: '#/components/responses/NotFoundError'
-        '501':
-          $ref: '#/components/responses/NotImplementedError'
     put:
       summary: Set a setting value
       operationId: putSetting
@@ -664,8 +724,6 @@ paths:
                 $ref: '#/components/schemas/SettingResponse'
         '404':
           $ref: '#/components/responses/NotFoundError'
-        '501':
-          $ref: '#/components/responses/NotImplementedError'
 components:
   schemas:
     HealthResponse:
@@ -1234,16 +1292,47 @@ components:
         key:
           type: string
         value:
-          type: object
-          additionalProperties: true
+          $ref: '#/components/schemas/JSONValue'
     SettingRequest:
       type: object
       required:
       - value
       properties:
         value:
+          $ref: '#/components/schemas/JSONValue'
+    JSONValue:
+      oneOf:
+      - type: object
+      - type: array
+      - type: string
+      - type: number
+      - type: boolean
+      - type: 'null'
+    SearchResponse:
+      type: object
+      required:
+      - tasks
+      - inbox
+      - meta
+      properties:
+        tasks:
+          type: array
+          items:
+            $ref: '#/components/schemas/TaskResponse'
+        inbox:
+          type: array
+          items:
+            $ref: '#/components/schemas/InboxItemResponse'
+        meta:
           type: object
-          additionalProperties: true
+          required:
+          - total
+          - limit
+          properties:
+            total:
+              type: integer
+            limit:
+              type: integer
     ProblemDetails:
       type: object
       required:

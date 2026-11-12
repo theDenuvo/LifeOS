@@ -280,3 +280,28 @@ export function rejectPendingAction(id: number): Promise<{ pending_action: Pendi
 		method: 'POST'
 	});
 }
+
+export interface Insight {
+	key: string;
+	kind: string;
+	severity: 'critical' | 'warning' | 'info';
+	title: string;
+	detail: string;
+	count: number;
+	task_ids: number[];
+}
+
+export function getInsights(): Promise<{ data: Insight[] }> {
+	return request<{ data: Insight[] }>('/api/v1/insights');
+}
+
+export function dismissInsight(key: string): Promise<void> {
+	return request<void>(`/api/v1/insights/${encodeURIComponent(key)}/dismiss`, { method: 'POST' });
+}
+
+export function snoozeInsight(key: string, until?: string): Promise<void> {
+	return request<void>(`/api/v1/insights/${encodeURIComponent(key)}/snooze`, {
+		method: 'POST',
+		body: JSON.stringify(until ? { until } : {})
+	});
+}

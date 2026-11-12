@@ -419,6 +419,60 @@ paths:
                 $ref: '#/components/schemas/SummaryResponse'
         '400':
           $ref: '#/components/responses/ValidationError'
+  /api/v1/insights:
+    get:
+      summary: Derived proactive insights (overdue, overload, backlog, conflicts)
+      operationId: listInsights
+      tags:
+      - Insights
+      responses:
+        '200':
+          description: Currently relevant insights
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InsightListResponse'
+  /api/v1/insights/{key}/dismiss:
+    post:
+      summary: Dismiss an insight until the situation changes
+      operationId: dismissInsight
+      tags:
+      - Insights
+      parameters:
+      - name: key
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '204':
+          description: Insight dismissed
+  /api/v1/insights/{key}/snooze:
+    post:
+      summary: Snooze an insight until a given instant
+      operationId: snoozeInsight
+      tags:
+      - Insights
+      parameters:
+      - name: key
+        in: path
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                until:
+                  type: string
+                  format: date-time
+      responses:
+        '204':
+          description: Insight snoozed
+        '400':
+          $ref: '#/components/responses/ValidationError'
   /api/v1/assistant/messages:
     post:
       summary: Send message to assistant
@@ -961,6 +1015,47 @@ components:
           type: integer
         inbox_count:
           type: integer
+    Insight:
+      type: object
+      required:
+      - key
+      - kind
+      - severity
+      - title
+      - detail
+      - count
+      - task_ids
+      properties:
+        key:
+          type: string
+        kind:
+          type: string
+        severity:
+          type: string
+          enum:
+          - critical
+          - warning
+          - info
+        title:
+          type: string
+        detail:
+          type: string
+        count:
+          type: integer
+        task_ids:
+          type: array
+          items:
+            type: integer
+            format: int64
+    InsightListResponse:
+      type: object
+      required:
+      - data
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Insight'
     AssistantMessageRequest:
       type: object
       required:

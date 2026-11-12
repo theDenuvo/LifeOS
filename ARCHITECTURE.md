@@ -178,6 +178,11 @@ Transport (HTTP, MCP) ──► Application ──► Domain
 - Валидация входных данных
 - Возврат структурированных результатов
 
+### `internal/application/proactive`
+- Детекторы: просрочки, дедлайны сегодня, перегрузка, backlog входящих, задачи без срока, совпадающие точные дедлайны
+- Наблюдения вычисляются из живых данных; в БД хранятся только dismiss/snooze (`insight_states`)
+- `Runner` периодически пересчитывает и публикует `insight.detected` только для новых ключей — без потока повторных уведомлений
+
 ### `internal/events`
 - In-process broker для SSE: подписки, буфер последних 256 событий, `Last-Event-ID` replay
 - Application services публикуют события после успешного commit, не после rollback

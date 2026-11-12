@@ -12,6 +12,7 @@ import (
 	"github.com/theDenuvo/LifeOS/internal/agent/tools"
 	"github.com/theDenuvo/LifeOS/internal/application/assistant"
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
+	"github.com/theDenuvo/LifeOS/internal/application/proactive"
 	"github.com/theDenuvo/LifeOS/internal/application/summary"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	"github.com/theDenuvo/LifeOS/internal/config"
@@ -61,11 +62,13 @@ func newTaskAPIWithProvider(t *testing.T, now time.Time, provider assistant.Prov
 		assistant.WithTimezone("Europe/Moscow"),
 		assistant.WithPublisher(broker),
 	)
+	proactiveService := proactive.NewService(sqlite.NewInsightUnitOfWork(db), service, inboxService, clock, "Europe/Moscow")
 	handler := NewHandler(db, cfg, testEmbedFS, Services{
 		Tasks:     service,
 		Inbox:     inboxService,
 		Summary:   summaryService,
 		Assistant: assistantService,
+		Proactive: proactiveService,
 		Events:    broker,
 	})
 	handler.now = func() time.Time { return now }

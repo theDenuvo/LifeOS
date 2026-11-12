@@ -14,7 +14,8 @@ const eventTypes = [
 	'task.rescheduled',
 	'inbox.captured',
 	'inbox.converted',
-	'inbox.dismissed'
+	'inbox.dismissed',
+	'insight.detected'
 ];
 
 let started = false;

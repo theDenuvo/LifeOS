@@ -1,10 +1,21 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { captureInbox, completeTask, getSummary, getTask, type Summary } from '$lib/api';
+	import {
+		captureInbox,
+		completeTask,
+		dismissInsight,
+		getInsights,
+		getSummary,
+		getTask,
+		snoozeInsight,
+		type Insight,
+		type Summary
+	} from '$lib/api';
 	import { errorMessage, formatLongDate, priorityLabel } from '$lib/format';
 	import { liveRevision } from '$lib/live';
 
 	let summary: Summary | null = null;
+	let insights: Insight[] = [];
 	let loading = true;
 	let error = '';
 	let captureText = '';
@@ -15,7 +26,9 @@
 	async function load() {
 		loading = true;
 		try {
-			summary = await getSummary();
+			const [nextSummary, nextInsights] = await Promise.all([getSummary(), getInsights()]);
+			summary = nextSummary;
+			insights = nextInsights.data;
 			error = '';
 		} catch (err) {
 			error = errorMessage(err);
@@ -34,6 +47,25 @@
 			error = errorMessage(err);
 		} finally {
 			busyId = null;
+		}
+	}
+
+	async function hideInsight(key: string) {
+		try {
+			await dismissInsight(key);
+			insights = insights.filter((insight) => insight.key !== key);
+		} catch (err) {
+			error = errorMessage(err);
+		}
+	}
+
+	async function remindTomorrow(key: string) {
+		try {
+			const until = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+			await snoozeInsight(key, until);
+			insights = insights.filter((insight) => insight.key !== key);
+		} catch (err) {
+			error = errorMessage(err);
 		}
 	}
 
@@ -97,6 +129,23 @@
 		{capturing ? 'Сохраняю…' : 'Во входящие'}
 	</button>
 </form>
+
+{#if insights.length > 0}
+	<section class="insights" aria-label="Наблюдения">
+		{#each insights as insight (insight.key)}
+			<article class="insight" data-severity={insight.severity}>
+				<div class="insight-main">
+					<span class="insight-title">{insight.title}</span>
+					<p class="insight-detail">{insight.detail}</p>
+				</div>
+				<div class="insight-actions">
+					<button class="ghost" on:click={() => remindTomorrow(insight.key)}>Завтра</button>
+					<button class="ghost" on:click={() => hideInsight(insight.key)}>Скрыть</button>
+				</div>
+			</article>
+		{/each}
+	</section>
+{/if}
 
 {#if loading && !summary}
 	<p class="muted">Загружаю…</p>
@@ -261,6 +310,54 @@
 	.primary:disabled {
 		opacity: 0.55;
 		cursor: default;
+	}
+
+	.insights {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		margin-bottom: 1.25rem;
+	}
+
+	.insight {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 1rem;
+		padding: 0.7rem 0.9rem;
+		border: 1px solid var(--border);
+		border-left: 3px solid #71717a;
+		border-radius: 10px;
+		background: var(--bg-card);
+	}
+
+	.insight[data-severity='critical'] {
+		border-left-color: #f87171;
+	}
+
+	.insight[data-severity='warning'] {
+		border-left-color: #fbbf24;
+	}
+
+	.insight[data-severity='info'] {
+		border-left-color: #38bdf8;
+	}
+
+	.insight-title {
+		font-size: 0.88rem;
+		font-weight: 550;
+	}
+
+	.insight-detail {
+		margin: 0.15rem 0 0;
+		font-size: 0.78rem;
+		color: var(--fg-muted);
+	}
+
+	.insight-actions {
+		display: flex;
+		gap: 0.35rem;
+		flex-shrink: 0;
 	}
 
 	.stats {

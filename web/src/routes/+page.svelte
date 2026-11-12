@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { captureInbox, completeTask, getSummary, getTask, type Summary } from '$lib/api';
 	import { errorMessage, formatLongDate, priorityLabel } from '$lib/format';
+	import { liveRevision } from '$lib/live';
 
 	let summary: Summary | null = null;
 	let loading = true;
@@ -51,7 +52,19 @@
 		}
 	}
 
-	onMount(load);
+	onMount(() => {
+		load();
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const unsubscribe = liveRevision.subscribe((revision) => {
+			if (revision === 0) return;
+			clearTimeout(timer);
+			timer = setTimeout(load, 200);
+		});
+		return () => {
+			unsubscribe();
+			clearTimeout(timer);
+		};
+	});
 </script>
 
 <svelte:head>

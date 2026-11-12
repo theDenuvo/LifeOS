@@ -12,6 +12,7 @@ import (
 	"github.com/theDenuvo/LifeOS/internal/application/summary"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	"github.com/theDenuvo/LifeOS/internal/config"
+	"github.com/theDenuvo/LifeOS/internal/events"
 	"github.com/theDenuvo/LifeOS/internal/infrastructure/sqlite"
 	"github.com/theDenuvo/LifeOS/internal/web/dist"
 )
@@ -50,13 +51,15 @@ func setupTestHandler(t *testing.T) (*Handler, func()) {
 
 	// Use the test embedded filesystem
 	clock := tasks.SystemClock()
-	taskService := tasks.NewService(sqlite.NewTaskUnitOfWork(db), clock)
-	inboxService := inbox.NewService(sqlite.NewInboxUnitOfWork(db), clock, cfg.Timezone)
+	broker := events.NewBroker()
+	taskService := tasks.NewService(sqlite.NewTaskUnitOfWork(db), clock, tasks.WithPublisher(broker))
+	inboxService := inbox.NewService(sqlite.NewInboxUnitOfWork(db), clock, cfg.Timezone, inbox.WithPublisher(broker))
 	summaryService := summary.NewService(taskService, inboxService, clock, cfg.Timezone)
 	handler := NewHandler(db, cfg, testEmbedFS, Services{
 		Tasks:   taskService,
 		Inbox:   inboxService,
 		Summary: summaryService,
+		Events:  broker,
 	})
 
 	cleanup := func() {
@@ -258,7 +261,6 @@ func TestHandlerAPIEndpointsReturn501(t *testing.T) {
 		{"GET", "/api/v1/assistant/conversations/1"},
 		{"POST", "/api/v1/assistant/pending-actions/1/confirm"},
 		{"POST", "/api/v1/assistant/pending-actions/1/reject"},
-		{"GET", "/api/v1/events"},
 		{"GET", "/api/v1/settings/test"},
 		{"PUT", "/api/v1/settings/test"},
 	}
@@ -419,13 +421,15 @@ func TestHandlerServeFrontendWithRealEmbedFS(t *testing.T) {
 
 	// Use the real embedded filesystem
 	clock := tasks.SystemClock()
-	taskService := tasks.NewService(sqlite.NewTaskUnitOfWork(db), clock)
-	inboxService := inbox.NewService(sqlite.NewInboxUnitOfWork(db), clock, cfg.Timezone)
+	broker := events.NewBroker()
+	taskService := tasks.NewService(sqlite.NewTaskUnitOfWork(db), clock, tasks.WithPublisher(broker))
+	inboxService := inbox.NewService(sqlite.NewInboxUnitOfWork(db), clock, cfg.Timezone, inbox.WithPublisher(broker))
 	summaryService := summary.NewService(taskService, inboxService, clock, cfg.Timezone)
 	handler := NewHandler(db, cfg, dist.FS, Services{
 		Tasks:   taskService,
 		Inbox:   inboxService,
 		Summary: summaryService,
+		Events:  broker,
 	})
 
 	// Test root serves index.html

@@ -14,6 +14,7 @@ import (
 	"github.com/theDenuvo/LifeOS/internal/application/summary"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	"github.com/theDenuvo/LifeOS/internal/config"
+	"github.com/theDenuvo/LifeOS/internal/events"
 )
 
 // Services groups the application services the HTTP transport exposes.
@@ -21,6 +22,7 @@ type Services struct {
 	Tasks   *tasks.Service
 	Inbox   *inbox.Service
 	Summary *summary.Service
+	Events  *events.Broker
 }
 
 type Handler struct {
@@ -73,7 +75,7 @@ func (h *Handler) apiRoutes() http.Handler {
 	mux.HandleFunc("GET /assistant/conversations/{id}", h.notImplemented)
 	mux.HandleFunc("POST /assistant/pending-actions/{id}/confirm", h.notImplemented)
 	mux.HandleFunc("POST /assistant/pending-actions/{id}/reject", h.notImplemented)
-	mux.HandleFunc("GET /events", h.notImplemented)
+	mux.HandleFunc("GET /events", h.streamEvents)
 	mux.HandleFunc("GET /settings/{key}", h.notImplemented)
 	mux.HandleFunc("PUT /settings/{key}", h.notImplemented)
 	return mux

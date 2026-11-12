@@ -116,6 +116,17 @@ func WithTitle(title string) TaskOption {
 	}
 }
 
+// WithPriority sets the priority.
+func WithPriority(priority Priority) TaskOption {
+	return func(t *Task) error {
+		if !priority.IsValid() {
+			return ErrInvalidPriority
+		}
+		t.Priority = priority
+		return nil
+	}
+}
+
 // WithNote sets the note.
 func WithNote(note string) TaskOption {
 	return func(t *Task) error {

@@ -966,3 +966,42 @@ func repeat(s string, n int) string {
 	}
 	return string(out)
 }
+
+// TestWithPriority covers the option added for the Application Layer.
+func TestWithPriority(t *testing.T) {
+	tests := []struct {
+		name     string
+		priority Priority
+		wantErr  bool
+	}{
+		{"low", PriorityLow, false},
+		{"medium", PriorityMedium, false},
+		{"high", PriorityHigh, false},
+		{"invalid", Priority("urgent"), true},
+		{"empty", Priority(""), true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			task := newTestTask(t)
+			before := task.Priority
+
+			err := task.Update(fixedNow, WithPriority(tt.priority))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				if task.Priority != before {
+					t.Errorf("priority changed on error: %v", task.Priority)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if task.Priority != tt.priority {
+				t.Errorf("Priority = %v, want %v", task.Priority, tt.priority)
+			}
+		})
+	}
+}

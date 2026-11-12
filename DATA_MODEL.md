@@ -119,6 +119,49 @@
 - `idx_task_events_task_id` (task_id, created_at)
 - `idx_task_events_type` (type)
 
+**Payload — `updated` / `rescheduled` (audit diff):**
+
+Каждая успешная мутация задач пишет фактические значения до и после. Формат
+зависит только от числа изменённых полей.
+
+Одно изменённое поле — документированная однополевая форма:
+
+```json
+{"field": "priority", "old": "medium", "new": "high"}
+```
+
+Несколько изменённых полей — массив `changes`:
+
+```json
+{
+  "changes": [
+    {"field": "priority", "old": "medium", "new": "high"},
+    {"field": "due_date", "old": "2026-11-12", "new": null}
+  ]
+}
+```
+
+Правила:
+
+- в payload попадают только реально изменённые поля;
+- у каждого поля есть `old` и `new`;
+- явная очистка поля представляется как `new: null`;
+- `old`/`new` берутся из независимого снимка задачи до мутации и из итогового
+  состояния, а не из входных параметров запроса.
+
+Формат значений:
+
+| Тип поля | Представление |
+|---|---|
+| `CalendarDate` (`planned_date`, `due_date`) | `YYYY-MM-DD`, иначе `null` |
+| `time.Time` (`due_at`) | RFC3339Nano в UTC (сохраняет дробные секунды), иначе `null` |
+| `Priority`, `Status` | строка (`low`/`medium`/`high`, `open`/...) |
+| `Tags` | массив строк (пустой массив, если тегов нет) |
+| `Note`, `Title`, `Timezone` | строка или `null` для отсутствующего значения |
+
+`updated` и `rescheduled` используют одинаковую структуру; `rescheduled`
+заполняет только `planned_date`, `due_date`, `due_at`.
+
 **Payload примеры:**
 ```json
 // created
@@ -127,8 +170,17 @@
 // updated
 {"field": "priority", "old": "medium", "new": "high"}
 
+// updated (несколько полей за одну операцию — partial update)
+{"changes": [{"field": "priority", "old": "medium", "new": "high"}, {"field": "due_date", "old": "2026-11-12", "new": null}]}
+
 // rescheduled
 {"field": "due_at", "old": "2026-11-10T18:00:00Z", "new": "2026-11-12T09:00:00Z"}
+
+// rescheduled (несколько полей)
+{"changes": [{"field": "planned_date", "old": "2026-11-12", "new": "2026-11-13"}, {"field": "due_at", "old": "2026-11-12T18:00:00Z", "new": null}]}
+
+// completed / cancelled / restored
+{"status": "completed"}
 
 // converted_from_inbox
 {"inbox_item_id": 42, "inbox_text": "Купить молоко"}

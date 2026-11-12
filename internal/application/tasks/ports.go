@@ -28,8 +28,13 @@ type Clock interface {
 // systemClock is the production Clock backed by the system time.
 type systemClock struct{}
 
-// Now returns the current UTC instant.
-func (systemClock) Now() time.Time { return time.Now().UTC() }
+// Now returns the current UTC instant truncated to whole seconds.
+//
+// The persistence layer stores timestamps as Unix seconds (see DATA_MODEL.md),
+// so production timestamps are truncated here. Without this, a task returned by
+// a write would carry sub-second precision that the very next read silently
+// loses, and the task would no longer be equal to its stored form.
+func (systemClock) Now() time.Time { return time.Now().UTC().Truncate(time.Second) }
 
 // SystemClock returns a Clock that reads the real system time.
 func SystemClock() Clock { return systemClock{} }

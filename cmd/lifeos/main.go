@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	"github.com/theDenuvo/LifeOS/internal/config"
 	"github.com/theDenuvo/LifeOS/internal/infrastructure/sqlite"
 	"github.com/theDenuvo/LifeOS/internal/transport/http"
@@ -58,8 +59,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Task Engine: Application service over the SQLite unit of work.
+	taskService := tasks.NewService(
+		sqlite.NewTaskUnitOfWork(db),
+		tasks.SystemClock(),
+		tasks.WithDefaultTimezone(cfg.Timezone),
+	)
+
 	// Create HTTP handler with all routes
-	handler := httptransport.NewHandler(db, cfg, dist.FS).Routes()
+	handler := httptransport.NewHandler(db, cfg, dist.FS, taskService).Routes()
 
 	// HTTP Server
 	server := &http.Server{

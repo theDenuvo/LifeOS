@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	"github.com/theDenuvo/LifeOS/internal/config"
 )
 
@@ -17,10 +18,18 @@ type Handler struct {
 	db      *sql.DB
 	cfg     *config.Config
 	embedFS embed.FS
+	tasks   *tasks.Service
+	now     func() time.Time
 }
 
-func NewHandler(db *sql.DB, cfg *config.Config, embedFS embed.FS) *Handler {
-	h := &Handler{db: db, cfg: cfg, embedFS: embedFS}
+func NewHandler(db *sql.DB, cfg *config.Config, embedFS embed.FS, taskService *tasks.Service) *Handler {
+	h := &Handler{
+		db:      db,
+		cfg:     cfg,
+		embedFS: embedFS,
+		tasks:   taskService,
+		now:     func() time.Time { return time.Now().UTC() },
+	}
 	return h
 }
 
@@ -37,14 +46,14 @@ func (h *Handler) Routes() http.Handler {
 
 func (h *Handler) apiRoutes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /tasks", h.notImplemented)
-	mux.HandleFunc("POST /tasks", h.notImplemented)
-	mux.HandleFunc("GET /tasks/{id}", h.notImplemented)
-	mux.HandleFunc("PATCH /tasks/{id}", h.notImplemented)
-	mux.HandleFunc("POST /tasks/{id}/complete", h.notImplemented)
-	mux.HandleFunc("POST /tasks/{id}/cancel", h.notImplemented)
-	mux.HandleFunc("POST /tasks/{id}/restore", h.notImplemented)
-	mux.HandleFunc("POST /tasks/{id}/reschedule", h.notImplemented)
+	mux.HandleFunc("GET /tasks", h.listTasks)
+	mux.HandleFunc("POST /tasks", h.createTask)
+	mux.HandleFunc("GET /tasks/{id}", h.getTask)
+	mux.HandleFunc("PATCH /tasks/{id}", h.patchTask)
+	mux.HandleFunc("POST /tasks/{id}/complete", h.completeTask)
+	mux.HandleFunc("POST /tasks/{id}/cancel", h.cancelTask)
+	mux.HandleFunc("POST /tasks/{id}/restore", h.restoreTask)
+	mux.HandleFunc("POST /tasks/{id}/reschedule", h.rescheduleTask)
 	mux.HandleFunc("GET /inbox", h.notImplemented)
 	mux.HandleFunc("POST /inbox", h.notImplemented)
 	mux.HandleFunc("POST /inbox/{id}/convert", h.notImplemented)

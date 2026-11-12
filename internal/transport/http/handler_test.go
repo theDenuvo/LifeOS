@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	"github.com/theDenuvo/LifeOS/internal/config"
 	"github.com/theDenuvo/LifeOS/internal/infrastructure/sqlite"
 	"github.com/theDenuvo/LifeOS/internal/web/dist"
@@ -46,7 +47,8 @@ func setupTestHandler(t *testing.T) (*Handler, func()) {
 	}
 
 	// Use the test embedded filesystem
-	handler := NewHandler(db, cfg, testEmbedFS)
+	taskService := tasks.NewService(sqlite.NewTaskUnitOfWork(db), tasks.SystemClock())
+	handler := NewHandler(db, cfg, testEmbedFS, taskService)
 
 	cleanup := func() {
 		db.Close()
@@ -242,14 +244,6 @@ func TestHandlerAPIEndpointsReturn501(t *testing.T) {
 		method string
 		path   string
 	}{
-		{"GET", "/api/v1/tasks"},
-		{"POST", "/api/v1/tasks"},
-		{"GET", "/api/v1/tasks/1"},
-		{"PATCH", "/api/v1/tasks/1"},
-		{"POST", "/api/v1/tasks/1/complete"},
-		{"POST", "/api/v1/tasks/1/cancel"},
-		{"POST", "/api/v1/tasks/1/restore"},
-		{"POST", "/api/v1/tasks/1/reschedule"},
 		{"GET", "/api/v1/inbox"},
 		{"POST", "/api/v1/inbox"},
 		{"POST", "/api/v1/inbox/1/convert"},
@@ -420,7 +414,8 @@ func TestHandlerServeFrontendWithRealEmbedFS(t *testing.T) {
 	}
 
 	// Use the real embedded filesystem
-	handler := NewHandler(db, cfg, dist.FS)
+	taskService := tasks.NewService(sqlite.NewTaskUnitOfWork(db), tasks.SystemClock())
+	handler := NewHandler(db, cfg, dist.FS, taskService)
 
 	// Test root serves index.html
 	req := httptest.NewRequest(http.MethodGet, "/", nil)

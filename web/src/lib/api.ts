@@ -207,3 +207,76 @@ export function dismissInbox(id: number): Promise<void> {
 export function getSummary(): Promise<Summary> {
 	return request<Summary>('/api/v1/summary/today');
 }
+
+export interface AssistantMessage {
+	id: number;
+	conversation_id: number;
+	role: 'user' | 'assistant' | 'tool';
+	content: string;
+	tool_calls?: unknown;
+	metadata?: unknown;
+	created_at: string;
+}
+
+export interface PendingAction {
+	id: number;
+	conversation_id: number;
+	message_id: number;
+	tool_name: string;
+	arguments: Record<string, unknown>;
+	preview: { summary?: string };
+	status: 'pending' | 'confirmed' | 'rejected' | 'expired';
+	created_at: string;
+	resolved_at: string | null;
+	resolution: string | null;
+}
+
+export interface Conversation {
+	id: number;
+	title: string | null;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface ConversationView {
+	id: number;
+	title: string | null;
+	created_at: string;
+	updated_at: string;
+	messages: AssistantMessage[];
+	pending_actions: PendingAction[];
+}
+
+export interface SendMessageResult {
+	conversation_id: number;
+	message: AssistantMessage;
+	pending_actions: PendingAction[];
+}
+
+export function sendAssistantMessage(content: string, conversationId?: number): Promise<SendMessageResult> {
+	return request<SendMessageResult>('/api/v1/assistant/messages', {
+		method: 'POST',
+		body: JSON.stringify({ content, conversation_id: conversationId ?? 0 })
+	});
+}
+
+export function listConversations(): Promise<{ data: Conversation[]; meta: { total: number } }> {
+	return request<{ data: Conversation[]; meta: { total: number } }>('/api/v1/assistant/conversations');
+}
+
+export function getConversation(id: number): Promise<ConversationView> {
+	return request<ConversationView>(`/api/v1/assistant/conversations/${id}`);
+}
+
+export function confirmPendingAction(id: number): Promise<{ pending_action: PendingAction; result: unknown }> {
+	return request<{ pending_action: PendingAction; result: unknown }>(
+		`/api/v1/assistant/pending-actions/${id}/confirm`,
+		{ method: 'POST' }
+	);
+}
+
+export function rejectPendingAction(id: number): Promise<{ pending_action: PendingAction }> {
+	return request<{ pending_action: PendingAction }>(`/api/v1/assistant/pending-actions/${id}/reject`, {
+		method: 'POST'
+	});
+}

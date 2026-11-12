@@ -154,7 +154,7 @@
 | Тип поля | Представление |
 |---|---|
 | `CalendarDate` (`planned_date`, `due_date`) | `YYYY-MM-DD`, иначе `null` |
-| `time.Time` (`due_at`) | RFC3339 в UTC, иначе `null` |
+| `time.Time` (`due_at`) | RFC3339Nano в UTC (сохраняет дробные секунды), иначе `null` |
 | `Priority`, `Status` | строка (`low`/`medium`/`high`, `open`/...) |
 | `Tags` | массив строк (пустой массив, если тегов нет) |
 | `Note`, `Title`, `Timezone` | строка или `null` для отсутствующего значения |

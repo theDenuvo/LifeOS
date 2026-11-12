@@ -73,6 +73,19 @@ type UpdateTaskInput struct {
 	Tags        Optional[[]string]
 }
 
+// anySet reports whether the update request explicitly supplies at least one
+// field. An entirely empty patch is a read-only no-op.
+func (in UpdateTaskInput) anySet() bool {
+	return in.Title.IsSet() ||
+		in.Note.IsSet() ||
+		in.Priority.IsSet() ||
+		in.PlannedDate.IsSet() ||
+		in.DueDate.IsSet() ||
+		in.DueAt.IsSet() ||
+		in.Timezone.IsSet() ||
+		in.Tags.IsSet()
+}
+
 // RescheduleTaskInput carries the scheduling fields for RescheduleTask.
 //
 // Clearing follows the same rule as UpdateTask: Some(task.CalendarDate{}) clears

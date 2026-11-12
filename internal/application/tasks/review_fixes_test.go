@@ -209,7 +209,7 @@ func TestUpdateEventPayloadReportsClearedFieldsAsNull(t *testing.T) {
 		t.Errorf("due_at new = %v, want nil", dueAt["new"])
 	}
 	// The old value must be the normalised RFC3339 UTC string, not a raw time.
-	wantOld := testNow.Add(24 * time.Hour).UTC().Format(time.RFC3339)
+	wantOld := testNow.Add(24 * time.Hour).UTC().Format(time.RFC3339Nano)
 	if dueAt["old"] != wantOld {
 		t.Errorf("due_at old = %v, want %q", dueAt["old"], wantOld)
 	}
@@ -524,8 +524,8 @@ func TestRescheduleMultipleFieldsPayload(t *testing.T) {
 
 	if got := byField["due_at"]; got == nil {
 		t.Error("due_at change missing")
-	} else if got["new"] != newDueAt.UTC().Format(time.RFC3339) {
-		t.Errorf("due_at new = %v, want %v", got["new"], newDueAt.UTC().Format(time.RFC3339))
+	} else if got["new"] != newDueAt.UTC().Format(time.RFC3339Nano) {
+		t.Errorf("due_at new = %v, want %v", got["new"], newDueAt.UTC().Format(time.RFC3339Nano))
 	}
 }
 

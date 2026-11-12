@@ -206,14 +206,25 @@ func (s *Service) UpdateTask(ctx context.Context, id int64, expectedVersion int,
 			return err
 		}
 
+		// An empty patch is a read-only no-op, but still checks the caller's
+		// expected version so stale clients do not receive a misleading success.
+		if !in.anySet() {
+			if current.Version != expectedVersion {
+				return ErrVersionConflict
+			}
+			result = current
+			return nil
+		}
+
 		// Snapshot before mutating: Task.Update writes through the receiver, so
 		// holding the same pointer would compare the task with itself.
 		previous := cloneTask(current.Task)
 
-		if opts := buildUpdateOptions(in); len(opts) > 0 {
-			if err := current.Task.Update(now, opts...); err != nil {
-				return err
-			}
+		// Call Update even when the only requested change is clearing DueAt.
+		// buildUpdateOptions deliberately omits a zero timestamp because the
+		// Domain option rejects it, but the aggregate still needs UpdatedAt set.
+		if err := current.Task.Update(now, buildUpdateOptions(in)...); err != nil {
+			return err
 		}
 
 		applyClears(current.Task, updateClears(in))
@@ -596,7 +607,7 @@ func normalizeTime(value *time.Time) any {
 	if value == nil {
 		return nil
 	}
-	return value.UTC().Format(time.RFC3339)
+	return value.UTC().Format(time.RFC3339Nano)
 }
 
 func normalizeTags(value []string) any {

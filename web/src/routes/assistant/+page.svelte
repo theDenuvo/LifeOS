@@ -1,5 +1,7 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
+	import { goto } from '$app/navigation';
+	import { page } from '$app/stores';
 	import {
 		confirmPendingAction,
 		getConversation,
@@ -20,6 +22,9 @@
 	let sending = false;
 	let busyAction: number | null = null;
 	let error = '';
+	let bootstrapped = false;
+	let bootstrapping: Promise<void> | null = null;
+	let handledQuery = '';
 
 	const suggestions = [
 		'Что у меня на сегодня?',
@@ -27,6 +32,15 @@
 		'Создай задачу купить молоко на завтра',
 		'Разбери входящие'
 	];
+
+	async function scrollToLatest() {
+		await tick();
+		await new Promise<void>((resolve) =>
+			requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+		);
+		const scroller = document.scrollingElement ?? document.documentElement;
+		scroller.scrollTop = scroller.scrollHeight;
+	}
 
 	async function loadConversation() {
 		if (!conversationID) {
@@ -42,32 +56,57 @@
 	}
 
 	async function bootstrap() {
-		loading = true;
-		try {
-			const list = await listConversations();
-			const latest = list.data[0];
-			if (latest) {
-				conversationID = latest.id;
-				await loadConversation();
+		if (bootstrapped) return;
+		if (bootstrapping) return bootstrapping;
+		bootstrapping = (async () => {
+			loading = true;
+			try {
+				const list = await listConversations();
+				const latest = list.data[0];
+				if (latest) {
+					conversationID = latest.id;
+					await loadConversation();
+					await scrollToLatest();
+				}
+				error = '';
+				bootstrapped = true;
+			} catch (err) {
+				error = errorMessage(err);
+			} finally {
+				loading = false;
+				bootstrapping = null;
 			}
-			error = '';
-		} catch (err) {
-			error = errorMessage(err);
-		} finally {
-			loading = false;
+		})();
+		return bootstrapping;
+	}
+
+	async function handleQuery(query: string) {
+		await bootstrap();
+		input = query;
+		const from = $page.url.searchParams.get('from') || '/assistant';
+		await send(from);
+		goto('/assistant', { replaceState: true, noScroll: true });
+	}
+
+	$: {
+		const query = $page.url.searchParams.get('q');
+		if (query && query !== handledQuery) {
+			handledQuery = query;
+			void handleQuery(query);
 		}
 	}
 
-	async function send() {
+	async function send(screen = '/assistant') {
 		const content = input.trim();
 		if (!content || sending) return;
 		sending = true;
 		error = '';
 		try {
-			const result = await sendAssistantMessage(content, conversationID);
+			const result = await sendAssistantMessage(content, conversationID, { screen });
 			conversationID = result.conversation_id;
 			input = '';
 			await loadConversation();
+			await scrollToLatest();
 		} catch (err) {
 			error = errorMessage(err);
 		} finally {
@@ -105,6 +144,15 @@
 		input = text;
 	}
 
+	function newConversation() {
+		conversationID = 0;
+		messages = [];
+		pending = [];
+		input = '';
+		error = '';
+		goto('/assistant', { replaceState: true, noScroll: true });
+	}
+
 	onMount(() => {
 		bootstrap();
 		let timer: ReturnType<typeof setTimeout> | undefined;
@@ -131,9 +179,12 @@
 		<h1>Ассистент</h1>
 		<p class="subtitle">Понимает контекст, читает данные и предлагает действия</p>
 	</div>
-	{#if conversationID}
-		<span class="conversation-id">диалог #{conversationID}</span>
-	{/if}
+	<div class="header-actions">
+		{#if conversationID}
+			<span class="conversation-id">диалог #{conversationID}</span>
+		{/if}
+		<button class="new-chat" on:click={newConversation}>Новый диалог</button>
+	</div>
 </header>
 
 {#if error}
@@ -198,7 +249,7 @@
 		</div>
 	{/if}
 
-	<form class="composer" on:submit|preventDefault={send}>
+	<form class="composer" on:submit|preventDefault={() => send()}>
 		<textarea
 			bind:value={input}
 			rows="2"
@@ -236,6 +287,27 @@
 		margin: 0.25rem 0 0;
 		color: var(--fg-muted);
 		font-size: 0.9rem;
+	}
+
+	.header-actions {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+	}
+
+	.new-chat {
+		border: 1px solid var(--border);
+		background: transparent;
+		color: var(--fg-muted);
+		border-radius: 999px;
+		padding: 0.3rem 0.7rem;
+		font-size: 0.75rem;
+		cursor: pointer;
+	}
+
+	.new-chat:hover {
+		color: var(--fg-primary);
+		border-color: rgba(139, 92, 246, 0.4);
 	}
 
 	.conversation-id {

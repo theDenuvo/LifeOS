@@ -62,6 +62,15 @@ REST API v1 для LifeOS. Базовый путь: `/api/v1`
 }
 ```
 
+**Правило `overdue`** (вычисляется на сервере, не хранится):
+
+| Заданный дедлайн | Сравнение | Ровно в момент границы |
+|---|---|---|
+| `due_at` | строгое `now > due_at` | `overdue: false` |
+| только `due_date` | включительное `now >= следующая локальная полночь` | `overdue: true` |
+
+Для `due_date` допустим весь локальный календарный день; границей служит начало следующего локального дня в `timezone` задачи (учитывает DST). Если задан `due_at`, он имеет приоритет и `due_date` не участвует в расчёте. Задачи со статусом `completed`/`cancelled` никогда не считаются просроченными.
+
 ### InboxItem (Схема)
 
 ```json
@@ -191,11 +200,14 @@ POST /api/v1/tasks
 
 **Валидация:**
 - `title` required, 1-500 chars
+- `note` ≤ 5000 chars
 - `priority` ∈ {low,medium,high}, default medium
-- `planned_date`, `due_date` — валидные DATE
+- `planned_date`, `due_date` — валидные календарные DATE (реальная дата, без «тихой» нормализации)
 - `due_at` — валидный RFC3339 UTC
 - `timezone` — валидная IANA TZ, default Europe/Moscow
 - `tags` — массив строк, каждая ≤ 50 chars
+- `due_at` / `due_date` в прошлом допустимы — это не ошибка валидации (см. `overdue`)
+- Ограничения длины строк измеряются в Unicode code points
 
 **Response 201:** Task (с заполненными `id`, `created_at`, `updated_at`, `status: "open"`)
 

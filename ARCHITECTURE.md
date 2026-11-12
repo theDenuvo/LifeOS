@@ -153,9 +153,10 @@ Transport (HTTP, MCP) ──► Application ──► Domain
 - Structured logging (`slog`)
 
 ### `internal/transport/mcp`
-- MCP Adapter: инструменты = обёртки над Application services
-- Streamable HTTP transport
-- Один экземпляр на процесс
+- Tools-only MCP поверх Streamable HTTP (JSON-RPC 2.0): `initialize`, `ping`, `tools/list`, `tools/call`
+- Тот же реестр инструментов, что у ассистента (`internal/agent/tools`)
+- Read-only по умолчанию; мутации только при `LIFEOS_MCP_ALLOW_WRITES=true`
+- Один экземпляр на процесс; подробности в `MCP.md`
 
 ### `internal/application/assistant`
 - `SendMessage` — диалог: история, системный промпт, цикл tool calling (до 5 раундов)

@@ -178,6 +178,7 @@ curl -I http://127.0.0.1:8787/healthz # 200 OK, application/json
 | `LIFEOS_LLM_MODEL` | Нет | `openai/gpt-4o-mini` | Модель по умолчанию |
 | `LIFEOS_MCP_ENABLED` | Нет | `false` | Включить MCP endpoint |
 | `LIFEOS_MCP_PATH` | Нет | `/mcp` | Путь для MCP Streamable HTTP |
+| `LIFEOS_MCP_ALLOW_WRITES` | Нет | `false` | Разрешить мутирующие MCP-инструменты |
 
 * — обязательны если соответствующий провайдер включен
 

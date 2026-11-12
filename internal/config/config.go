@@ -21,8 +21,9 @@ type Config struct {
 	LLMAPIKey   string
 	LLMModel    string
 
-	MCPEnabled bool
-	MCPPath    string
+	MCPEnabled     bool
+	MCPPath        string
+	MCPAllowWrites bool
 }
 
 func Load(configPath string) (*Config, error) {
@@ -32,16 +33,17 @@ func Load(configPath string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		ListenAddr:  getEnv("LIFEOS_LISTEN_ADDR", "127.0.0.1:8787"),
-		DataDir:     getEnv("LIFEOS_DATA_DIR", "./data"),
-		Timezone:    getEnv("LIFEOS_TIMEZONE", "Europe/Moscow"),
-		LogLevel:    getEnv("LIFEOS_LOG_LEVEL", "info"),
-		LLMProvider: getEnv("LIFEOS_LLM_PROVIDER", "openrouter"),
-		LLMBaseURL:  getEnv("LIFEOS_LLM_BASE_URL", "https://openrouter.ai/api/v1"),
-		LLMAPIKey:   getEnv("LIFEOS_LLM_API_KEY", ""),
-		LLMModel:    getEnv("LIFEOS_LLM_MODEL", "openai/gpt-4o-mini"),
-		MCPEnabled:  getEnvBool("LIFEOS_MCP_ENABLED", false),
-		MCPPath:     getEnv("LIFEOS_MCP_PATH", "/mcp"),
+		ListenAddr:     getEnv("LIFEOS_LISTEN_ADDR", "127.0.0.1:8787"),
+		DataDir:        getEnv("LIFEOS_DATA_DIR", "./data"),
+		Timezone:       getEnv("LIFEOS_TIMEZONE", "Europe/Moscow"),
+		LogLevel:       getEnv("LIFEOS_LOG_LEVEL", "info"),
+		LLMProvider:    getEnv("LIFEOS_LLM_PROVIDER", "openrouter"),
+		LLMBaseURL:     getEnv("LIFEOS_LLM_BASE_URL", "https://openrouter.ai/api/v1"),
+		LLMAPIKey:      getEnv("LIFEOS_LLM_API_KEY", ""),
+		LLMModel:       getEnv("LIFEOS_LLM_MODEL", "openai/gpt-4o-mini"),
+		MCPEnabled:     getEnvBool("LIFEOS_MCP_ENABLED", false),
+		MCPPath:        getEnv("LIFEOS_MCP_PATH", "/mcp"),
+		MCPAllowWrites: getEnvBool("LIFEOS_MCP_ALLOW_WRITES", false),
 	}
 
 	// Load .env file if it exists (non-fatal if missing)
@@ -59,6 +61,7 @@ func Load(configPath string) (*Config, error) {
 	cfg.LLMModel = getEnv("LIFEOS_LLM_MODEL", cfg.LLMModel)
 	cfg.MCPEnabled = getEnvBool("LIFEOS_MCP_ENABLED", cfg.MCPEnabled)
 	cfg.MCPPath = getEnv("LIFEOS_MCP_PATH", cfg.MCPPath)
+	cfg.MCPAllowWrites = getEnvBool("LIFEOS_MCP_ALLOW_WRITES", cfg.MCPAllowWrites)
 
 	// Validate timezone using embedded IANA database
 	loc, err := time.LoadLocation(cfg.Timezone)

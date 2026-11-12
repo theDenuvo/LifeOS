@@ -10,25 +10,34 @@ import (
 	"strings"
 	"time"
 
+	"github.com/theDenuvo/LifeOS/internal/application/inbox"
+	"github.com/theDenuvo/LifeOS/internal/application/summary"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	"github.com/theDenuvo/LifeOS/internal/config"
 )
 
-type Handler struct {
-	db      *sql.DB
-	cfg     *config.Config
-	embedFS embed.FS
-	tasks   *tasks.Service
-	now     func() time.Time
+// Services groups the application services the HTTP transport exposes.
+type Services struct {
+	Tasks   *tasks.Service
+	Inbox   *inbox.Service
+	Summary *summary.Service
 }
 
-func NewHandler(db *sql.DB, cfg *config.Config, embedFS embed.FS, taskService *tasks.Service) *Handler {
+type Handler struct {
+	db       *sql.DB
+	cfg      *config.Config
+	embedFS  embed.FS
+	services Services
+	now      func() time.Time
+}
+
+func NewHandler(db *sql.DB, cfg *config.Config, embedFS embed.FS, services Services) *Handler {
 	h := &Handler{
-		db:      db,
-		cfg:     cfg,
-		embedFS: embedFS,
-		tasks:   taskService,
-		now:     func() time.Time { return time.Now().UTC() },
+		db:       db,
+		cfg:      cfg,
+		embedFS:  embedFS,
+		services: services,
+		now:      func() time.Time { return time.Now().UTC() },
 	}
 	return h
 }
@@ -54,11 +63,11 @@ func (h *Handler) apiRoutes() http.Handler {
 	mux.HandleFunc("POST /tasks/{id}/cancel", h.cancelTask)
 	mux.HandleFunc("POST /tasks/{id}/restore", h.restoreTask)
 	mux.HandleFunc("POST /tasks/{id}/reschedule", h.rescheduleTask)
-	mux.HandleFunc("GET /inbox", h.notImplemented)
-	mux.HandleFunc("POST /inbox", h.notImplemented)
-	mux.HandleFunc("POST /inbox/{id}/convert", h.notImplemented)
-	mux.HandleFunc("DELETE /inbox/{id}", h.notImplemented)
-	mux.HandleFunc("GET /summary/today", h.notImplemented)
+	mux.HandleFunc("GET /inbox", h.listInbox)
+	mux.HandleFunc("POST /inbox", h.captureInbox)
+	mux.HandleFunc("POST /inbox/{id}/convert", h.convertInbox)
+	mux.HandleFunc("DELETE /inbox/{id}", h.dismissInbox)
+	mux.HandleFunc("GET /summary/today", h.todaySummary)
 	mux.HandleFunc("POST /assistant/messages", h.notImplemented)
 	mux.HandleFunc("GET /assistant/conversations", h.notImplemented)
 	mux.HandleFunc("GET /assistant/conversations/{id}", h.notImplemented)

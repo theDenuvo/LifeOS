@@ -332,7 +332,10 @@ POST /api/v1/inbox/{id}/convert
 ```
 
 **Response 201:** Task (созданная)
-**Response 404:** NotFound (inbox item не найден или уже processed)
+**Response 404:** NotFound (inbox item не найден)
+**Response 409:** Conflict (элемент уже преобразован или удалён)
+
+Конвертация атомарна: задача, событие `converted_from_inbox` и `processed_at` записываются в одной транзакции. Если текст длиннее 500 символов, заголовок обрезается до 500, а полный текст сохраняется в `note`.
 
 #### Удалить входящий (Dismiss)
 
@@ -342,6 +345,7 @@ DELETE /api/v1/inbox/{id}
 
 **Response 204:** No Content
 **Response 404:** NotFound
+**Response 409:** Conflict (элемент уже обработан)
 
 ---
 

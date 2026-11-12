@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/theDenuvo/LifeOS/internal/application/inbox"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	"github.com/theDenuvo/LifeOS/internal/domain/task"
 )
@@ -32,12 +33,22 @@ func NewTaskUnitOfWork(db *sql.DB) *TaskUnitOfWork {
 //
 // It commits only when fn returns nil and the context is still alive; any error
 // or a cancelled context rolls the whole unit of work back.
-func (u *TaskUnitOfWork) Do(ctx context.Context, fn func(ctx context.Context, tx tasks.Transaction) error) (err error) {
+func (u *TaskUnitOfWork) Do(ctx context.Context, fn func(ctx context.Context, tx tasks.Transaction) error) error {
+	return runInTransaction(ctx, u.db, func(tx *sql.Tx) error {
+		return fn(ctx, taskTransaction{tx: tx})
+	})
+}
+
+// runInTransaction is the shared transaction runner for every unit of work.
+//
+// It commits only when fn returns nil and the context is still alive; any error
+// or a cancelled context rolls the whole unit of work back.
+func runInTransaction(ctx context.Context, db *sql.DB, fn func(tx *sql.Tx) error) (err error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
-	tx, err := u.db.BeginTx(ctx, nil)
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
@@ -47,7 +58,7 @@ func (u *TaskUnitOfWork) Do(ctx context.Context, fn func(ctx context.Context, tx
 		}
 	}()
 
-	if err = fn(ctx, taskTransaction{tx: tx}); err != nil {
+	if err = fn(tx); err != nil {
 		return err
 	}
 	if err = ctx.Err(); err != nil {
@@ -67,6 +78,8 @@ type taskTransaction struct {
 func (t taskTransaction) Tasks() tasks.TaskRepository { return &taskRepository{tx: t.tx} }
 
 func (t taskTransaction) Events() tasks.TaskEventRepository { return &taskEventRepository{tx: t.tx} }
+
+func (t taskTransaction) Inbox() inbox.Repository { return &inboxRepository{tx: t.tx} }
 
 // taskRepository is the SQLite implementation of tasks.TaskRepository.
 type taskRepository struct {

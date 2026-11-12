@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/theDenuvo/LifeOS/internal/application/inbox"
+	"github.com/theDenuvo/LifeOS/internal/application/summary"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	"github.com/theDenuvo/LifeOS/internal/config"
 	"github.com/theDenuvo/LifeOS/internal/infrastructure/sqlite"
@@ -37,8 +39,15 @@ func newTaskAPI(t *testing.T, now time.Time) (*Handler, func()) {
 		DataDir:  tmpDir,
 		Timezone: "Europe/Moscow",
 	}
-	service := tasks.NewService(sqlite.NewTaskUnitOfWork(db), apiClock{now: now}, tasks.WithDefaultTimezone("Europe/Moscow"))
-	handler := NewHandler(db, cfg, testEmbedFS, service)
+	clock := apiClock{now: now}
+	service := tasks.NewService(sqlite.NewTaskUnitOfWork(db), clock, tasks.WithDefaultTimezone("Europe/Moscow"))
+	inboxService := inbox.NewService(sqlite.NewInboxUnitOfWork(db), clock, "Europe/Moscow")
+	summaryService := summary.NewService(service, inboxService, clock, "Europe/Moscow")
+	handler := NewHandler(db, cfg, testEmbedFS, Services{
+		Tasks:   service,
+		Inbox:   inboxService,
+		Summary: summaryService,
+	})
 	handler.now = func() time.Time { return now }
 
 	return handler, func() { _ = db.Close() }

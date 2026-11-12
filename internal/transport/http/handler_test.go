@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/theDenuvo/LifeOS/internal/application/inbox"
+	"github.com/theDenuvo/LifeOS/internal/application/summary"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	"github.com/theDenuvo/LifeOS/internal/config"
 	"github.com/theDenuvo/LifeOS/internal/infrastructure/sqlite"
@@ -47,8 +49,15 @@ func setupTestHandler(t *testing.T) (*Handler, func()) {
 	}
 
 	// Use the test embedded filesystem
-	taskService := tasks.NewService(sqlite.NewTaskUnitOfWork(db), tasks.SystemClock())
-	handler := NewHandler(db, cfg, testEmbedFS, taskService)
+	clock := tasks.SystemClock()
+	taskService := tasks.NewService(sqlite.NewTaskUnitOfWork(db), clock)
+	inboxService := inbox.NewService(sqlite.NewInboxUnitOfWork(db), clock, cfg.Timezone)
+	summaryService := summary.NewService(taskService, inboxService, clock, cfg.Timezone)
+	handler := NewHandler(db, cfg, testEmbedFS, Services{
+		Tasks:   taskService,
+		Inbox:   inboxService,
+		Summary: summaryService,
+	})
 
 	cleanup := func() {
 		db.Close()
@@ -244,11 +253,6 @@ func TestHandlerAPIEndpointsReturn501(t *testing.T) {
 		method string
 		path   string
 	}{
-		{"GET", "/api/v1/inbox"},
-		{"POST", "/api/v1/inbox"},
-		{"POST", "/api/v1/inbox/1/convert"},
-		{"DELETE", "/api/v1/inbox/1"},
-		{"GET", "/api/v1/summary/today"},
 		{"POST", "/api/v1/assistant/messages"},
 		{"GET", "/api/v1/assistant/conversations"},
 		{"GET", "/api/v1/assistant/conversations/1"},
@@ -414,8 +418,15 @@ func TestHandlerServeFrontendWithRealEmbedFS(t *testing.T) {
 	}
 
 	// Use the real embedded filesystem
-	taskService := tasks.NewService(sqlite.NewTaskUnitOfWork(db), tasks.SystemClock())
-	handler := NewHandler(db, cfg, dist.FS, taskService)
+	clock := tasks.SystemClock()
+	taskService := tasks.NewService(sqlite.NewTaskUnitOfWork(db), clock)
+	inboxService := inbox.NewService(sqlite.NewInboxUnitOfWork(db), clock, cfg.Timezone)
+	summaryService := summary.NewService(taskService, inboxService, clock, cfg.Timezone)
+	handler := NewHandler(db, cfg, dist.FS, Services{
+		Tasks:   taskService,
+		Inbox:   inboxService,
+		Summary: summaryService,
+	})
 
 	// Test root serves index.html
 	req := httptest.NewRequest(http.MethodGet, "/", nil)

@@ -331,8 +331,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/InboxListResponse'
-        '501':
-          $ref: '#/components/responses/NotImplementedError'
         '400':
           $ref: '#/components/responses/ValidationError'
     post:
@@ -355,8 +353,6 @@ paths:
                 $ref: '#/components/schemas/InboxItemResponse'
         '400':
           $ref: '#/components/responses/ValidationError'
-        '501':
-          $ref: '#/components/responses/NotImplementedError'
   /api/v1/inbox/{id}/convert:
     post:
       summary: Convert inbox item to task
@@ -386,8 +382,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '404':
           $ref: '#/components/responses/NotFoundError'
-        '501':
-          $ref: '#/components/responses/NotImplementedError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
   /api/v1/inbox/{id}:
     delete:
       summary: Dismiss an inbox item
@@ -406,8 +402,8 @@ paths:
           description: Inbox item dismissed
         '404':
           $ref: '#/components/responses/NotFoundError'
-        '501':
-          $ref: '#/components/responses/NotImplementedError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
   /api/v1/summary/today:
     get:
       summary: Get today's summary (main screen data)
@@ -421,8 +417,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SummaryResponse'
-        '501':
-          $ref: '#/components/responses/NotImplementedError'
         '400':
           $ref: '#/components/responses/ValidationError'
   /api/v1/assistant/messages:
@@ -832,14 +826,23 @@ components:
           type: string
           maxLength: 2000
         meta:
-          type: object
+          type:
+          - object
+          - 'null'
           additionalProperties: true
         created_at:
           type: string
           format: date-time
         processed_at:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
+        converted_task_id:
+          type:
+          - integer
+          - 'null'
+          format: int64
     InboxCaptureRequest:
       type: object
       required:
@@ -868,6 +871,11 @@ components:
         due_date:
           type: string
           format: date
+        due_at:
+          type: string
+          format: date-time
+        timezone:
+          type: string
     InboxListResponse:
       type: object
       required:
@@ -914,7 +922,9 @@ components:
         stats:
           $ref: '#/components/schemas/SummaryStats'
         focus_task:
-          $ref: '#/components/schemas/TaskSummaryItem'
+          oneOf:
+          - $ref: '#/components/schemas/TaskSummaryItem'
+          - type: 'null'
     TaskSummaryItem:
       type: object
       required:
@@ -936,6 +946,9 @@ components:
           - low
           - medium
           - high
+        days_overdue:
+          type: integer
+          minimum: 1
     SummaryStats:
       type: object
       required:

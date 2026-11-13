@@ -233,7 +233,7 @@
 
 	h1 {
 		margin: 0;
-		font-size: 1.9rem;
+		font-size: var(--text-2xl);
 		letter-spacing: -0.02em;
 	}
 
@@ -244,8 +244,8 @@
 	}
 
 	.primary {
-		background: linear-gradient(135deg, #8b5cf6, #06b6d4);
-		color: #0a0a0f;
+		background: var(--accent);
+		color: var(--on-accent);
 		border: none;
 		border-radius: 10px;
 		padding: 0.6rem 0.95rem;
@@ -293,8 +293,8 @@
 	}
 
 	.create button {
-		background: #8b5cf6;
-		color: #0a0a0f;
+		background: var(--accent);
+		color: var(--on-accent);
 		border: none;
 		border-radius: 8px;
 		padding: 0.55rem 0.9rem;

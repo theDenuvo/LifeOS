@@ -22,6 +22,9 @@ let started = false;
 
 export function startLive(): void {
 	if (started || typeof window === 'undefined') return;
+	// Headless screenshot tools wait for network idle; an open SSE stream never
+	// becomes idle. This query flag is for visual verification only.
+	if (new URLSearchParams(window.location.search).has('no_live')) return;
 	started = true;
 
 	const source = new EventSource('/api/v1/events');

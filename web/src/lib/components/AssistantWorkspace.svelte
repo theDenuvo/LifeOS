@@ -249,7 +249,10 @@
 			completed_at: null,
 			cancelled_at: null,
 			overdue: Boolean(raw.overdue),
-			version: typeof raw.version === 'number' ? raw.version : 0
+			version: typeof raw.version === 'number' ? raw.version : 0,
+			estimate_minutes: typeof raw.estimate_minutes === 'number' ? raw.estimate_minutes : null,
+			expected_result: typeof raw.expected_result === 'string' ? raw.expected_result : null,
+			repeat: (raw.repeat as Task['repeat']) ?? null
 		};
 	}
 
@@ -626,6 +629,13 @@
 		if (name === 'edit_file') return 'Правлю файл';
 		if (name === 'delete_path') return 'Удаляю путь';
 		if (name === 'run_command') return 'Выполняю команду';
+		if (name === 'plan_day') return 'Составляю план дня';
+		if (name === 'apply_plan') return 'Записываю план';
+		if (name === 'replan') return 'Предлагаю перенос';
+		if (name === 'estimate_duration') return 'Оцениваю длительность';
+		if (name === 'review_habit') return 'Проверяю ритм';
+		if (name === 'capture') return 'Сохраняю мысль';
+		if (name === 'list_ideas') return 'Смотрю идеи';
 		return 'Выполняю действие';
 	}
 

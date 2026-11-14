@@ -2,7 +2,7 @@
 	import '../app.css';
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
-	import { startLive, conversationsRevision } from '$lib/live';
+	import { startLive, conversationsRevision, reminderNotice, dismissReminder } from '$lib/live';
 	import { listConversations, type Conversation } from '$lib/api';
 	import { profile, loadProfile, calendarSources } from '$lib/profile';
 	import { selectedCalendars, toggleCalendar } from '$lib/calendarFilter';
@@ -158,6 +158,32 @@
 	<main class="content" class:flush>
 		<slot />
 	</main>
+
+	{#if $reminderNotice}
+		<aside class="reminder-toast" role="status" aria-live="polite">
+			<div class="reminder-body">
+				<span class="reminder-kind">
+					{$reminderNotice.kind === 'overdue'
+						? 'Просрочено'
+						: $reminderNotice.kind === 'due'
+							? 'Срок сейчас'
+							: 'Скоро срок'}
+				</span>
+				<span class="reminder-title">{$reminderNotice.title}</span>
+				{#if $reminderNotice.due_date}
+					<span class="reminder-due">до {$reminderNotice.due_date}</span>
+				{:else if $reminderNotice.due_at}
+					<span class="reminder-due">
+						до {new Date($reminderNotice.due_at).toLocaleTimeString('ru-RU', {
+							hour: '2-digit',
+							minute: '2-digit'
+						})}
+					</span>
+				{/if}
+			</div>
+			<button class="reminder-close" on:click={dismissReminder} aria-label="Скрыть напоминание">×</button>
+		</aside>
+	{/if}
 
 	<nav class="mobile-nav" aria-label="Мобильная навигация">
 		{#each mobileNav as item}
@@ -514,6 +540,55 @@
 
 	.mobile-nav {
 		display: none;
+	}
+
+	.reminder-toast {
+		position: fixed;
+		right: var(--space-5);
+		bottom: var(--space-5);
+		z-index: 40;
+		display: flex;
+		align-items: flex-start;
+		gap: var(--space-3);
+		max-width: 22rem;
+		padding: var(--space-3) var(--space-4);
+		border: 1px solid var(--accent-border);
+		border-radius: var(--radius-md);
+		background: var(--bg-raised);
+		box-shadow: var(--shadow-overlay);
+		animation: pop-in var(--duration-normal) var(--ease-out);
+	}
+
+	.reminder-body {
+		display: flex;
+		flex-direction: column;
+		gap: 0.15rem;
+	}
+
+	.reminder-kind {
+		color: var(--accent-bright);
+		font-size: var(--text-2xs);
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+	}
+
+	.reminder-title {
+		color: var(--fg-primary);
+		font-size: var(--text-base);
+	}
+
+	.reminder-due {
+		color: var(--fg-muted);
+		font-size: var(--text-xs);
+	}
+
+	.reminder-close {
+		background: none;
+		border: none;
+		color: var(--fg-muted);
+		cursor: pointer;
+		font-size: 1.1rem;
+		line-height: 1;
 	}
 
 	.shell.collapsed {

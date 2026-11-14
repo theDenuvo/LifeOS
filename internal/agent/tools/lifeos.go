@@ -11,10 +11,13 @@ import (
 	appdocuments "github.com/theDenuvo/LifeOS/internal/application/documents"
 	appevents "github.com/theDenuvo/LifeOS/internal/application/events"
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
+	"github.com/theDenuvo/LifeOS/internal/application/planning"
 	"github.com/theDenuvo/LifeOS/internal/application/proactive"
+	"github.com/theDenuvo/LifeOS/internal/application/recurrence"
 	"github.com/theDenuvo/LifeOS/internal/application/search"
 	"github.com/theDenuvo/LifeOS/internal/application/summary"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
+	domaininbox "github.com/theDenuvo/LifeOS/internal/domain/inbox"
 	"github.com/theDenuvo/LifeOS/internal/domain/task"
 )
 
@@ -22,12 +25,14 @@ import (
 type LifeOSToolOption func(*lifeOSToolConfig)
 
 type lifeOSToolConfig struct {
-	search    *search.Service
-	proactive *proactive.Service
-	events    *appevents.Service
-	documents *appdocuments.Service
-	timezone  string
-	workspace *workspaceConfig
+	search     *search.Service
+	proactive  *proactive.Service
+	events     *appevents.Service
+	documents  *appdocuments.Service
+	timezone   string
+	workspace  *workspaceConfig
+	planning   *planning.Service
+	recurrence *recurrence.Service
 }
 
 // WithSearchService exposes unified search to the assistant.
@@ -51,6 +56,18 @@ func WithDocumentService(service *appdocuments.Service) LifeOSToolOption {
 }
 
 // WithTimezone sets the timezone used to interpret date-only tool arguments.
+// WithPlanning attaches the planner: day plans, replanning proposals and duration
+// estimates.
+func WithPlanning(service *planning.Service) LifeOSToolOption {
+	return func(c *lifeOSToolConfig) { c.planning = service }
+}
+
+// WithRecurrence attaches the habit review used by recurring tasks.
+func WithRecurrence(service *recurrence.Service) LifeOSToolOption {
+	return func(c *lifeOSToolConfig) { c.recurrence = service }
+}
+
+// WithTimezone sets the timezone used for date defaults.
 func WithTimezone(timezone string) LifeOSToolOption {
 	return func(config *lifeOSToolConfig) {
 		if timezone != "" {
@@ -80,6 +97,9 @@ func NewLifeOSTools(taskService *tasks.Service, inboxService *inbox.Service, sum
 		opt(&config)
 	}
 	registry := NewRegistry()
+	if config.planning != nil {
+		registerPlanningTools(registry, config.planning, config.recurrence, captureAdapter(inboxService), todayProvider(config.timezone))
+	}
 	if config.events != nil {
 		registerEventTools(registry, config.events, config.timezone)
 	}
@@ -174,13 +194,15 @@ func NewLifeOSTools(taskService *tasks.Service, inboxService *inbox.Service, sum
 	})
 
 	registry.Register(Tool{
-		Spec: assistantSpec("list_inbox", "Необработанные входящие элементы.", objectSchema(map[string]any{
+		Spec: assistantSpec("list_inbox", "Необработанные входящие элементы: задачи, идеи, заметки и цели.", objectSchema(map[string]any{
 			"limit": integerProp("Сколько элементов вернуть (1-50)"),
+			"kind":  enumProp("task", "idea", "note", "goal"),
 		})),
 		ReadOnly: true,
 		Execute: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			var args struct {
-				Limit int `json:"limit"`
+				Limit int    `json:"limit"`
+				Kind  string `json:"kind"`
 			}
 			if err := decodeArgs(raw, &args); err != nil {
 				return nil, err
@@ -192,17 +214,30 @@ func NewLifeOSTools(taskService *tasks.Service, inboxService *inbox.Service, sum
 			if limit > 50 {
 				limit = 50
 			}
-			result, err := inboxService.List(ctx, inbox.Filter{UnprocessedOnly: true, Limit: tasks.Some(limit)})
+			filter := inbox.Filter{UnprocessedOnly: true, Limit: tasks.Some(limit)}
+			if args.Kind != "" {
+				kind := domaininbox.Kind(args.Kind)
+				if !kind.IsValid() {
+					return nil, fmt.Errorf("invalid kind %q", args.Kind)
+				}
+				filter.Kind = kind
+			}
+			result, err := inboxService.List(ctx, filter)
 			if err != nil {
 				return nil, err
 			}
 			items := make([]map[string]any, 0, len(result.Items))
 			for _, item := range result.Items {
-				items = append(items, map[string]any{
+				entry := map[string]any{
 					"id":         item.ID,
 					"text":       item.Text,
+					"kind":       string(item.Kind),
 					"created_at": item.CreatedAt.Format(time.RFC3339),
-				})
+				}
+				if item.RevisitAt != nil && !item.RevisitAt.IsZero() {
+					entry["revisit_at"] = item.RevisitAt.String()
+				}
+				items = append(items, entry)
 			}
 			return map[string]any{"items": items, "total": result.Total}, nil
 		},
@@ -210,24 +245,39 @@ func NewLifeOSTools(taskService *tasks.Service, inboxService *inbox.Service, sum
 
 	registry.Register(Tool{
 		Spec: assistantSpec("create_task", "Создать задачу. Требует подтверждения пользователя.", objectSchema(map[string]any{
-			"title":    stringProp("Название задачи"),
-			"note":     stringProp("Заметка"),
-			"priority": enumProp("low", "medium", "high"),
-			"due_date": stringProp("Календарный дедлайн YYYY-MM-DD"),
-			"due_at":   stringProp("Точный дедлайн RFC3339"),
+			"title":            stringProp("Название задачи"),
+			"note":             stringProp("Заметка"),
+			"priority":         enumProp("low", "medium", "high"),
+			"due_date":         stringProp("Календарный дедлайн YYYY-MM-DD"),
+			"due_at":           stringProp("Точный дедлайн RFC3339"),
+			"estimate_minutes": integerProp("Сколько времени займёт работа, в минутах (5-1440)"),
+			"expected_result":  stringProp("Что означает «готово» для этой задачи"),
+			"repeat":           repeatSchema(),
 		}, "title")),
 		Execute: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			var args struct {
-				Title    string  `json:"title"`
-				Note     *string `json:"note"`
-				Priority *string `json:"priority"`
-				DueDate  *string `json:"due_date"`
-				DueAt    *string `json:"due_at"`
+				Title           string       `json:"title"`
+				Note            *string      `json:"note"`
+				Priority        *string      `json:"priority"`
+				DueDate         *string      `json:"due_date"`
+				DueAt           *string      `json:"due_at"`
+				EstimateMinutes *int         `json:"estimate_minutes"`
+				ExpectedResult  *string      `json:"expected_result"`
+				Repeat          *task.Repeat `json:"repeat"`
 			}
 			if err := decodeArgs(raw, &args); err != nil {
 				return nil, err
 			}
 			input := tasks.CreateTaskInput{Title: args.Title}
+			if args.EstimateMinutes != nil {
+				input.EstimateMinutes = tasks.Some(*args.EstimateMinutes)
+			}
+			if args.ExpectedResult != nil {
+				input.ExpectedResult = tasks.Some(*args.ExpectedResult)
+			}
+			if args.Repeat != nil {
+				input.Repeat = tasks.Some(*args.Repeat)
+			}
 			if args.Note != nil {
 				input.Note = tasks.Some(*args.Note)
 			}
@@ -264,28 +314,43 @@ func NewLifeOSTools(taskService *tasks.Service, inboxService *inbox.Service, sum
 
 	registry.Register(Tool{
 		Spec: assistantSpec("update_task", "Изменить задачу. Требует подтверждения пользователя.", objectSchema(map[string]any{
-			"id":       integerProp("ID задачи"),
-			"version":  integerProp("Версия задачи из последнего чтения"),
-			"title":    stringProp("Новое название"),
-			"note":     stringProp("Новая заметка; пустая строка очищает"),
-			"priority": enumProp("low", "medium", "high"),
-			"due_date": stringProp("Новый календарный дедлайн YYYY-MM-DD; пустая строка очищает"),
-			"due_at":   stringProp("Новый точный дедлайн RFC3339; пустая строка очищает"),
+			"id":               integerProp("ID задачи"),
+			"version":          integerProp("Версия задачи из последнего чтения"),
+			"title":            stringProp("Новое название"),
+			"note":             stringProp("Новая заметка; пустая строка очищает"),
+			"priority":         enumProp("low", "medium", "high"),
+			"due_date":         stringProp("Новый календарный дедлайн YYYY-MM-DD; пустая строка очищает"),
+			"due_at":           stringProp("Новый точный дедлайн RFC3339; пустая строка очищает"),
+			"estimate_minutes": integerProp("Новая оценка времени в минутах; 0 очищает"),
+			"expected_result":  stringProp("Новый ожидаемый результат; пустая строка очищает"),
+			"repeat":           repeatSchema(),
 		}, "id", "version")),
 		Execute: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			var args struct {
-				ID       int64   `json:"id"`
-				Version  int     `json:"version"`
-				Title    *string `json:"title"`
-				Note     *string `json:"note"`
-				Priority *string `json:"priority"`
-				DueDate  *string `json:"due_date"`
-				DueAt    *string `json:"due_at"`
+				ID              int64        `json:"id"`
+				Version         int          `json:"version"`
+				Title           *string      `json:"title"`
+				Note            *string      `json:"note"`
+				Priority        *string      `json:"priority"`
+				DueDate         *string      `json:"due_date"`
+				DueAt           *string      `json:"due_at"`
+				EstimateMinutes *int         `json:"estimate_minutes"`
+				ExpectedResult  *string      `json:"expected_result"`
+				Repeat          *task.Repeat `json:"repeat"`
 			}
 			if err := decodeArgs(raw, &args); err != nil {
 				return nil, err
 			}
 			input := tasks.UpdateTaskInput{}
+			if args.EstimateMinutes != nil {
+				input.EstimateMinutes = tasks.Some(*args.EstimateMinutes)
+			}
+			if args.ExpectedResult != nil {
+				input.ExpectedResult = tasks.Some(*args.ExpectedResult)
+			}
+			if args.Repeat != nil {
+				input.Repeat = tasks.Some(*args.Repeat)
+			}
 			if args.Title != nil {
 				input.Title = tasks.Some(*args.Title)
 			}
@@ -381,21 +446,44 @@ func NewLifeOSTools(taskService *tasks.Service, inboxService *inbox.Service, sum
 	})
 
 	registry.Register(Tool{
-		Spec: assistantSpec("capture_inbox", "Добавить мысль или задачу во входящие. Требует подтверждения.", objectSchema(map[string]any{
-			"text": stringProp("Текст для входящих"),
+		Spec: assistantSpec("capture_inbox", "Добавить мысль, задачу, идею или заметку во входящие. Требует подтверждения.", objectSchema(map[string]any{
+			"text":       stringProp("Текст для входящих"),
+			"kind":       enumProp("task", "idea", "note", "goal"),
+			"revisit_at": stringProp("Дата, когда вернуться к записи, YYYY-MM-DD"),
 		}, "text")),
 		Execute: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			var args struct {
-				Text string `json:"text"`
+				Text      string  `json:"text"`
+				Kind      *string `json:"kind"`
+				RevisitAt *string `json:"revisit_at"`
 			}
 			if err := decodeArgs(raw, &args); err != nil {
 				return nil, err
 			}
-			item, err := inboxService.Capture(ctx, args.Text, nil)
+			input := inbox.CaptureInput{Text: args.Text}
+			if args.Kind != nil {
+				kind := domaininbox.Kind(*args.Kind)
+				if !kind.IsValid() {
+					return nil, fmt.Errorf("invalid kind %q", *args.Kind)
+				}
+				input.Kind = kind
+			}
+			if args.RevisitAt != nil {
+				date, err := task.ParseCalendarDate(*args.RevisitAt)
+				if err != nil {
+					return nil, fmt.Errorf("revisit_at must be YYYY-MM-DD: %w", err)
+				}
+				input.RevisitAt = &date
+			}
+			item, err := inboxService.CaptureItem(ctx, input)
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"id": item.ID, "text": item.Text}, nil
+			out := map[string]any{"id": item.ID, "text": item.Text, "kind": string(item.Kind)}
+			if item.RevisitAt != nil && !item.RevisitAt.IsZero() {
+				out["revisit_at"] = item.RevisitAt.String()
+			}
+			return out, nil
 		},
 		Preview: func(raw json.RawMessage) (string, error) {
 			var args struct {
@@ -556,6 +644,32 @@ func registerTransition(registry *Registry, name, label string, apply transition
 	})
 }
 
+// captureAdapter stores a capture through the inbox service.
+func captureAdapter(service *inbox.Service) func(ctx context.Context, in captureInput) (captureResult, error) {
+	if service == nil {
+		return nil
+	}
+	return func(ctx context.Context, in captureInput) (captureResult, error) {
+		item, err := service.CaptureItem(ctx, inbox.CaptureInput{Text: in.Text, Kind: in.Kind, RevisitAt: in.RevisitAt})
+		if err != nil {
+			return captureResult{}, err
+		}
+		return captureResult{ID: item.ID, Text: item.Text, Kind: item.Kind, RevisitAt: item.RevisitAt}, nil
+	}
+}
+
+// todayProvider returns today's date in the configured timezone.
+func todayProvider(timezone string) TodayProvider {
+	return func() (task.CalendarDate, error) {
+		loc, err := time.LoadLocation(timezone)
+		if err != nil {
+			loc = time.UTC
+		}
+		now := time.Now().In(loc)
+		return task.NewCalendarDate(now.Year(), now.Month(), now.Day())
+	}
+}
+
 func taskView(item tasks.TaskWithVersion) map[string]any {
 	t := item.Task
 	view := map[string]any{
@@ -579,7 +693,33 @@ func taskView(item tasks.TaskWithVersion) map[string]any {
 	if t.DueAt != nil {
 		view["due_at"] = t.DueAt.Format(time.RFC3339)
 	}
+	if t.EstimateMinutes != nil {
+		view["estimate_minutes"] = *t.EstimateMinutes
+	}
+	if t.ExpectedResult != nil {
+		view["expected_result"] = *t.ExpectedResult
+	}
+	if t.Repeat != nil {
+		view["repeat"] = t.Repeat
+		view["repeat_description"] = t.Repeat.Describe()
+	}
 	return view
+}
+
+// repeatSchema describes a recurrence rule for the model.
+func repeatSchema() map[string]any {
+	return map[string]any{
+		"type":        "object",
+		"description": "Правило повторения. Завершение задачи создаёт следующее вхождение.",
+		"properties": map[string]any{
+			"freq":        enumProp("daily", "weekly", "monthly"),
+			"interval":    integerProp("Каждые N дней/недель/месяцев (1-12)"),
+			"weekdays":    map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "Для weekly: дни недели 1-7, 1 = понедельник"},
+			"until":       stringProp("Последняя дата YYYY-MM-DD"),
+			"window_days": integerProp("Сколько дней планировщик может сдвигать вхождение (0-7)"),
+		},
+		"required": []string{"freq"},
+	}
 }
 
 func decodeArgs(raw json.RawMessage, target any) error {

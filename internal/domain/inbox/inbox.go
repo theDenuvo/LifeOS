@@ -5,8 +5,11 @@ package inbox
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 	"unicode/utf8"
+
+	"github.com/theDenuvo/LifeOS/internal/domain/task"
 )
 
 // Validation errors.
@@ -16,7 +19,38 @@ var (
 
 	// ErrInvalidMeta is returned when meta is not valid JSON.
 	ErrInvalidMeta = errors.New("meta must be valid JSON")
+
+	// ErrInvalidKind is returned when the captured kind is unknown.
+	ErrInvalidKind = errors.New("kind must be task, idea, note, or goal")
 )
+
+// Kind says what was captured.
+//
+// Not everything a person writes down is a task. An idea or a note is kept as
+// captured and revisited later instead of being forced into the task list.
+type Kind string
+
+// Captured kinds.
+const (
+	KindTask Kind = "task"
+	KindIdea Kind = "idea"
+	KindNote Kind = "note"
+	KindGoal Kind = "goal"
+)
+
+// IsValid reports whether the kind is known.
+func (k Kind) IsValid() bool {
+	switch k {
+	case KindTask, KindIdea, KindNote, KindGoal:
+		return true
+	default:
+		return false
+	}
+}
+
+// RevisitLater reports whether the kind is returned to the user on a date rather
+// than worked on immediately.
+func (k Kind) RevisitLater() bool { return k == KindIdea || k == KindNote }
 
 const (
 	maxTextLength = 2000
@@ -27,6 +61,8 @@ type Item struct {
 	ID              int64
 	Text            string
 	Meta            json.RawMessage
+	Kind            Kind
+	RevisitAt       *task.CalendarDate
 	CreatedAt       time.Time
 	ProcessedAt     *time.Time
 	ConvertedTaskID *int64
@@ -40,6 +76,7 @@ func NewItem(text string, meta json.RawMessage, createdAt time.Time) (*Item, err
 	item := &Item{
 		Text:      text,
 		Meta:      meta,
+		Kind:      KindTask,
 		CreatedAt: createdAt.UTC(),
 	}
 	if err := item.Validate(); err != nil {
@@ -60,7 +97,35 @@ func (i *Item) Validate() error {
 	if len(i.Meta) > 0 && !json.Valid(i.Meta) {
 		return ErrInvalidMeta
 	}
+	if i.Kind == "" {
+		i.Kind = KindTask
+	}
+	if !i.Kind.IsValid() {
+		return ErrInvalidKind
+	}
+	if i.RevisitAt != nil && !i.RevisitAt.IsZero() && !i.RevisitAt.IsValid() {
+		return fmt.Errorf("%w: revisit_at must be a calendar date", task.ErrInvalidDate)
+	}
 	return nil
+}
+
+// SetKind changes what the capture is.
+func (i *Item) SetKind(kind Kind) error {
+	if !kind.IsValid() {
+		return ErrInvalidKind
+	}
+	i.Kind = kind
+	return nil
+}
+
+// SetRevisitAt schedules a later return to the capture. A zero date clears it.
+func (i *Item) SetRevisitAt(date *task.CalendarDate) {
+	if date == nil || date.IsZero() {
+		i.RevisitAt = nil
+		return
+	}
+	value := *date
+	i.RevisitAt = &value
 }
 
 // IsProcessed reports whether the item was already converted or dismissed.

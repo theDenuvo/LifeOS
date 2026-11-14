@@ -420,6 +420,174 @@ paths:
           $ref: '#/components/responses/NotFoundError'
         '409':
           $ref: '#/components/responses/ConflictError'
+  /api/v1/plan/day:
+    get:
+      summary: Read a day and what the planner proposes for it
+      description: Returns the day's appointments, its existing work blocks, the free time left and a proposal for the open tasks. Nothing is written.
+      operationId: getDayPlan
+      tags:
+      - Planning
+      parameters:
+      - name: date
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date
+      responses:
+        '200':
+          description: Day plan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DayPlanResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/plan/replan:
+    get:
+      summary: Propose moves for overdue and deadline-bound work
+      description: Suggests where to move work that no longer fits. A proposal changes nothing; the user applies it explicitly.
+      operationId: getPlanProposal
+      tags:
+      - Planning
+      parameters:
+      - name: days
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 30
+          default: 7
+      responses:
+        '200':
+          description: Replanning proposal
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanProposalResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/plan/apply:
+    post:
+      summary: Write an accepted plan
+      description: The whole set is validated before anything is written. Existing appointments and user-placed blocks are never touched.
+      operationId: applyPlan
+      tags:
+      - Planning
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlanApplyRequest'
+      responses:
+        '200':
+          description: Applied blocks
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  applied:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PlanItem'
+                  skipped:
+                    type: array
+                    items:
+                      type: string
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+  /api/v1/plan/blocks/{id}:
+    delete:
+      summary: Remove reserved time
+      description: Removes the work block; the task itself stays open.
+      operationId: deletePlanBlock
+      tags:
+      - Planning
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '204':
+          description: Block removed
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+  /api/v1/tasks/estimate:
+    get:
+      summary: Estimate how long similar work took
+      description: Answers from the user's own completed tasks. A source of "unknown" means there is no history and the duration must be asked for.
+      operationId: estimateTaskDuration
+      tags:
+      - Tasks
+      parameters:
+      - name: title
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: tags
+        in: query
+        schema:
+          type: string
+        description: Comma-separated tags
+      responses:
+        '200':
+          description: Estimate suggestion
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  minutes:
+                    type: integer
+                  source:
+                    type: string
+                    enum:
+                    - history
+                    - default
+                    - unknown
+                  samples:
+                    type: integer
+                  question:
+                    type: string
+        '400':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/tasks/{id}/reminders:
+    get:
+      summary: List the reminder moments of a task
+      operationId: listTaskReminders
+      tags:
+      - Tasks
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Reminders
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TaskReminder'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
   /api/v1/summary/today:
     get:
       summary: Get today's summary (main screen data)
@@ -1176,6 +1344,218 @@ paths:
           $ref: '#/components/responses/NotFoundError'
 components:
   schemas:
+    DayPlanResponse:
+      type: object
+      properties:
+        date:
+          type: string
+          format: date
+        working:
+          type: boolean
+        workday_start:
+          type: string
+        workday_end:
+          type: string
+        free_minutes:
+          type: integer
+        planned_minutes:
+          type: integer
+        blocks:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlanItem'
+        busy:
+          type: array
+          items:
+            type: object
+            properties:
+              label:
+                type: string
+              kind:
+                type: string
+                enum:
+                - event
+                - block
+              start:
+                type: string
+                format: date-time
+              end:
+                type: string
+                format: date-time
+              task_id:
+                type: integer
+        proposed:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlanItem'
+        unplaced:
+          type: array
+          items:
+            $ref: '#/components/schemas/UnplacedItem'
+    PlanItem:
+      type: object
+      properties:
+        block_id:
+          type: integer
+        task_id:
+          type: integer
+        title:
+          type: string
+        priority:
+          type: string
+          enum:
+          - low
+          - medium
+          - high
+        start:
+          type: string
+          format: date-time
+        end:
+          type: string
+          format: date-time
+        start_local:
+          type: string
+        end_local:
+          type: string
+        source:
+          type: string
+          enum:
+          - auto
+          - manual
+          - assistant
+        status:
+          type: string
+          enum:
+          - planned
+          - active
+          - done
+          - skipped
+        estimate_minutes:
+          type: integer
+        recurring:
+          type: boolean
+    UnplacedItem:
+      type: object
+      properties:
+        task_id:
+          type: integer
+        title:
+          type: string
+        estimate_minutes:
+          type: integer
+        reason:
+          type: string
+    PlanProposalResponse:
+      type: object
+      properties:
+        generated_at:
+          type: string
+          format: date-time
+        horizon_days:
+          type: integer
+        summary:
+          type: string
+        moves:
+          type: array
+          items:
+            type: object
+            properties:
+              task_id:
+                type: integer
+              title:
+                type: string
+              from:
+                type: string
+                format: date
+              to:
+                type: string
+                format: date
+              reason:
+                type: string
+              estimate_minutes:
+                type: integer
+        placements:
+          type: array
+          items:
+            type: object
+            properties:
+              task_id:
+                type: integer
+              date:
+                type: string
+                format: date
+              start:
+                type: string
+                format: date-time
+              end:
+                type: string
+                format: date-time
+        unplaced:
+          type: array
+          items:
+            $ref: '#/components/schemas/UnplacedItem'
+        days:
+          type: array
+          items:
+            type: object
+            properties:
+              date:
+                type: string
+                format: date
+              working:
+                type: boolean
+              free_minutes:
+                type: integer
+              planned_minutes:
+                type: integer
+    PlanApplyRequest:
+      type: object
+      properties:
+        replace_dates:
+          type: array
+          items:
+            type: string
+            format: date
+        items:
+          type: array
+          items:
+            type: object
+            required:
+            - task_id
+            - start
+            - end
+            properties:
+              task_id:
+                type: integer
+              start:
+                type: string
+                format: date-time
+              end:
+                type: string
+                format: date-time
+    TaskReminder:
+      type: object
+      properties:
+        id:
+          type: integer
+        kind:
+          type: string
+          enum:
+          - lead
+          - due
+          - overdue
+        status:
+          type: string
+          enum:
+          - pending
+          - sent
+          - dismissed
+        fire_at:
+          type: string
+          format: date-time
+        sent_at:
+          type: string
+          format: date-time
     HealthResponse:
       type: object
       required:

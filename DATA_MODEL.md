@@ -36,6 +36,10 @@
 | `completed_at` | TIMESTAMP | NULLABLE | UTC момент завершения (Unix seconds) |
 | `cancelled_at` | TIMESTAMP | NULLABLE | UTC момент отмены (Unix seconds) |
 | `parent_task_id` | INTEGER | FK → tasks(id), NULLABLE | Для будущих подзадач (v1: не используется) |
+| `estimate_minutes` | INTEGER | NULLABLE, CHECK 5-1440 | Сколько длится работа; без оценки планировщик берёт значение по умолчанию |
+| `expected_result` | TEXT | NULLABLE, max 500 | Что означает «готово» для этой задачи |
+| `repeat` | TEXT | NULLABLE, JSON max 500 | Правило повторения `{freq, interval, weekdays, until, window_days}` |
+| `repeat_parent_id` | INTEGER | FK → tasks(id), NULLABLE | Вхождение, из которого создана эта задача |
 | `version` | INTEGER | NOT NULL, DEFAULT 1, CHECK ≥ 1 | Метаданные optimistic locking; не поле домена |
 
 **Индексы:**
@@ -86,20 +90,60 @@
 | `id` | INTEGER | PK, AUTOINCREMENT | |
 | `text` | TEXT | NOT NULL, 1-2000 chars | Сырой текст ввода |
 | `meta` | TEXT | NULLABLE, JSON | Дополнительные метаданные (источник, теги, entities) |
+| `kind` | TEXT | NOT NULL, CHECK IN ('task','idea','note','goal'), DEFAULT 'task' | Что именно записано |
+| `revisit_at` | DATE | NULLABLE | Когда вернуть запись пользователю |
 | `created_at` | TIMESTAMP | NOT NULL, DEFAULT (unixepoch()) | UTC |
 | `processed_at` | TIMESTAMP | NULLABLE | UTC когда преобразован/удалён |
 
 **Индексы:**
 - `idx_inbox_created_at` (created_at DESC)
+- `idx_inbox_kind` (kind, created_at DESC)
+- `idx_inbox_revisit` (revisit_at)
 
 **Валидация:**
 - `text` не пустой, ≤ 2000 символов
 - `meta` — валидный JSON если задан
 
 **Жизненный цикл:**
-1. `Capture` — создание
+1. `Capture` — создание; сразу задаётся `kind`; идея без даты получает `revisit_at = сегодня + 7 дней`
 2. `ConvertToTask` → создаёт Task, ставит `processed_at` и `converted_task_id`, сохраняет InboxItem
-3. `Dismiss` — удаляет InboxItem
+3. `Update` — меняет `kind`/`revisit_at` до обработки; идея может стать задачей, но не обязана
+4. `Dismiss` — удаляет InboxItem
+
+---
+
+### 2.1 TaskBlock (Зарезервированное время)
+
+| Поле | Тип | Ограничения | Описание |
+|------|-----|-------------|----------|
+| `id` | INTEGER | PK, AUTOINCREMENT | |
+| `task_id` | INTEGER | NOT NULL, FK → tasks(id) ON DELETE CASCADE | Задача, на которую зарезервировано время |
+| `starts_at` | TIMESTAMP | NOT NULL | UTC Unix seconds |
+| `ends_at` | TIMESTAMP | NOT NULL, CHECK > starts_at | UTC Unix seconds |
+| `status` | TEXT | NOT NULL, CHECK IN ('planned','active','done','skipped') | |
+| `source` | TEXT | NOT NULL, CHECK IN ('auto','manual','assistant'), DEFAULT 'auto' | Только `auto` может быть заменён планировщиком |
+| `created_at`, `updated_at`, `version` | | | Как у остальных агрегатов |
+
+**Индексы:** `idx_task_blocks_range` (starts_at, ends_at), `idx_task_blocks_task` (task_id, starts_at)
+
+**Правило:** блок — это собственное рабочее время пользователя, а не встреча. Существующие встречи и блоки `manual` планировщик не двигает; пересечение с ними при записи плана — ошибка `409`.
+
+---
+
+### 2.2 TaskReminder (Напоминание)
+
+| Поле | Тип | Ограничения | Описание |
+|------|-----|-------------|----------|
+| `id` | INTEGER | PK, AUTOINCREMENT | |
+| `task_id` | INTEGER | NOT NULL, FK → tasks(id) ON DELETE CASCADE | |
+| `fire_at` | TIMESTAMP | NOT NULL | UTC момент отправки |
+| `kind` | TEXT | NOT NULL, CHECK IN ('lead','due','overdue') | Предупреждение, срок, после срока |
+| `status` | TEXT | NOT NULL, CHECK IN ('pending','sent','dismissed'), DEFAULT 'pending' | |
+| `sent_at` | TIMESTAMP | NULLABLE | Когда доставлено |
+
+**Индекс:** `idx_task_reminders_unique` (task_id, fire_at, kind) — дубликаты невозможны; `idx_task_reminders_pending` (status, fire_at).
+
+**Правило:** напоминания пересчитываются при каждом изменении задачи, отправленные сохраняются как история, ожидающие заменяются. Не более трёх на задачу, только будущие моменты, у завершённой задачи — ничего.
 
 ---
 

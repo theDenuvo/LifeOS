@@ -18,6 +18,7 @@ import (
 	appdocuments "github.com/theDenuvo/LifeOS/internal/application/documents"
 	appevents "github.com/theDenuvo/LifeOS/internal/application/events"
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
+	"github.com/theDenuvo/LifeOS/internal/application/planning"
 	"github.com/theDenuvo/LifeOS/internal/application/proactive"
 	"github.com/theDenuvo/LifeOS/internal/application/profile"
 	"github.com/theDenuvo/LifeOS/internal/application/search"
@@ -42,6 +43,7 @@ type Services struct {
 	Events    *appevents.Service
 	Calendar  *appcalendar.Service
 	Documents *appdocuments.Service
+	Planning  *planning.Service
 	Models    *agent.ModelCatalog
 	Tools     *tools.Registry
 	Broker    *events.Broker
@@ -95,8 +97,15 @@ func (h *Handler) apiRoutes() http.Handler {
 	mux.HandleFunc("POST /tasks/{id}/reschedule", h.rescheduleTask)
 	mux.HandleFunc("GET /inbox", h.listInbox)
 	mux.HandleFunc("POST /inbox", h.captureInbox)
+	mux.HandleFunc("PATCH /inbox/{id}", h.updateInbox)
 	mux.HandleFunc("POST /inbox/{id}/convert", h.convertInbox)
 	mux.HandleFunc("DELETE /inbox/{id}", h.dismissInbox)
+	mux.HandleFunc("GET /tasks/estimate", h.estimateTask)
+	mux.HandleFunc("GET /tasks/{id}/reminders", h.getTaskReminders)
+	mux.HandleFunc("GET /plan/day", h.getDayPlan)
+	mux.HandleFunc("GET /plan/replan", h.getPlanProposal)
+	mux.HandleFunc("POST /plan/apply", h.applyPlan)
+	mux.HandleFunc("DELETE /plan/blocks/{id}", h.deletePlanBlock)
 	mux.HandleFunc("GET /summary/today", h.todaySummary)
 	mux.HandleFunc("GET /calendar", h.getCalendar)
 	mux.HandleFunc("GET /calendar/events", h.listEvents)

@@ -57,6 +57,12 @@
 			{:else}
 				<span>без срока</span>
 			{/if}
+			{#if task.estimate_minutes}
+				<span class="estimate">~{task.estimate_minutes} мин</span>
+			{/if}
+			{#if task.repeat_description}
+				<span class="repeat">{task.repeat_description}</span>
+			{/if}
 			{#each task.tags as tag}
 				<span class="tag">#{tag}</span>
 			{/each}
@@ -186,6 +192,11 @@
 
 	.tag {
 		color: #a5b4fc;
+	}
+
+	.estimate,
+	.repeat {
+		color: var(--fg-faint);
 	}
 
 	.badge {

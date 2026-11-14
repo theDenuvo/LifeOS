@@ -11,6 +11,8 @@ import (
 	"sort"
 	"time"
 
+	"github.com/theDenuvo/LifeOS/internal/application/inbox"
+	"github.com/theDenuvo/LifeOS/internal/application/planning"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	"github.com/theDenuvo/LifeOS/internal/domain/task"
 )
@@ -65,13 +67,44 @@ type FocusTask struct {
 	Priority string `json:"priority"`
 }
 
+// RevisitItem is a captured idea or note whose day has come.
+type RevisitItem struct {
+	ID        int64  `json:"id"`
+	Text      string `json:"text"`
+	Kind      string `json:"kind"`
+	RevisitAt string `json:"revisit_at"`
+}
+
+// PlanInfo summarises the day's schedule on the dashboard.
+type PlanInfo struct {
+	Working        bool   `json:"working"`
+	WorkdayStart   string `json:"workday_start"`
+	WorkdayEnd     string `json:"workday_end"`
+	FreeMinutes    int    `json:"free_minutes"`
+	PlannedMinutes int    `json:"planned_minutes"`
+	Blocks         int    `json:"blocks"`
+	Proposed       int    `json:"proposed"`
+}
+
 // Summary is the Today screen aggregate.
 type Summary struct {
 	Today        []TodayItem        `json:"today"`
 	Overdue      []OverdueItem      `json:"overdue"`
 	HighPriority []HighPriorityItem `json:"high_priority"`
+	Revisit      []RevisitItem      `json:"revisit"`
+	Plan         *PlanInfo          `json:"plan,omitempty"`
 	Stats        Stats              `json:"stats"`
 	FocusTask    *FocusTask         `json:"focus_task"`
+}
+
+// RevisitLister returns captures whose revisit date has come.
+type RevisitLister interface {
+	List(ctx context.Context, filter inbox.Filter) (inbox.ListResult, error)
+}
+
+// Planner builds the day plan.
+type Planner interface {
+	PlanDay(ctx context.Context, date task.CalendarDate) (planning.DayPlan, error)
 }
 
 // Service builds summaries.
@@ -80,6 +113,20 @@ type Service struct {
 	inbox    InboxCounter
 	clock    tasks.Clock
 	timezone string
+	revisit  RevisitLister
+	planner  Planner
+}
+
+// WithRevisit attaches the capture list used for "return to this idea" entries.
+func (s *Service) WithRevisit(lister RevisitLister) *Service {
+	s.revisit = lister
+	return s
+}
+
+// WithPlanner attaches the planner, so the dashboard can show the day's load.
+func (s *Service) WithPlanner(planner Planner) *Service {
+	s.planner = planner
+	return s
 }
 
 // NewService builds a summary service.
@@ -121,6 +168,7 @@ func (s *Service) Today(ctx context.Context) (Summary, error) {
 		Today:        []TodayItem{},
 		Overdue:      []OverdueItem{},
 		HighPriority: []HighPriorityItem{},
+		Revisit:      []RevisitItem{},
 		Stats: Stats{
 			ActiveTotal: len(open),
 			InboxCount:  inboxCount,
@@ -165,6 +213,12 @@ func (s *Service) Today(ctx context.Context) (Summary, error) {
 	sort.SliceStable(summary.Today, func(i, j int) bool {
 		return summary.Today[i].Time < summary.Today[j].Time
 	})
+	today, dateErr := task.NewCalendarDate(localNow.Year(), localNow.Month(), localNow.Day())
+	if dateErr == nil {
+		s.attachRevisit(ctx, &summary, today)
+		s.attachPlan(ctx, &summary, today)
+	}
+
 	sort.SliceStable(summary.Overdue, func(i, j int) bool {
 		return summary.Overdue[i].DaysOverdue > summary.Overdue[j].DaysOverdue
 	})
@@ -175,6 +229,51 @@ func (s *Service) Today(ctx context.Context) (Summary, error) {
 
 // listAll pages through a filter so the summary is not silently capped at one
 // page of results.
+// attachRevisit adds captures the user asked to be reminded about today.
+//
+// Ideas and notes are not tasks: they are not counted in the task stats and they
+// never become work by themselves. They only come back to the surface.
+func (s *Service) attachRevisit(ctx context.Context, summary *Summary, today task.CalendarDate) {
+	if s.revisit == nil {
+		return
+	}
+	result, err := s.revisit.List(ctx, inbox.Filter{
+		UnprocessedOnly: true,
+		RevisitBefore:   &today,
+		Limit:           tasks.Some(20),
+	})
+	if err != nil {
+		return
+	}
+	for _, item := range result.Items {
+		entry := RevisitItem{ID: item.ID, Text: item.Text, Kind: string(item.Kind)}
+		if item.RevisitAt != nil && !item.RevisitAt.IsZero() {
+			entry.RevisitAt = item.RevisitAt.String()
+		}
+		summary.Revisit = append(summary.Revisit, entry)
+	}
+}
+
+// attachPlan adds the day's free and planned time.
+func (s *Service) attachPlan(ctx context.Context, summary *Summary, today task.CalendarDate) {
+	if s.planner == nil {
+		return
+	}
+	plan, err := s.planner.PlanDay(ctx, today)
+	if err != nil {
+		return
+	}
+	summary.Plan = &PlanInfo{
+		Working:        plan.Working,
+		WorkdayStart:   plan.WorkdayStart,
+		WorkdayEnd:     plan.WorkdayEnd,
+		FreeMinutes:    plan.FreeMinutes,
+		PlannedMinutes: plan.PlannedMinutes,
+		Blocks:         len(plan.Blocks),
+		Proposed:       len(plan.Proposed),
+	}
+}
+
 func (s *Service) listAll(ctx context.Context, filter tasks.TaskFilter) ([]tasks.TaskWithVersion, error) {
 	const pageSize = tasks.MaxPageLimit
 	all := make([]tasks.TaskWithVersion, 0, pageSize)

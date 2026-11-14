@@ -55,6 +55,15 @@ type CreateTaskInput struct {
 	DueAt       Optional[time.Time]
 	Timezone    Optional[string]
 	Tags        []string
+
+	// Stage 1 of the roadmap: an estimate makes planning possible, an expected
+	// result makes completion checkable, and a repeat rule makes the task
+	// recurring.
+	EstimateMinutes Optional[int]
+	ExpectedResult  Optional[string]
+	Repeat          Optional[task.Repeat]
+	// RepeatParentID links a generated occurrence to the task it came from.
+	RepeatParentID Optional[int64]
 }
 
 // UpdateTaskInput is the typed input for UpdateTask.
@@ -71,12 +80,19 @@ type UpdateTaskInput struct {
 	DueAt       Optional[time.Time]
 	Timezone    Optional[string]
 	Tags        Optional[[]string]
+
+	EstimateMinutes Optional[int]
+	ExpectedResult  Optional[string]
+	Repeat          Optional[task.Repeat]
 }
 
 // anySet reports whether the update request explicitly supplies at least one
 // field. An entirely empty patch is a read-only no-op.
 func (in UpdateTaskInput) anySet() bool {
 	return in.Title.IsSet() ||
+		in.EstimateMinutes.IsSet() ||
+		in.ExpectedResult.IsSet() ||
+		in.Repeat.IsSet() ||
 		in.Note.IsSet() ||
 		in.Priority.IsSet() ||
 		in.PlannedDate.IsSet() ||

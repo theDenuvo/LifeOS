@@ -43,6 +43,13 @@ type taskBody struct {
 	CancelledAt *string  `json:"cancelled_at"`
 	Overdue     bool     `json:"overdue"`
 	Version     int      `json:"version"`
+
+	// Stage 1: what the work costs, what "done" means, and whether it repeats.
+	EstimateMinutes   *int         `json:"estimate_minutes"`
+	ExpectedResult    *string      `json:"expected_result"`
+	Repeat            *task.Repeat `json:"repeat"`
+	RepeatDescription string       `json:"repeat_description,omitempty"`
+	RepeatParentID    *int64       `json:"repeat_parent_id,omitempty"`
 }
 
 func newTaskBody(item tasks.TaskWithVersion, now time.Time) taskBody {
@@ -82,6 +89,13 @@ func newTaskBody(item tasks.TaskWithVersion, now time.Time) taskBody {
 	if t.CancelledAt != nil {
 		value := formatTime(*t.CancelledAt)
 		body.CancelledAt = &value
+	}
+	body.EstimateMinutes = t.EstimateMinutes
+	body.ExpectedResult = t.ExpectedResult
+	body.Repeat = t.Repeat
+	body.RepeatParentID = t.RepeatParentID
+	if t.Repeat != nil {
+		body.RepeatDescription = t.Repeat.Describe()
 	}
 	return body
 }
@@ -123,14 +137,17 @@ func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request) {
 // createTask handles POST /api/v1/tasks.
 func (h *Handler) createTask(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Title       string   `json:"title"`
-		Note        *string  `json:"note"`
-		Priority    *string  `json:"priority"`
-		PlannedDate *string  `json:"planned_date"`
-		DueDate     *string  `json:"due_date"`
-		DueAt       *string  `json:"due_at"`
-		Timezone    *string  `json:"timezone"`
-		Tags        []string `json:"tags"`
+		Title           string       `json:"title"`
+		Note            *string      `json:"note"`
+		Priority        *string      `json:"priority"`
+		PlannedDate     *string      `json:"planned_date"`
+		DueDate         *string      `json:"due_date"`
+		DueAt           *string      `json:"due_at"`
+		Timezone        *string      `json:"timezone"`
+		Tags            []string     `json:"tags"`
+		EstimateMinutes *int         `json:"estimate_minutes"`
+		ExpectedResult  *string      `json:"expected_result"`
+		Repeat          *task.Repeat `json:"repeat"`
 	}
 	if err := decodeJSONBody(w, r, &body); err != nil {
 		h.writeProblem(w, r, http.StatusBadRequest, "validation-failed", "Validation Failed", err.Error())
@@ -142,6 +159,15 @@ func (h *Handler) createTask(w http.ResponseWriter, r *http.Request) {
 		Note:     optionalString(body.Note),
 		Timezone: optionalString(body.Timezone),
 		Tags:     body.Tags,
+	}
+	if body.EstimateMinutes != nil {
+		in.EstimateMinutes = tasks.Some(*body.EstimateMinutes)
+	}
+	if body.ExpectedResult != nil {
+		in.ExpectedResult = tasks.Some(*body.ExpectedResult)
+	}
+	if body.Repeat != nil {
+		in.Repeat = tasks.Some(*body.Repeat)
 	}
 	if body.Priority != nil {
 		in.Priority = tasks.Some(task.Priority(*body.Priority))
@@ -465,6 +491,36 @@ func parseUpdateTaskInput(w http.ResponseWriter, r *http.Request) (tasks.UpdateT
 				return tasks.UpdateTaskInput{}, fmt.Errorf("tags must be an array of strings")
 			}
 			in.Tags = tasks.Some(tags)
+		case "estimate_minutes":
+			var minutes *int
+			if err := json.Unmarshal(value, &minutes); err != nil {
+				return tasks.UpdateTaskInput{}, fmt.Errorf("estimate_minutes must be a number or null")
+			}
+			if minutes == nil {
+				in.EstimateMinutes = tasks.Some(0)
+			} else {
+				in.EstimateMinutes = tasks.Some(*minutes)
+			}
+		case "expected_result":
+			var text *string
+			if err := json.Unmarshal(value, &text); err != nil {
+				return tasks.UpdateTaskInput{}, fmt.Errorf("expected_result must be a string or null")
+			}
+			if text == nil {
+				in.ExpectedResult = tasks.Some("")
+			} else {
+				in.ExpectedResult = tasks.Some(*text)
+			}
+		case "repeat":
+			if strings.TrimSpace(string(value)) == "null" {
+				in.Repeat = tasks.Some(task.Repeat{})
+				break
+			}
+			var repeat task.Repeat
+			if err := json.Unmarshal(value, &repeat); err != nil {
+				return tasks.UpdateTaskInput{}, fmt.Errorf("repeat: %w", err)
+			}
+			in.Repeat = tasks.Some(repeat)
 		case "status":
 			return tasks.UpdateTaskInput{}, errors.New("status is not accepted by PATCH; use /complete, /cancel or /restore")
 		default:

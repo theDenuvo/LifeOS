@@ -48,6 +48,7 @@ type Repository interface {
 	List(ctx context.Context, filter Filter) (ListResult, error)
 	Insert(ctx context.Context, item *domaininbox.Item) (int64, error)
 	MarkProcessed(ctx context.Context, id int64, processedAt time.Time, taskID int64) error
+	Update(ctx context.Context, item *domaininbox.Item) error
 	Delete(ctx context.Context, id int64) error
 	CountUnprocessed(ctx context.Context) (int, error)
 	Search(ctx context.Context, query string, limit int) ([]*domaininbox.Item, int, error)
@@ -70,8 +71,26 @@ type UnitOfWork interface {
 // Filter is the typed inbox list filter.
 type Filter struct {
 	UnprocessedOnly bool
-	Limit           tasks.Optional[int]
-	Offset          tasks.Optional[int]
+	// Kind narrows the list to tasks, ideas, notes or goals.
+	Kind domaininbox.Kind
+	// RevisitBefore returns captures whose revisit date has come.
+	RevisitBefore *task.CalendarDate
+	Limit         tasks.Optional[int]
+	Offset        tasks.Optional[int]
+}
+
+// CaptureInput describes what to capture.
+type CaptureInput struct {
+	Text      string
+	Meta      json.RawMessage
+	Kind      domaininbox.Kind
+	RevisitAt *task.CalendarDate
+}
+
+// UpdateInput changes what a capture is and when to return to it.
+type UpdateInput struct {
+	Kind      tasks.Optional[domaininbox.Kind]
+	RevisitAt tasks.Optional[task.CalendarDate]
 }
 
 // ListResult is a page of inbox items plus the total count.
@@ -127,10 +146,33 @@ func NewService(uow UnitOfWork, clock tasks.Clock, defaultTimezone string, opts 
 
 // Capture stores a new inbox item.
 func (s *Service) Capture(ctx context.Context, text string, meta json.RawMessage) (*domaininbox.Item, error) {
+	return s.CaptureItem(ctx, CaptureInput{Text: text, Meta: meta})
+}
+
+// CaptureItem stores a new capture of a given kind.
+//
+// The kind is what keeps an idea from being forced into the task list: it is
+// classified once, at the moment of capture, and can be changed later.
+func (s *Service) CaptureItem(ctx context.Context, in CaptureInput) (*domaininbox.Item, error) {
 	now := s.clock.Now()
-	item, err := domaininbox.NewItem(text, meta, now)
+	item, err := domaininbox.NewItem(in.Text, in.Meta, now)
 	if err != nil {
 		return nil, err
+	}
+	if in.Kind != "" {
+		if err := item.SetKind(in.Kind); err != nil {
+			return nil, err
+		}
+	}
+	if item.Kind.RevisitLater() && (in.RevisitAt == nil || in.RevisitAt.IsZero()) {
+		// An idea without a date is still worth returning to; a week is a
+		// neutral default that the user can change.
+		if suggested, err := addDaysToDate(now, 7); err == nil {
+			item.SetRevisitAt(&suggested)
+		}
+	}
+	if in.RevisitAt != nil && !in.RevisitAt.IsZero() {
+		item.SetRevisitAt(in.RevisitAt)
 	}
 
 	err = s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
@@ -144,8 +186,57 @@ func (s *Service) Capture(ctx context.Context, text string, meta json.RawMessage
 	if err != nil {
 		return nil, err
 	}
-	s.publish("inbox.captured", map[string]any{"id": item.ID})
+	s.publish("inbox.captured", map[string]any{"id": item.ID, "kind": string(item.Kind)})
 	return item, nil
+}
+
+// Update changes the kind of a capture or the date to return to it.
+//
+// Nothing is deleted: an idea the user is not ready to act on stays captured and
+// simply surfaces again on the chosen day.
+func (s *Service) Update(ctx context.Context, id int64, in UpdateInput) (*domaininbox.Item, error) {
+	var result *domaininbox.Item
+	err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
+		item, err := tx.Inbox().FindByID(ctx, id)
+		if err != nil {
+			return err
+		}
+		if item.IsProcessed() {
+			return ErrAlreadyProcessed
+		}
+		if value, ok := in.Kind.Get(); ok {
+			if err := item.SetKind(value); err != nil {
+				return err
+			}
+		}
+		if value, ok := in.RevisitAt.Get(); ok {
+			if value.IsZero() {
+				item.SetRevisitAt(nil)
+			} else {
+				item.SetRevisitAt(&value)
+			}
+		}
+		if err := tx.Inbox().Update(ctx, item); err != nil {
+			return err
+		}
+		result = item
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	s.publish("inbox.updated", map[string]any{"id": id, "kind": string(result.Kind)})
+	return result, nil
+}
+
+// addDaysToDate returns a calendar date a few days ahead in the item's timezone.
+func addDaysToDate(from time.Time, days int) (task.CalendarDate, error) {
+	loc, err := time.LoadLocation(tasks.DefaultTimezone)
+	if err != nil {
+		loc = time.UTC
+	}
+	local := from.In(loc).AddDate(0, 0, days)
+	return task.NewCalendarDate(local.Year(), local.Month(), local.Day())
 }
 
 // List returns a page of inbox items.

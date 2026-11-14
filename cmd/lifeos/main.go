@@ -21,13 +21,16 @@ import (
 	appdocuments "github.com/theDenuvo/LifeOS/internal/application/documents"
 	appevents "github.com/theDenuvo/LifeOS/internal/application/events"
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
+	"github.com/theDenuvo/LifeOS/internal/application/planning"
 	"github.com/theDenuvo/LifeOS/internal/application/proactive"
 	"github.com/theDenuvo/LifeOS/internal/application/profile"
+	"github.com/theDenuvo/LifeOS/internal/application/recurrence"
 	"github.com/theDenuvo/LifeOS/internal/application/search"
 	"github.com/theDenuvo/LifeOS/internal/application/settings"
 	"github.com/theDenuvo/LifeOS/internal/application/summary"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	"github.com/theDenuvo/LifeOS/internal/config"
+	"github.com/theDenuvo/LifeOS/internal/domain/task"
 	"github.com/theDenuvo/LifeOS/internal/events"
 	infradocuments "github.com/theDenuvo/LifeOS/internal/infrastructure/documents"
 	"github.com/theDenuvo/LifeOS/internal/infrastructure/sqlite"
@@ -78,11 +81,20 @@ func main() {
 	// Application services over the SQLite units of work.
 	clock := tasks.SystemClock()
 	broker := events.NewBroker()
+	// planningService is assigned below; the task engine keeps the reference so a
+	// task change re-derives its reminders in the same breath.
+	var planningService *planning.Service
 	taskService := tasks.NewService(
 		sqlite.NewTaskUnitOfWork(db),
 		clock,
 		tasks.WithDefaultTimezone(cfg.Timezone),
 		tasks.WithPublisher(broker),
+		tasks.WithReminderSink(tasks.ReminderFunc(func(ctx context.Context, value task.Task) error {
+			if planningService == nil {
+				return nil
+			}
+			return planningService.SyncTaskReminders(ctx, value)
+		})),
 	)
 	inboxService := inbox.NewService(sqlite.NewInboxUnitOfWork(db), clock, cfg.Timezone, inbox.WithPublisher(broker))
 	summaryService := summary.NewService(taskService, inboxService, clock, cfg.Timezone)
@@ -118,6 +130,28 @@ func main() {
 		clock,
 		cfg.Timezone,
 	)
+
+	// Stage 1 of the roadmap: planned working time, reminders and recurring tasks.
+	//
+	// The planner owns the time arithmetic, the recurrence service creates the next
+	// occurrence of a habit, and the task engine calls back into both whenever a
+	// task changes so nothing drifts apart.
+	planningService = planning.NewService(
+		sqlite.NewPlanningUnitOfWork(db),
+		clock,
+		planning.WithTimezone(cfg.Timezone),
+		planning.WithPublisher(broker),
+	)
+	recurrenceService := recurrence.NewService(taskService, clock, recurrence.WithTimezone(cfg.Timezone))
+
+	// The dashboard shows the day's load and the ideas that are due to resurface.
+	summaryService.WithRevisit(inboxService).WithPlanner(planningService)
+
+	// Completing a recurring task creates its next occurrence. The service is
+	// built recursively, so the hook is attached after both exist.
+	taskService.SetRecurrenceHook(func(ctx context.Context, completed tasks.TaskWithVersion) error {
+		return recurrenceService.Next(ctx, completed)
+	})
 
 	// Assistant runtime: an OpenAI-compatible provider plus the LifeOS tools.
 	//
@@ -162,6 +196,8 @@ func main() {
 		tools.WithEventService(eventService),
 		tools.WithDocumentService(documentService),
 		tools.WithMachineAccess(cfg.ToolsRoot, cfg.ToolsShell, cfg.DatabasePath()),
+		tools.WithPlanning(planningService),
+		tools.WithRecurrence(recurrenceService),
 		tools.WithTimezone(cfg.Timezone),
 	)
 	contextProvider := assistant.NewLifeOSContext(summaryService, proactiveService, cfg.Timezone, clock, assistant.WithEvents(eventService))
@@ -191,6 +227,7 @@ func main() {
 		Events:    eventService,
 		Calendar:  calendarService,
 		Documents: documentService,
+		Planning:  planningService,
 		Models:    modelCatalog,
 		Tools:     registry,
 		Broker:    broker,
@@ -220,6 +257,10 @@ func main() {
 
 	// Proactive runner: recompute insights periodically and announce new ones.
 	go proactive.NewRunner(proactiveService, broker, 15*time.Minute).Start(ctx)
+
+	// Reminder delivery: reminders are planned when a task changes and published
+	// here when their moment comes, so the browser shows them without polling.
+	go planning.NewDispatcher(planningService, broker, clock, 30*time.Second).Run(ctx)
 
 	<-ctx.Done()
 	slog.Info("Shutting down...")

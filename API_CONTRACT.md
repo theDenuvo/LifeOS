@@ -296,12 +296,14 @@ POST /api/v1/tasks/{id}/reschedule
 GET /api/v1/inbox
 ```
 
-**Параметры:** `limit`, `offset`, `unprocessed_only` (boolean, default true)
+**Параметры:** `limit`, `offset`, `unprocessed_only` (boolean, default true), `kind` (`task|idea|note|goal`), `revisit=due` (только записи, к которым пора вернуться)
 
 **Response 200:**
 ```json
 {"data": [InboxItem, ...], "meta": {"limit": 50, "offset": 0, "total": 12}}
 ```
+
+InboxItem: `id`, `text`, `meta`, `kind`, `revisit_at`, `created_at`, `processed_at`, `converted_task_id`.
 
 #### Быстрый захват (Capture)
 
@@ -311,10 +313,24 @@ POST /api/v1/inbox
 
 **Request:**
 ```json
-{"text": "Мысль или задача", "meta": {"source": "widget"}}
+{"text": "Мысль или задача", "meta": {"source": "widget"}, "kind": "idea", "revisit_at": "2026-11-21"}
 ```
 
+`kind` по умолчанию `task`. Для `idea` и `note` без `revisit_at` дата возврата ставится через неделю. Идея не создаёт задачу: она живёт во входящих и возвращается в назначенный день.
+
 **Response 201:** InboxItem
+
+#### Изменить вид записи
+
+```
+PATCH /api/v1/inbox/{id}
+```
+
+**Request:** `{"kind": "task", "revisit_at": "2026-11-20"}` (`revisit_at: ""` очищает дату).
+
+**Response 200:** InboxItem
+**Response 404:** NotFound
+**Response 409:** Conflict (запись уже преобразована)
 
 #### Преобразовать в задачу
 
@@ -348,6 +364,32 @@ DELETE /api/v1/inbox/{id}
 **Response 409:** Conflict (элемент уже обработан)
 
 ---
+
+#### План дня и напоминания
+
+```
+GET    /api/v1/plan/day?date=YYYY-MM-DD
+GET    /api/v1/plan/replan?days=7
+POST   /api/v1/plan/apply
+DELETE /api/v1/plan/blocks/{id}
+```
+
+`GET /plan/day` возвращает день целиком и ничего не меняет: `working` (рабочий ли день по настройкам `planning.workday_*`), `workday_start`/`workday_end`, `free_minutes`, `planned_minutes`, `blocks` (уже занятое под задачи), `busy` (встречи и блоки пользователя), `proposed` (предложение планировщика) и `unplaced` (что не поместилось и почему).
+
+`GET /plan/replan` — предложение переносов на горизонт `days` (1–30): `moves` (задача, `from`/`to`, причина), `placements` (конкретные интервалы) и `days` (загрузка по дням). Ничего не записывается.
+
+`POST /plan/apply` записывает принятый план:
+
+```json
+{
+  "replace_dates": ["2026-12-07"],
+  "items": [{"task_id": 8, "start": "2026-12-07T15:10:00Z", "end": "2026-12-07T15:40:00Z"}]
+}
+```
+
+Набор проверяется целиком до записи: пересечение с встречей или с блоком, который поставил пользователь → `409 plan-conflict`; время вне рабочего дня или нерабочий день → `400`. Автоматические блоки указанных дней заменяются, блоки пользователя не трогаются. `task.planned_date` выставляется по дню блока.
+
+`DELETE /plan/blocks/{id}` снимает зарезервированное время; сама задача остаётся открытой.
 
 ### 4. Сводка (Главный экран)
 

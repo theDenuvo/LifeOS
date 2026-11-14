@@ -47,13 +47,27 @@ var (
 
 	// ErrInvalidActor is returned when an actor is invalid.
 	ErrInvalidActor = errors.New("invalid actor")
+
+	// ErrInvalidEstimate is returned when estimate_minutes is outside 5-1440.
+	ErrInvalidEstimate = errors.New("estimate_minutes must be between 5 and 1440")
+
+	// ErrInvalidExpectedResult is returned when expected_result is too long.
+	ErrInvalidExpectedResult = errors.New("expected_result must be valid UTF-8 of at most 500 characters")
 )
 
 // Domain string limits, expressed in Unicode code points.
 const (
-	maxTitleLength = 500
-	maxNoteLength  = 5000
-	maxTagLength   = 50
+	maxTitleLength          = 500
+	maxNoteLength           = 5000
+	maxTagLength            = 50
+	maxExpectedResultLength = 500
+)
+
+// Estimate bounds, in minutes. Five minutes is the smallest block worth
+// planning; a single task may not claim more than a full day.
+const (
+	MinEstimateMinutes = 5
+	MaxEstimateMinutes = 1440
 )
 
 // Task represents the domain entity for a task.
@@ -73,6 +87,17 @@ type Task struct {
 	CompletedAt  *time.Time // UTC
 	CancelledAt  *time.Time // UTC
 	ParentTaskID *int64
+
+	// EstimateMinutes is how long the work takes. Planning is impossible
+	// without it, so it is a first-class field rather than a note.
+	EstimateMinutes *int
+	// ExpectedResult is what "done" means for this task. Completion can then be
+	// checked against a stated outcome.
+	ExpectedResult *string
+	// Repeat marks the task as a recurring template.
+	Repeat *Repeat
+	// RepeatParentID points at the occurrence this task was generated from.
+	RepeatParentID *int64
 }
 
 // NewTask creates a new task with default values.
@@ -221,6 +246,71 @@ func WithTags(tags []string) TaskOption {
 	}
 }
 
+// WithEstimate sets how long the work takes, in minutes.
+//
+// A zero or negative value clears the estimate: an unknown duration is a normal
+// state and the planner asks the user for it instead of inventing one.
+func WithEstimate(minutes int) TaskOption {
+	return func(t *Task) error {
+		if minutes <= 0 {
+			t.EstimateMinutes = nil
+			return nil
+		}
+		if minutes < MinEstimateMinutes || minutes > MaxEstimateMinutes {
+			return ErrInvalidEstimate
+		}
+		value := minutes
+		t.EstimateMinutes = &value
+		return nil
+	}
+}
+
+// WithExpectedResult sets the outcome that makes the task done.
+func WithExpectedResult(result string) TaskOption {
+	return func(t *Task) error {
+		if result == "" {
+			t.ExpectedResult = nil
+			return nil
+		}
+		if !utf8.ValidString(result) || utf8.RuneCountInString(result) > maxExpectedResultLength {
+			return ErrInvalidExpectedResult
+		}
+		value := result
+		t.ExpectedResult = &value
+		return nil
+	}
+}
+
+// WithRepeat sets the recurrence rule.
+func WithRepeat(repeat Repeat) TaskOption {
+	return func(t *Task) error {
+		if err := repeat.Validate(); err != nil {
+			return err
+		}
+		stored := repeat
+		t.Repeat = &stored
+		return nil
+	}
+}
+
+// WithRepeatCleared removes the recurrence rule, turning a repeating task into a
+// one-off.
+func WithRepeatCleared() TaskOption {
+	return func(t *Task) error {
+		t.Repeat = nil
+		return nil
+	}
+}
+
+// WithRepeatParentID links an occurrence to the task it was generated from.
+func WithRepeatParentID(id int64) TaskOption {
+	return func(t *Task) error {
+		value := id
+		t.RepeatParentID = &value
+		return nil
+	}
+}
+
 // WithParentTaskID sets the parent task ID.
 func WithParentTaskID(id int64) TaskOption {
 	return func(t *Task) error {
@@ -257,6 +347,21 @@ func (t *Task) Validate() error {
 	}
 	for _, tag := range t.Tags {
 		if err := validateTag(tag); err != nil {
+			return err
+		}
+	}
+	if t.EstimateMinutes != nil {
+		if *t.EstimateMinutes < MinEstimateMinutes || *t.EstimateMinutes > MaxEstimateMinutes {
+			return ErrInvalidEstimate
+		}
+	}
+	if t.ExpectedResult != nil {
+		if !utf8.ValidString(*t.ExpectedResult) || utf8.RuneCountInString(*t.ExpectedResult) > maxExpectedResultLength {
+			return ErrInvalidExpectedResult
+		}
+	}
+	if t.Repeat != nil {
+		if err := t.Repeat.Validate(); err != nil {
 			return err
 		}
 	}

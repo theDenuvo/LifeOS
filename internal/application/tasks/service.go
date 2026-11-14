@@ -3,6 +3,7 @@ package tasks
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/theDenuvo/LifeOS/internal/domain/task"
@@ -25,6 +26,30 @@ type Service struct {
 	clock           Clock
 	defaultTimezone string
 	publisher       events.Publisher
+	// reminders re-derives notification moments after every mutation. It is an
+	// optional collaborator: the task engine stays usable without a planner.
+	reminders ReminderSink
+	// afterComplete runs after a recurring task was completed, so the next
+	// occurrence is created by the caller that owns recurrence rules.
+	afterComplete func(ctx context.Context, completed TaskWithVersion) error
+}
+
+// ReminderSink re-derives a task's reminders. The planner implements it, so a
+// task change and its notification schedule can never disagree.
+type ReminderSink interface {
+	SyncTaskReminders(ctx context.Context, value task.Task) error
+}
+
+// ReminderFunc adapts a plain function to ReminderSink.
+//
+// It exists because the planner depends on the task service and the task service
+// calls back into the planner: a function value breaks the construction cycle
+// without hiding the dependency.
+type ReminderFunc func(ctx context.Context, value task.Task) error
+
+// SyncTaskReminders implements ReminderSink.
+func (f ReminderFunc) SyncTaskReminders(ctx context.Context, value task.Task) error {
+	return f(ctx, value)
 }
 
 // ServiceOption customises a Service.
@@ -36,6 +61,17 @@ func WithPublisher(publisher events.Publisher) ServiceOption {
 	return func(s *Service) {
 		s.publisher = publisher
 	}
+}
+
+// WithReminderSink attaches the reminder schedule owner.
+func WithReminderSink(sink ReminderSink) ServiceOption {
+	return func(s *Service) { s.reminders = sink }
+}
+
+// WithRecurrence attaches the hook that creates the next occurrence of a
+// recurring task after it was completed.
+func WithRecurrence(hook func(ctx context.Context, completed TaskWithVersion) error) ServiceOption {
+	return func(s *Service) { s.afterComplete = hook }
 }
 
 // WithDefaultTimezone overrides the default IANA timezone for new tasks.
@@ -61,6 +97,13 @@ func NewService(uow UnitOfWork, clock Clock, opts ...ServiceOption) *Service {
 		opt(s)
 	}
 	return s
+}
+
+// SetRecurrenceHook attaches the hook that creates the next occurrence of a
+// recurring task. It is a setter rather than a constructor option because the
+// recurrence service is built on top of the task service.
+func (s *Service) SetRecurrenceHook(hook func(ctx context.Context, completed TaskWithVersion) error) {
+	s.afterComplete = hook
 }
 
 // CreateTask creates a task and its `created` event in one transaction.
@@ -106,6 +149,18 @@ func (s *Service) CreateTask(ctx context.Context, in CreateTaskInput, actor task
 	if len(in.Tags) > 0 {
 		opts = append(opts, task.WithTags(in.Tags))
 	}
+	if value, ok := in.EstimateMinutes.Get(); ok {
+		opts = append(opts, task.WithEstimate(value))
+	}
+	if value, ok := in.ExpectedResult.Get(); ok {
+		opts = append(opts, task.WithExpectedResult(value))
+	}
+	if value, ok := in.Repeat.Get(); ok && value.Freq != "" {
+		opts = append(opts, task.WithRepeat(value))
+	}
+	if value, ok := in.RepeatParentID.Get(); ok && value > 0 {
+		opts = append(opts, task.WithRepeatParentID(value))
+	}
 	if len(opts) > 0 {
 		if err := created.Update(now, opts...); err != nil {
 			return TaskWithVersion{}, err
@@ -141,6 +196,7 @@ func (s *Service) CreateTask(ctx context.Context, in CreateTaskInput, actor task
 	}
 
 	s.publish("task.created", result)
+	s.syncReminders(ctx, result)
 	return result, nil
 }
 
@@ -261,6 +317,7 @@ func (s *Service) UpdateTask(ctx context.Context, id int64, expectedVersion int,
 	}
 
 	s.publish("task.updated", result)
+	s.syncReminders(ctx, result)
 	return result, nil
 }
 
@@ -395,7 +452,26 @@ func (s *Service) transition(
 	}
 
 	s.publish("task."+string(eventType), result)
+	s.syncReminders(ctx, result)
+	if eventType == task.EventTypeCompleted && s.afterComplete != nil {
+		// The next occurrence of a recurring task is created after the
+		// completion is committed, so a failure here never loses the completion.
+		if err := s.afterComplete(ctx, result); err != nil {
+			slog.Warn("create next occurrence failed", "task_id", result.Task.ID, "error", err)
+		}
+	}
 	return result, nil
+}
+
+// syncReminders refreshes the notification moments of a task. A failure is logged
+// and never fails the user's change: the task write already succeeded.
+func (s *Service) syncReminders(ctx context.Context, result TaskWithVersion) {
+	if s.reminders == nil || result.Task == nil {
+		return
+	}
+	if err := s.reminders.SyncTaskReminders(ctx, *result.Task); err != nil {
+		slog.Warn("sync task reminders failed", "task_id", result.Task.ID, "error", err)
+	}
 }
 
 // publish emits a change notification when a publisher is configured.
@@ -440,6 +516,19 @@ func buildUpdateOptions(in UpdateTaskInput) []task.TaskOption {
 	}
 	if value, ok := in.Tags.Get(); ok {
 		opts = append(opts, task.WithTags(value))
+	}
+	if value, ok := in.EstimateMinutes.Get(); ok {
+		opts = append(opts, task.WithEstimate(value))
+	}
+	if value, ok := in.ExpectedResult.Get(); ok {
+		opts = append(opts, task.WithExpectedResult(value))
+	}
+	if value, ok := in.Repeat.Get(); ok {
+		if value.Freq == "" {
+			opts = append(opts, task.WithRepeatCleared())
+		} else {
+			opts = append(opts, task.WithRepeat(value))
+		}
 	}
 
 	return opts

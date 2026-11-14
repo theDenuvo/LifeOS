@@ -33,6 +33,8 @@
 	let newTitle = '';
 	let newPriority: Priority = 'medium';
 	let newDue = '';
+	let newEstimate = '';
+	let newRepeat: '' | 'daily' | 'weekly' | 'monthly' = '';
 	let creating = false;
 
 	async function load() {
@@ -84,13 +86,18 @@
 		if (!title || creating) return;
 		creating = true;
 		try {
+			const estimate = Number.parseInt(newEstimate, 10);
 			await createTask({
 				title,
 				priority: newPriority,
-				due_date: newDue || undefined
+				due_date: newDue || undefined,
+				estimate_minutes: Number.isFinite(estimate) && estimate > 0 ? estimate : undefined,
+				repeat: newRepeat ? { freq: newRepeat, interval: 1, window_days: 1 } : undefined
 			});
 			newTitle = '';
 			newDue = '';
+			newEstimate = '';
+			newRepeat = '';
 			newPriority = 'medium';
 			showCreate = false;
 			offset = 0;
@@ -161,6 +168,22 @@
 			<option value="low">Низкий</option>
 		</select>
 		<input type="date" bind:value={newDue} aria-label="Дедлайн" min={todayISO()} />
+		<input
+			class="estimate"
+			type="number"
+			min="5"
+			max="1440"
+			step="5"
+			bind:value={newEstimate}
+			placeholder="мин"
+			aria-label="Оценка времени в минутах"
+		/>
+		<select bind:value={newRepeat} aria-label="Повторение">
+			<option value="">Без повтора</option>
+			<option value="daily">Каждый день</option>
+			<option value="weekly">Каждую неделю</option>
+			<option value="monthly">Каждый месяц</option>
+		</select>
 		<button type="submit" disabled={creating || !newTitle.trim()}>{creating ? 'Создаю…' : 'Создать'}</button>
 	</form>
 {/if}
@@ -202,6 +225,11 @@
 		<p class="muted">Измените фильтры или создайте новую задачу.</p>
 	</div>
 {:else}
+	{#if tasks.some((task) => task.status === 'open' && !task.estimate_minutes)}
+		<p class="hint">
+			У части задач нет оценки времени — планировщик не сможет распределить их по дню.
+		</p>
+	{/if}
 	<div class="list">
 		{#each tasks as task (task.id)}
 			<TaskRow
@@ -290,6 +318,16 @@
 	.create select {
 		padding: 0.55rem 0.7rem;
 		border-radius: 8px;
+	}
+
+	.create .estimate {
+		width: 5.5rem;
+	}
+
+	.hint {
+		margin: 0 0 0.75rem;
+		color: var(--fg-muted);
+		font-size: var(--text-sm);
 	}
 
 	.create button {

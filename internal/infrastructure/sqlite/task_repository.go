@@ -96,7 +96,8 @@ type taskRepository struct {
 }
 
 const taskColumns = `id, title, note, priority, status, planned_date, due_date, due_at,
-	timezone, tags, created_at, updated_at, completed_at, cancelled_at, parent_task_id, version`
+	timezone, tags, created_at, updated_at, completed_at, cancelled_at, parent_task_id,
+	estimate_minutes, expected_result, repeat, repeat_parent_id, version`
 
 // FindByID loads one task with its version.
 func (r *taskRepository) FindByID(ctx context.Context, id int64) (tasks.TaskWithVersion, error) {
@@ -126,8 +127,9 @@ func (r *taskRepository) Insert(ctx context.Context, t *task.Task) (int64, error
 		INSERT INTO tasks (
 			title, note, priority, status, planned_date, due_date, due_at,
 			timezone, tags, created_at, updated_at, completed_at, cancelled_at,
-			parent_task_id, version
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+			parent_task_id, estimate_minutes, expected_result, repeat,
+			repeat_parent_id, version
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
 		t.Title,
 		encodeStringPtr(t.Note),
 		string(t.Priority),
@@ -142,6 +144,10 @@ func (r *taskRepository) Insert(ctx context.Context, t *task.Task) (int64, error
 		encodeTimePtr(t.CompletedAt),
 		encodeTimePtr(t.CancelledAt),
 		encodeParentID(t.ParentTaskID),
+		encodeIntPtr(t.EstimateMinutes),
+		encodeStringPtr(t.ExpectedResult),
+		encodeRepeat(t.Repeat),
+		encodeParentID(t.RepeatParentID),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("insert task: %w", err)
@@ -174,6 +180,7 @@ func (r *taskRepository) Update(ctx context.Context, id int64, expectedVersion i
 			title = ?, note = ?, priority = ?, status = ?, planned_date = ?,
 			due_date = ?, due_at = ?, timezone = ?, tags = ?, created_at = ?,
 			updated_at = ?, completed_at = ?, cancelled_at = ?, parent_task_id = ?,
+			estimate_minutes = ?, expected_result = ?, repeat = ?, repeat_parent_id = ?,
 			version = version + 1
 		WHERE id = ? AND version = ?`,
 		t.Title,
@@ -190,6 +197,10 @@ func (r *taskRepository) Update(ctx context.Context, id int64, expectedVersion i
 		encodeTimePtr(t.CompletedAt),
 		encodeTimePtr(t.CancelledAt),
 		encodeParentID(t.ParentTaskID),
+		encodeIntPtr(t.EstimateMinutes),
+		encodeStringPtr(t.ExpectedResult),
+		encodeRepeat(t.Repeat),
+		encodeParentID(t.RepeatParentID),
 		id,
 		expectedVersion,
 	)
@@ -443,13 +454,17 @@ func scanTask(row rowScanner) (tasks.TaskWithVersion, error) {
 		completedAt  sql.NullInt64
 		cancelledAt  sql.NullInt64
 		parentTaskID sql.NullInt64
+		estimate     sql.NullInt64
+		expected     sql.NullString
+		repeat       sql.NullString
+		repeatParent sql.NullInt64
 		version      int
 	)
 
 	if err := row.Scan(
 		&id, &title, &note, &priority, &status, &plannedDate, &dueDate, &dueAt,
 		&timezone, &tags, &createdAt, &updatedAt, &completedAt, &cancelledAt,
-		&parentTaskID, &version,
+		&parentTaskID, &estimate, &expected, &repeat, &repeatParent, &version,
 	); err != nil {
 		return tasks.TaskWithVersion{}, err
 	}
@@ -484,6 +499,11 @@ func scanTask(row rowScanner) (tasks.TaskWithVersion, error) {
 		CompletedAt:  timePtr(completedAt),
 		CancelledAt:  timePtr(cancelledAt),
 		ParentTaskID: int64Ptr(parentTaskID),
+
+		EstimateMinutes: intPtr(estimate),
+		ExpectedResult:  stringPtr(expected),
+		Repeat:          decodeRepeat(repeat),
+		RepeatParentID:  int64Ptr(repeatParent),
 	}
 
 	if err := aggregate.Validate(); err != nil {
@@ -533,6 +553,51 @@ func stringPtr(value sql.NullString) *string {
 		return nil
 	}
 	return &value.String
+}
+
+// encodeIntPtr stores an optional integer as NULL when absent.
+func encodeIntPtr(value *int) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+// intPtr converts a nullable integer column into an optional value.
+func intPtr(value sql.NullInt64) *int {
+	if !value.Valid {
+		return nil
+	}
+	converted := int(value.Int64)
+	return &converted
+}
+
+// encodeRepeat stores a recurrence rule as JSON.
+func encodeRepeat(value *task.Repeat) any {
+	if value == nil {
+		return nil
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	return string(encoded)
+}
+
+// decodeRepeat reads a recurrence rule. A malformed rule is dropped rather than
+// failing the whole task read: the task itself is still valid.
+func decodeRepeat(value sql.NullString) *task.Repeat {
+	if !value.Valid || strings.TrimSpace(value.String) == "" {
+		return nil
+	}
+	var repeat task.Repeat
+	if err := json.Unmarshal([]byte(value.String), &repeat); err != nil {
+		return nil
+	}
+	if err := repeat.Validate(); err != nil {
+		return nil
+	}
+	return &repeat
 }
 
 func encodeCalendarDate(value *task.CalendarDate) any {

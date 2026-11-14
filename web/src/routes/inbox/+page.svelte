@@ -1,6 +1,14 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { captureInbox, convertInbox, dismissInbox, listInbox, type InboxItem } from '$lib/api';
+	import {
+		captureInbox,
+		convertInbox,
+		dismissInbox,
+		listInbox,
+		updateInbox,
+		type InboxItem,
+		type InboxKind
+	} from '$lib/api';
 	import { errorMessage, formatTime } from '$lib/format';
 	import { liveRevision } from '$lib/live';
 
@@ -11,6 +19,15 @@
 	let busyId: number | null = null;
 	let saving = false;
 	let notice = '';
+	let captureKind: InboxKind = 'task';
+	let busyKindId: number | null = null;
+
+	const kinds: { value: InboxKind; label: string }[] = [
+		{ value: 'task', label: 'Задача' },
+		{ value: 'idea', label: 'Идея' },
+		{ value: 'note', label: 'Заметка' },
+		{ value: 'goal', label: 'Цель' }
+	];
 
 	async function load() {
 		loading = true;
@@ -30,7 +47,7 @@
 		if (!value || saving) return;
 		saving = true;
 		try {
-			await captureInbox(value);
+			await captureInbox(value, { kind: captureKind });
 			text = '';
 			await load();
 		} catch (err) {
@@ -50,6 +67,19 @@
 			error = errorMessage(err);
 		} finally {
 			busyId = null;
+		}
+	}
+
+	/** Reclassifies a capture: an idea stays an idea instead of becoming a task. */
+	async function reclassify(item: InboxItem, kind: InboxKind) {
+		busyKindId = item.id;
+		try {
+			await updateInbox(item.id, { kind });
+			await load();
+		} catch (err) {
+			error = errorMessage(err);
+		} finally {
+			busyKindId = null;
 		}
 	}
 
@@ -117,6 +147,19 @@
 	<button type="submit" disabled={saving || !text.trim()}>{saving ? 'Сохраняю…' : 'Добавить'}</button>
 </form>
 
+<div class="kinds" role="group" aria-label="Что сохранить">
+	{#each kinds as kind}
+		<button
+			class="kind"
+			class:active={captureKind === kind.value}
+			aria-pressed={captureKind === kind.value}
+			on:click={() => (captureKind = kind.value)}
+		>
+			{kind.label}
+		</button>
+	{/each}
+</div>
+
 {#if loading && items.length === 0}
 	<p class="muted">Загружаю…</p>
 {:else if items.length === 0}
@@ -130,7 +173,28 @@
 			<li>
 				<div class="main">
 					<p class="text">{item.text}</p>
-					<span class="meta">Добавлено в {formatTime(item.created_at)}</span>
+					<span class="meta">
+						{#if item.kind !== 'task'}
+							<span class="kind-badge">{kinds.find((entry) => entry.value === item.kind)?.label ?? item.kind}</span>
+							{#if item.revisit_at}
+								· вернуться {item.revisit_at}
+							{/if}
+						{:else}
+							Добавлено в {formatTime(item.created_at)}
+						{/if}
+					</span>
+					<div class="reclassify">
+						{#each kinds as kind}
+							<button
+								class="chip"
+								class:active={item.kind === kind.value}
+								disabled={busyKindId === item.id || item.kind === kind.value}
+								on:click={() => reclassify(item, kind.value)}
+							>
+								{kind.label}
+							</button>
+						{/each}
+					</div>
 				</div>
 				<div class="actions">
 					<button class="primary" disabled={busyId === item.id} on:click={() => convert(item)}>
@@ -171,6 +235,51 @@
 		border: 1px solid rgba(139, 92, 246, 0.35);
 		border-radius: 999px;
 		padding: 0.2rem 0.6rem;
+	}
+
+	.kinds {
+		display: flex;
+		gap: 0.4rem;
+		margin: -0.75rem 0 1.25rem;
+	}
+
+	.kind,
+	.chip {
+		background: transparent;
+		border: 1px solid var(--border);
+		color: var(--fg-muted);
+		border-radius: var(--radius-full);
+		padding: 0.25rem 0.7rem;
+		font-size: var(--text-xs);
+		cursor: pointer;
+		transition:
+			color var(--duration-fast) ease,
+			border-color var(--duration-fast) ease,
+			background var(--duration-fast) ease;
+	}
+
+	.kind:hover,
+	.chip:hover {
+		color: var(--fg-primary);
+		border-color: var(--accent-border);
+	}
+
+	.kind.active,
+	.chip.active {
+		background: var(--accent-surface);
+		border-color: var(--accent-border);
+		color: var(--accent-bright);
+	}
+
+	.reclassify {
+		display: flex;
+		gap: 0.3rem;
+		margin-top: 0.45rem;
+		flex-wrap: wrap;
+	}
+
+	.kind-badge {
+		color: var(--accent-bright);
 	}
 
 	.banner,

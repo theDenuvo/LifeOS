@@ -11,7 +11,16 @@ import (
 
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
 	domaininbox "github.com/theDenuvo/LifeOS/internal/domain/inbox"
+	"github.com/theDenuvo/LifeOS/internal/domain/task"
 )
+
+// encodeInboxRevisit stores an optional revisit date in ISO form.
+func encodeInboxRevisit(value *task.CalendarDate) any {
+	if value == nil || value.IsZero() {
+		return nil
+	}
+	return value.String()
+}
 
 // InboxUnitOfWork implements inbox.UnitOfWork on top of SQLite.
 //
@@ -38,7 +47,7 @@ type inboxRepository struct {
 	tx *sql.Tx
 }
 
-const inboxColumns = `id, text, meta, created_at, processed_at, converted_task_id`
+const inboxColumns = `id, text, meta, kind, revisit_at, created_at, processed_at, converted_task_id`
 
 // FindByID loads one inbox item.
 func (r *inboxRepository) FindByID(ctx context.Context, id int64) (*domaininbox.Item, error) {
@@ -55,22 +64,36 @@ func (r *inboxRepository) FindByID(ctx context.Context, id int64) (*domaininbox.
 
 // List returns a page of inbox items plus the total count.
 func (r *inboxRepository) List(ctx context.Context, filter inbox.Filter) (inbox.ListResult, error) {
-	where := ""
+	clauses := make([]string, 0, 3)
+	args := make([]any, 0, 4)
 	if filter.UnprocessedOnly {
-		where = " WHERE processed_at IS NULL"
+		clauses = append(clauses, "processed_at IS NULL")
+	}
+	if filter.Kind != "" {
+		clauses = append(clauses, "kind = ?")
+		args = append(args, string(filter.Kind))
+	}
+	if filter.RevisitBefore != nil {
+		clauses = append(clauses, "revisit_at IS NOT NULL AND revisit_at <= ?")
+		args = append(args, filter.RevisitBefore.String())
+	}
+	where := ""
+	if len(clauses) > 0 {
+		where = " WHERE " + strings.Join(clauses, " AND ")
 	}
 
 	var total int
-	if err := r.tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM inbox_items`+where).Scan(&total); err != nil {
+	if err := r.tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM inbox_items`+where, args...).Scan(&total); err != nil {
 		return inbox.ListResult{}, fmt.Errorf("count inbox items: %w", err)
 	}
 
 	limit := filter.Limit.Or(inbox.DefaultPageLimit)
 	offset := filter.Offset.Or(0)
 
+	pageArgs := append(append([]any{}, args...), limit, offset)
 	rows, err := r.tx.QueryContext(ctx,
 		`SELECT `+inboxColumns+` FROM inbox_items`+where+` ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
-		limit, offset)
+		pageArgs...)
 	if err != nil {
 		return inbox.ListResult{}, fmt.Errorf("list inbox items: %w", err)
 	}
@@ -103,8 +126,8 @@ func (r *inboxRepository) Insert(ctx context.Context, item *domaininbox.Item) (i
 	}
 
 	result, err := r.tx.ExecContext(ctx,
-		`INSERT INTO inbox_items (text, meta, created_at) VALUES (?, ?, ?)`,
-		item.Text, meta, unixSeconds(item.CreatedAt))
+		`INSERT INTO inbox_items (text, meta, kind, revisit_at, created_at) VALUES (?, ?, ?, ?, ?)`,
+		item.Text, meta, string(item.Kind), encodeInboxRevisit(item.RevisitAt), unixSeconds(item.CreatedAt))
 	if err != nil {
 		return 0, fmt.Errorf("insert inbox item: %w", err)
 	}
@@ -126,6 +149,27 @@ func (r *inboxRepository) MarkProcessed(ctx context.Context, id int64, processed
 	affected, err := result.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("mark inbox item %d processed: rows affected: %w", id, err)
+	}
+	if affected == 0 {
+		return inbox.ErrAlreadyProcessed
+	}
+	return nil
+}
+
+// Update changes what a capture is and when to return to it.
+func (r *inboxRepository) Update(ctx context.Context, item *domaininbox.Item) error {
+	if err := item.Validate(); err != nil {
+		return err
+	}
+	result, err := r.tx.ExecContext(ctx,
+		`UPDATE inbox_items SET kind = ?, revisit_at = ? WHERE id = ? AND processed_at IS NULL`,
+		string(item.Kind), encodeInboxRevisit(item.RevisitAt), item.ID)
+	if err != nil {
+		return fmt.Errorf("update inbox item %d: %w", item.ID, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update inbox item %d: rows affected: %w", item.ID, err)
 	}
 	if affected == 0 {
 		return inbox.ErrAlreadyProcessed
@@ -200,18 +244,26 @@ func scanInboxItem(row rowScanner) (*domaininbox.Item, error) {
 		id              int64
 		text            string
 		meta            sql.NullString
+		kind            string
+		revisitAt       sql.NullString
 		createdAt       int64
 		processedAt     sql.NullInt64
 		convertedTaskID sql.NullInt64
 	)
-	if err := row.Scan(&id, &text, &meta, &createdAt, &processedAt, &convertedTaskID); err != nil {
+	if err := row.Scan(&id, &text, &meta, &kind, &revisitAt, &createdAt, &processedAt, &convertedTaskID); err != nil {
 		return nil, err
 	}
 
 	item := &domaininbox.Item{
 		ID:        id,
 		Text:      text,
+		Kind:      domaininbox.Kind(kind),
 		CreatedAt: timeFromUnix(createdAt),
+	}
+	if revisitAt.Valid && revisitAt.String != "" {
+		if date, err := task.ParseCalendarDate(revisitAt.String[:10]); err == nil {
+			item.RevisitAt = &date
+		}
 	}
 	if meta.Valid && meta.String != "" {
 		item.Meta = json.RawMessage(meta.String)

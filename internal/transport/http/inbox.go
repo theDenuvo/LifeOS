@@ -18,6 +18,8 @@ type inboxBody struct {
 	ID              int64           `json:"id"`
 	Text            string          `json:"text"`
 	Meta            json.RawMessage `json:"meta"`
+	Kind            string          `json:"kind"`
+	RevisitAt       *string         `json:"revisit_at"`
 	CreatedAt       string          `json:"created_at"`
 	ProcessedAt     *string         `json:"processed_at"`
 	ConvertedTaskID *int64          `json:"converted_task_id"`
@@ -27,8 +29,13 @@ func newInboxBody(item *domaininbox.Item) inboxBody {
 	body := inboxBody{
 		ID:              item.ID,
 		Text:            item.Text,
+		Kind:            string(item.Kind),
 		CreatedAt:       formatTime(item.CreatedAt),
 		ConvertedTaskID: item.ConvertedTaskID,
+	}
+	if item.RevisitAt != nil && !item.RevisitAt.IsZero() {
+		value := item.RevisitAt.String()
+		body.RevisitAt = &value
 	}
 	if len(item.Meta) > 0 {
 		body.Meta = item.Meta
@@ -52,6 +59,23 @@ func (h *Handler) listInbox(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		filter.UnprocessedOnly = value
+	}
+	if raw := strings.TrimSpace(query.Get("kind")); raw != "" {
+		kind := domaininbox.Kind(raw)
+		if !kind.IsValid() {
+			h.writeProblem(w, r, http.StatusBadRequest, "validation-failed", "Validation Failed", "kind must be task, idea, note or goal")
+			return
+		}
+		filter.Kind = kind
+	}
+	if raw := strings.TrimSpace(query.Get("revisit")); raw == "due" {
+		today := h.now().In(h.services.Planning.Location())
+		date, err := task.NewCalendarDate(today.Year(), today.Month(), today.Day())
+		if err != nil {
+			h.writeProblem(w, r, http.StatusInternalServerError, "internal-error", "Internal Error", err.Error())
+			return
+		}
+		filter.RevisitBefore = &date
 	}
 	if raw := strings.TrimSpace(query.Get("limit")); raw != "" {
 		value, err := strconv.Atoi(raw)
@@ -94,21 +118,85 @@ func (h *Handler) listInbox(w http.ResponseWriter, r *http.Request) {
 // captureInbox handles POST /api/v1/inbox.
 func (h *Handler) captureInbox(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Text string          `json:"text"`
-		Meta json.RawMessage `json:"meta"`
+		Text      string          `json:"text"`
+		Meta      json.RawMessage `json:"meta"`
+		Kind      string          `json:"kind"`
+		RevisitAt *string         `json:"revisit_at"`
 	}
 	if err := decodeJSONBody(w, r, &body); err != nil {
 		h.writeProblem(w, r, http.StatusBadRequest, "validation-failed", "Validation Failed", err.Error())
 		return
 	}
 
-	item, err := h.services.Inbox.Capture(r.Context(), body.Text, body.Meta)
+	input := inbox.CaptureInput{Text: body.Text, Meta: body.Meta}
+	if body.Kind != "" {
+		kind := domaininbox.Kind(body.Kind)
+		if !kind.IsValid() {
+			h.writeProblem(w, r, http.StatusBadRequest, "validation-failed", "Validation Failed", "kind must be task, idea, note or goal")
+			return
+		}
+		input.Kind = kind
+	}
+	if body.RevisitAt != nil {
+		date, err := task.ParseCalendarDate(*body.RevisitAt)
+		if err != nil {
+			h.writeProblem(w, r, http.StatusBadRequest, "validation-failed", "Validation Failed", "revisit_at must be YYYY-MM-DD")
+			return
+		}
+		input.RevisitAt = &date
+	}
+
+	item, err := h.services.Inbox.CaptureItem(r.Context(), input)
 	if err != nil {
 		h.writeInboxError(w, r, err)
 		return
 	}
 
 	h.writeJSON(w, http.StatusCreated, newInboxBody(item))
+}
+
+// updateInbox handles PATCH /api/v1/inbox/{id}.
+//
+// This is how an idea is kept as an idea: it can be reclassified and given a date
+// to come back to, instead of being forced into a task.
+func (h *Handler) updateInbox(w http.ResponseWriter, r *http.Request) {
+	id, ok := h.pathID(w, r)
+	if !ok {
+		return
+	}
+
+	var body struct {
+		Kind      *string `json:"kind"`
+		RevisitAt *string `json:"revisit_at"`
+	}
+	if err := decodeJSONBody(w, r, &body); err != nil {
+		h.writeProblem(w, r, http.StatusBadRequest, "validation-failed", "Validation Failed", err.Error())
+		return
+	}
+
+	var in inbox.UpdateInput
+	if body.Kind != nil {
+		in.Kind = tasks.Some(domaininbox.Kind(*body.Kind))
+	}
+	if body.RevisitAt != nil {
+		if *body.RevisitAt == "" {
+			in.RevisitAt = tasks.Some(task.CalendarDate{})
+		} else {
+			date, err := task.ParseCalendarDate(*body.RevisitAt)
+			if err != nil {
+				h.writeProblem(w, r, http.StatusBadRequest, "validation-failed", "Validation Failed", "revisit_at must be YYYY-MM-DD")
+				return
+			}
+			in.RevisitAt = tasks.Some(date)
+		}
+	}
+
+	item, err := h.services.Inbox.Update(r.Context(), id, in)
+	if err != nil {
+		h.writeInboxError(w, r, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, newInboxBody(item))
 }
 
 // convertInbox handles POST /api/v1/inbox/{id}/convert.

@@ -1,6 +1,16 @@
 export type Priority = 'low' | 'medium' | 'high';
 export type Status = 'open' | 'completed' | 'cancelled';
 
+export type RepeatFreq = 'daily' | 'weekly' | 'monthly';
+
+export interface Repeat {
+	freq: RepeatFreq;
+	interval: number;
+	weekdays?: number[];
+	until?: string;
+	window_days?: number;
+}
+
 export interface Task {
 	id: number;
 	title: string;
@@ -18,6 +28,11 @@ export interface Task {
 	cancelled_at: string | null;
 	overdue: boolean;
 	version: number;
+	estimate_minutes: number | null;
+	expected_result: string | null;
+	repeat: Repeat | null;
+	repeat_description?: string;
+	repeat_parent_id?: number | null;
 }
 
 export interface TaskList {
@@ -25,10 +40,14 @@ export interface TaskList {
 	meta: { limit: number; offset: number; total: number };
 }
 
+export type InboxKind = 'task' | 'idea' | 'note' | 'goal';
+
 export interface InboxItem {
 	id: number;
 	text: string;
 	meta: Record<string, unknown> | null;
+	kind: InboxKind;
+	revisit_at: string | null;
 	created_at: string;
 	processed_at: string | null;
 	converted_task_id: number | null;
@@ -59,6 +78,15 @@ export interface Summary {
 		inbox_count: number;
 	};
 	focus_task: SummaryItem | null;
+	revisit: RevisitItem[];
+	plan?: PlanInfo | null;
+}
+
+export interface RevisitItem {
+	id: number;
+	text: string;
+	kind: InboxKind;
+	revisit_at: string;
 }
 
 export interface ProblemDetails {
@@ -102,6 +130,126 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 	return (await response.json()) as T;
 }
 
+export interface PlanItem {
+	block_id?: number;
+	task_id: number;
+	title: string;
+	priority: Priority;
+	start: string;
+	end: string;
+	start_local: string;
+	end_local: string;
+	source?: 'auto' | 'manual' | 'assistant';
+	status?: 'planned' | 'active' | 'done' | 'skipped';
+	estimate_minutes?: number;
+	recurring?: boolean;
+	due_at?: string;
+	due_date?: string;
+}
+
+export interface PlanBusy {
+	label: string;
+	kind: 'event' | 'block';
+	start: string;
+	end: string;
+	task_id?: number;
+}
+
+export interface PlanUnplaced {
+	task_id: number;
+	title: string;
+	estimate_minutes: number;
+	reason: string;
+}
+
+export interface DayPlan {
+	date: string;
+	working: boolean;
+	workday_start: string;
+	workday_end: string;
+	free_minutes: number;
+	planned_minutes: number;
+	blocks: PlanItem[];
+	proposed: PlanItem[];
+	busy: PlanBusy[];
+	unplaced: PlanUnplaced[];
+}
+
+export interface PlanInfo {
+	working: boolean;
+	workday_start: string;
+	workday_end: string;
+	free_minutes: number;
+	planned_minutes: number;
+	blocks: number;
+	proposed: number;
+}
+
+export interface PlanMove {
+	task_id: number;
+	title: string;
+	from?: string;
+	to: string;
+	reason: string;
+	estimate_minutes: number;
+}
+
+export interface PlanProposal {
+	generated_at: string;
+	horizon_days: number;
+	summary: string;
+	moves: PlanMove[];
+	placements: { task_id: number; date: string; start: string; end: string }[];
+	unplaced: PlanUnplaced[];
+	days: { date: string; working: boolean; free_minutes: number; planned_minutes: number }[];
+}
+
+export interface Reminder {
+	id: number;
+	kind: 'lead' | 'due' | 'overdue';
+	status: 'pending' | 'sent' | 'dismissed';
+	fire_at: string;
+	sent_at?: string;
+}
+
+export function getDayPlan(date: string): Promise<DayPlan> {
+	return request<DayPlan>(`/api/v1/plan/day?date=${date}`);
+}
+
+export function applyPlan(
+	replaceDates: string[],
+	items: { task_id: number; start: string; end: string }[]
+): Promise<{ applied: PlanItem[]; skipped: string[] }> {
+	return request(`/api/v1/plan/apply`, {
+		method: 'POST',
+		body: JSON.stringify({ replace_dates: replaceDates, items })
+	});
+}
+
+export function getPlanProposal(days = 7): Promise<PlanProposal> {
+	return request<PlanProposal>(`/api/v1/plan/replan?days=${days}`);
+}
+
+export function deletePlanBlock(id: number): Promise<void> {
+	return request<void>(`/api/v1/plan/blocks/${id}`, { method: 'DELETE' });
+}
+
+export function getTaskReminders(id: number): Promise<{ data: Reminder[] }> {
+	return request<{ data: Reminder[] }>(`/api/v1/tasks/${id}/reminders`);
+}
+
+export function estimateTask(title: string, tags: string[] = []): Promise<{
+	minutes: number;
+	source: 'history' | 'default' | 'unknown';
+	samples: number;
+	based_on?: string[];
+	question?: string;
+}> {
+	const params = new URLSearchParams({ title });
+	if (tags.length > 0) params.set('tags', tags.join(','));
+	return request(`/api/v1/tasks/estimate?${params.toString()}`);
+}
+
 export interface TaskQuery {
 	status?: Status[];
 	priority?: Priority[];
@@ -137,6 +285,9 @@ export interface CreateTaskInput {
 	due_date?: string;
 	due_at?: string;
 	tags?: string[];
+	estimate_minutes?: number;
+	expected_result?: string;
+	repeat?: Repeat;
 }
 
 export function createTask(input: CreateTaskInput): Promise<Task> {
@@ -152,6 +303,9 @@ export type UpdateTaskInput = Partial<{
 	due_at: string | null;
 	timezone: string;
 	tags: string[];
+	estimate_minutes: number | null;
+	expected_result: string | null;
+	repeat: Repeat | null;
 }>;
 
 export function updateTask(id: number, version: number, input: UpdateTaskInput): Promise<Task> {
@@ -185,12 +339,34 @@ export function rescheduleTask(
 	});
 }
 
-export function listInbox(unprocessedOnly = true): Promise<InboxList> {
-	return request<InboxList>(`/api/v1/inbox?unprocessed_only=${unprocessedOnly}`);
+export function listInbox(
+	unprocessedOnly = true,
+	options: { kind?: InboxKind; revisit?: 'due' } = {}
+): Promise<InboxList> {
+	const params = new URLSearchParams({ unprocessed_only: String(unprocessedOnly) });
+	if (options.kind) params.set('kind', options.kind);
+	if (options.revisit) params.set('revisit', options.revisit);
+	return request<InboxList>(`/api/v1/inbox?${params.toString()}`);
 }
 
-export function captureInbox(text: string): Promise<InboxItem> {
-	return request<InboxItem>('/api/v1/inbox', { method: 'POST', body: JSON.stringify({ text }) });
+export function captureInbox(
+	text: string,
+	options: { kind?: InboxKind; revisit_at?: string } = {}
+): Promise<InboxItem> {
+	return request<InboxItem>('/api/v1/inbox', {
+		method: 'POST',
+		body: JSON.stringify({ text, ...options })
+	});
+}
+
+export function updateInbox(
+	id: number,
+	input: { kind?: InboxKind; revisit_at?: string | null }
+): Promise<InboxItem> {
+	return request<InboxItem>(`/api/v1/inbox/${id}`, {
+		method: 'PATCH',
+		body: JSON.stringify(input)
+	});
 }
 
 export function convertInbox(id: number, priority?: Priority): Promise<Task> {

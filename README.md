@@ -67,7 +67,7 @@ Transport (HTTP, SSE, MCP) → Application → Domain
 
 Подробности: [ARCHITECTURE.md](ARCHITECTURE.md), [DATA_MODEL.md](DATA_MODEL.md),
 [API_CONTRACT.md](API_CONTRACT.md), [DECISIONS.md](DECISIONS.md),
-[DEPLOYMENT.md](DEPLOYMENT.md), [MCP.md](MCP.md).
+[DEPLOYMENT.md](DEPLOYMENT.md), [MCP.md](MCP.md), [ROADMAP.md](ROADMAP.md).
 
 ## Быстрый старт
 

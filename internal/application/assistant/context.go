@@ -6,8 +6,10 @@ import (
 	"strings"
 	"time"
 
+	appevents "github.com/theDenuvo/LifeOS/internal/application/events"
 	"github.com/theDenuvo/LifeOS/internal/application/proactive"
 	"github.com/theDenuvo/LifeOS/internal/application/summary"
+	"github.com/theDenuvo/LifeOS/internal/domain/event"
 )
 
 // TodayProvider is the slice of the summary service the assistant context needs.
@@ -18,6 +20,11 @@ type TodayProvider interface {
 // InsightProvider is the slice of the proactive service the assistant context needs.
 type InsightProvider interface {
 	Compute(ctx context.Context) ([]proactive.Insight, error)
+}
+
+// EventProvider is the slice of the calendar service the context needs.
+type EventProvider interface {
+	ListRange(ctx context.Context, from, to time.Time, calendars []event.Calendar) ([]appevents.EventWithVersion, error)
 }
 
 // ContextProvider renders a compact snapshot of the user's current LifeOS state.
@@ -33,19 +40,32 @@ type ContextProvider interface {
 type LifeOSContext struct {
 	today    TodayProvider
 	insights InsightProvider
+	events   EventProvider
 	timezone string
 	clock    Clock
 }
 
+// ContextOption customises the automatic context.
+type ContextOption func(*LifeOSContext)
+
+// WithEvents adds today's calendar events to the snapshot.
+func WithEvents(provider EventProvider) ContextOption {
+	return func(c *LifeOSContext) { c.events = provider }
+}
+
 // NewLifeOSContext builds a context provider.
-func NewLifeOSContext(today TodayProvider, insights InsightProvider, timezone string, clock Clock) *LifeOSContext {
+func NewLifeOSContext(today TodayProvider, insights InsightProvider, timezone string, clock Clock, opts ...ContextOption) *LifeOSContext {
 	if clock == nil {
 		clock = SystemClock()
 	}
 	if timezone == "" {
 		timezone = "Europe/Moscow"
 	}
-	return &LifeOSContext{today: today, insights: insights, timezone: timezone, clock: clock}
+	c := &LifeOSContext{today: today, insights: insights, timezone: timezone, clock: clock}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // Snapshot renders the current state in a bounded, human-readable form.
@@ -77,6 +97,14 @@ func (c *LifeOSContext) Snapshot(ctx context.Context) (string, error) {
 		today.Stats.CompletedToday,
 	)
 	fmt.Fprintf(&b, "Входящие: %d необработанных.\n", today.Stats.InboxCount)
+
+	if c.events != nil {
+		dayStart := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc)
+		dayEnd := dayStart.AddDate(0, 0, 1)
+		if events, err := c.events.ListRange(ctx, dayStart, dayEnd, nil); err == nil && len(events) > 0 {
+			fmt.Fprintf(&b, "События сегодня: %s.\n", joinEvents(events, 5, loc))
+		}
+	}
 
 	if today.FocusTask != nil {
 		fmt.Fprintf(&b, "Фокус: «%s» (%s, %s).\n",
@@ -120,6 +148,25 @@ func joinOverdue(items []summary.OverdueItem, limit int) string {
 		}
 		parts = append(parts, fmt.Sprintf("«%s» (%d дн.)",
 			truncateRunes(item.Title, 60), item.DaysOverdue))
+	}
+	if len(items) > limit {
+		parts = append(parts, fmt.Sprintf("ещё %d", len(items)-limit))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func joinEvents(items []appevents.EventWithVersion, limit int, loc *time.Location) string {
+	parts := make([]string, 0, min(limit, len(items)))
+	for i, item := range items {
+		if i >= limit {
+			break
+		}
+		value := item.Event
+		parts = append(parts, fmt.Sprintf("«%s» (%s–%s)",
+			truncateRunes(value.Title, 60),
+			value.StartsAt.In(loc).Format("15:04"),
+			value.EndsAt.In(loc).Format("15:04"),
+		))
 	}
 	if len(items) > limit {
 		parts = append(parts, fmt.Sprintf("ещё %d", len(items)-limit))

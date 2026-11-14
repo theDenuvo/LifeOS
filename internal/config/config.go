@@ -21,9 +21,28 @@ type Config struct {
 	LLMAPIKey   string
 	LLMModel    string
 
+	// Resilience: retries per model, extra models to fall back to, and the
+	// backoff base. One flaky free model must not end the turn.
+	LLMFallbackModels []string
+	LLMRetryAttempts  int
+	LLMRetryDelayMS   int
+
+	// AssistantMaxRounds caps tool rounds per turn; bulk imports need headroom.
+	AssistantMaxRounds int
+
+	DocLLMBaseURL string
+	DocLLMAPIKey  string
+	DocLLMModel   string
+	DocumentsDir  string
+
 	MCPEnabled     bool
 	MCPPath        string
 	MCPAllowWrites bool
+
+	// ToolsRoot restricts the local file tools to one directory. An empty root
+	// means the assistant may work with any path on the machine.
+	ToolsRoot  string
+	ToolsShell bool
 }
 
 func Load(configPath string) (*Config, error) {
@@ -33,17 +52,25 @@ func Load(configPath string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		ListenAddr:     getEnv("LIFEOS_LISTEN_ADDR", "127.0.0.1:8787"),
-		DataDir:        getEnv("LIFEOS_DATA_DIR", "./data"),
-		Timezone:       getEnv("LIFEOS_TIMEZONE", "Europe/Moscow"),
-		LogLevel:       getEnv("LIFEOS_LOG_LEVEL", "info"),
-		LLMProvider:    getEnv("LIFEOS_LLM_PROVIDER", "openrouter"),
-		LLMBaseURL:     getEnv("LIFEOS_LLM_BASE_URL", "https://openrouter.ai/api/v1"),
-		LLMAPIKey:      getEnv("LIFEOS_LLM_API_KEY", ""),
-		LLMModel:       getEnv("LIFEOS_LLM_MODEL", "openai/gpt-4o-mini"),
-		MCPEnabled:     getEnvBool("LIFEOS_MCP_ENABLED", false),
-		MCPPath:        getEnv("LIFEOS_MCP_PATH", "/mcp"),
-		MCPAllowWrites: getEnvBool("LIFEOS_MCP_ALLOW_WRITES", false),
+		ListenAddr:         getEnv("LIFEOS_LISTEN_ADDR", "127.0.0.1:8787"),
+		DataDir:            getEnv("LIFEOS_DATA_DIR", "./data"),
+		Timezone:           getEnv("LIFEOS_TIMEZONE", "Europe/Moscow"),
+		LogLevel:           getEnv("LIFEOS_LOG_LEVEL", "info"),
+		LLMProvider:        getEnv("LIFEOS_LLM_PROVIDER", "openrouter"),
+		LLMBaseURL:         getEnv("LIFEOS_LLM_BASE_URL", "https://openrouter.ai/api/v1"),
+		LLMAPIKey:          getEnv("LIFEOS_LLM_API_KEY", ""),
+		LLMModel:           getEnv("LIFEOS_LLM_MODEL", "openai/gpt-4o-mini"),
+		LLMRetryAttempts:   getEnvInt("LIFEOS_LLM_RETRY_ATTEMPTS", 3),
+		LLMRetryDelayMS:    getEnvInt("LIFEOS_LLM_RETRY_DELAY_MS", 400),
+		AssistantMaxRounds: getEnvInt("LIFEOS_ASSISTANT_MAX_ROUNDS", 12),
+		DocLLMBaseURL:      getEnv("LIFEOS_DOC_LLM_BASE_URL", ""),
+		DocLLMAPIKey:       getEnv("LIFEOS_DOC_LLM_API_KEY", ""),
+		DocLLMModel:        getEnv("LIFEOS_DOC_LLM_MODEL", ""),
+		MCPEnabled:         getEnvBool("LIFEOS_MCP_ENABLED", false),
+		MCPPath:            getEnv("LIFEOS_MCP_PATH", "/mcp"),
+		MCPAllowWrites:     getEnvBool("LIFEOS_MCP_ALLOW_WRITES", false),
+		ToolsRoot:          getEnv("LIFEOS_TOOLS_ROOT", ""),
+		ToolsShell:         getEnvBool("LIFEOS_TOOLS_SHELL", true),
 	}
 
 	// Load .env file if it exists (non-fatal if missing)
@@ -59,9 +86,19 @@ func Load(configPath string) (*Config, error) {
 	cfg.LLMBaseURL = getEnv("LIFEOS_LLM_BASE_URL", cfg.LLMBaseURL)
 	cfg.LLMAPIKey = getEnv("LIFEOS_LLM_API_KEY", cfg.LLMAPIKey)
 	cfg.LLMModel = getEnv("LIFEOS_LLM_MODEL", cfg.LLMModel)
+	cfg.LLMFallbackModels = getEnvList("LIFEOS_LLM_FALLBACK_MODELS", cfg.LLMFallbackModels)
+	cfg.LLMRetryAttempts = getEnvInt("LIFEOS_LLM_RETRY_ATTEMPTS", cfg.LLMRetryAttempts)
+	cfg.LLMRetryDelayMS = getEnvInt("LIFEOS_LLM_RETRY_DELAY_MS", cfg.LLMRetryDelayMS)
+	cfg.AssistantMaxRounds = getEnvInt("LIFEOS_ASSISTANT_MAX_ROUNDS", cfg.AssistantMaxRounds)
+	cfg.DocLLMBaseURL = getEnv("LIFEOS_DOC_LLM_BASE_URL", cfg.LLMBaseURL)
+	cfg.DocLLMAPIKey = getEnv("LIFEOS_DOC_LLM_API_KEY", cfg.LLMAPIKey)
+	cfg.DocLLMModel = getEnv("LIFEOS_DOC_LLM_MODEL", defaultDocModel(cfg.DocLLMBaseURL, cfg.LLMModel))
+	cfg.DocumentsDir = getEnv("LIFEOS_DOCUMENTS_DIR", filepath.Join(cfg.DataDir, "documents"))
 	cfg.MCPEnabled = getEnvBool("LIFEOS_MCP_ENABLED", cfg.MCPEnabled)
 	cfg.MCPPath = getEnv("LIFEOS_MCP_PATH", cfg.MCPPath)
 	cfg.MCPAllowWrites = getEnvBool("LIFEOS_MCP_ALLOW_WRITES", cfg.MCPAllowWrites)
+	cfg.ToolsRoot = getEnv("LIFEOS_TOOLS_ROOT", cfg.ToolsRoot)
+	cfg.ToolsShell = getEnvBool("LIFEOS_TOOLS_SHELL", cfg.ToolsShell)
 
 	// Validate timezone using embedded IANA database
 	loc, err := time.LoadLocation(cfg.Timezone)
@@ -72,6 +109,9 @@ func Load(configPath string) (*Config, error) {
 
 	// Ensure data directory exists
 	if err := os.MkdirAll(cfg.DataDir, 0750); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(cfg.DocumentsDir, 0750); err != nil {
 		return nil, err
 	}
 
@@ -99,6 +139,36 @@ func getEnvBool(key string, defaultValue bool) bool {
 		return defaultValue
 	}
 	return b
+}
+
+func getEnvInt(key string, defaultValue int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return defaultValue
+	}
+	parsed, err := strconv.Atoi(v)
+	if err != nil || parsed <= 0 {
+		return defaultValue
+	}
+	return parsed
+}
+
+// getEnvList reads a comma-separated list, trimming blanks.
+func getEnvList(key string, defaultValue []string) []string {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return defaultValue
+	}
+	parts := make([]string, 0, 4)
+	for _, part := range strings.Split(v, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			parts = append(parts, trimmed)
+		}
+	}
+	if len(parts) == 0 {
+		return defaultValue
+	}
+	return parts
 }
 
 type ErrInvalidTimezone struct {
@@ -139,4 +209,13 @@ func loadDotEnv(path string) error {
 		}
 	}
 	return nil
+}
+
+// defaultDocModel prefers a free vision-capable model when OpenRouter is used.
+// The user can override it with LIFEOS_DOC_LLM_MODEL.
+func defaultDocModel(baseURL, fallback string) string {
+	if strings.Contains(strings.ToLower(baseURL), "openrouter.ai") {
+		return "particle-ai/particle-1:free"
+	}
+	return fallback
 }

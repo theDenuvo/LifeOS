@@ -51,6 +51,34 @@ export function todayISO(): string {
 }
 
 export function errorMessage(error: unknown): string {
-	if (error instanceof Error) return error.message;
+	if (error instanceof TypeError) {
+		return 'Нет связи с сервером. Проверьте соединение и повторите.';
+	}
+	if (error instanceof Error) {
+		const message = error.message.trim();
+		const lower = message.toLowerCase();
+		if (
+			lower === 'network error' ||
+			lower.includes('failed to fetch') ||
+			lower.includes('networkerror') ||
+			lower.includes('load failed')
+		) {
+			return 'Нет связи с сервером. Проверьте соединение и повторите.';
+		}
+		return message;
+	}
 	return 'Не удалось выполнить запрос';
+}
+
+/** True when the failure means the transport died rather than the server refusing. */
+export function isConnectionError(error: unknown): boolean {
+	if (error instanceof TypeError) return true;
+	const message = error instanceof Error ? error.message.toLowerCase() : '';
+	return (
+		message.includes('network error') ||
+		message.includes('failed to fetch') ||
+		message.includes('networkerror') ||
+		message.includes('load failed') ||
+		message.includes('err_connection')
+	);
 }

@@ -125,6 +125,18 @@ Transport (HTTP, MCP) ──► Application ──► Domain
 
 **Направление зависимостей.** Application зависит только от `internal/domain/task` и стандартной библиотеки. `internal/config` в Application не импортируется — настройки передаются через конструктор (`WithDefaultTimezone`).
 
+### `internal/domain/event` и `internal/application/events`
+
+События календаря: интервал, календарь-источник, all-day, optimistic locking. Read-model `internal/application/calendar` объединяет события и задачи и вычисляет пересечения.
+
+### `internal/application/documents`
+
+Загрузка документов, локальное извлечение текста (DOCX/XLSX/PPTX/PDF/текст), vision-извлечение задач из изображений, предложения задач и их принятие через Task Service. Файлы — `internal/infrastructure/documents`, LLM — `internal/agent/documents`.
+
+### `internal/application/profile`
+
+Профиль поверх `app_settings` (`profile.name`, `profile.role`), инициалы выводятся на сервере.
+
 ### `internal/application/inbox`
 - `List` — получение входящих (пагинация, `unprocessed_only`)
 - `Capture` — быстрый захват
@@ -166,7 +178,17 @@ Transport (HTTP, MCP) ──► Application ──► Domain
 
 ### `internal/agent`
 - `OpenAIProvider` — любой OpenAI-совместимый endpoint (OpenRouter, Ollama `/v1`, локальный шлюз)
+- SSE-ответы (`/assistant/messages/stream`, `/events`) снимают `WriteTimeout` через `http.ResponseController`; `responseWriter` в логирующем middleware реализует `Unwrap`, иначе дедлайн не снимается и стрим рвётся через 30 с
+- Ассистентский ход живёт в модульном хранилище `web/src/lib/assistantRun.ts`, а не в компоненте чата: переключение раздела интерфейса размонтирует чат, но не отменяет ответ; при возврате вкладка подхватывает текущий ход и догружает финальное сообщение из API. Отмена возможна только явно («Стоп», новый диалог).
+- Событие можно изменить и удалить из чата: `update_event` (частичное обновление) и `delete_event` (безвозвратно), оба проходят через обычный механизм подтверждений
+
+- Массовые действия: `create_events` создаёт до 200 событий одним вызовом инструмента, поэтому импорт расписания из Excel укладывается в один раунд и одно подтверждение вместо десятков
+- Календарные события меняются и удаляются прямо в интерфейсе календаря: `PATCH /api/v1/calendar/events/{id}` и `DELETE ...` под `If-Match` с версией. Удаление аппаратное (строка `calendar_events` удаляется), поэтому событие исчезает из календаря, сводок и выдачи ассистента сразу; архивной копии нет.
+- Файловые инструменты отказывают в доступе к собственной базе `lifeos.db` (и её `-wal`/`-shm`): данные меняются только через сервисы LifeOS
+- `RetryProvider` (`internal/agent/resilience.go`) — ретраи с экспоненциальной задержкой (`429`, `5xx`, обрывы сети, пустой ответ) и фоллбек на следующую модель; стрим, уже отдавший текст, не перезапускается. Ретраи/фоллбеки приходят в UI событием `retry`
 - `internal/agent/tools` — реестр инструментов LifeOS: чтение (`list_tasks`, `get_today_summary`, `list_inbox`) и мутации (`create_task`, `update_task`, `complete_task`, `cancel_task`, `restore_task`, `reschedule_task`, `capture_inbox`, `convert_inbox`, `dismiss_inbox`)
+- `internal/agent/tools/workspace.go` — инструменты машины: `read_file`, `list_files`, `search_files`, `write_file`, `edit_file`, `delete_path`, `run_command`. Корень (`LIFEOS_TOOLS_ROOT`) по умолчанию не ограничен, оболочку можно отключить (`LIFEOS_TOOLS_SHELL=false`). Все изменения — мутации, то есть проходят через `pending_action`, если не включено автоподтверждение
+- Приложенные к сообщению документы передаются модели дословно в prompt (до `MaxDocumentPromptChars` на документ), а не только их ID
 - Мутации не выполняются моделью напрямую: они создают `pending_action` с превью и ждут подтверждения пользователя
 
 ### `internal/agent/providers`

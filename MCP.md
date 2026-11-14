@@ -12,11 +12,11 @@ LIFEOS_MCP_PATH=/mcp
 LIFEOS_MCP_ALLOW_WRITES=false
 ```
 
-По умолчанию сервер **read-only**: доступны `list_tasks`, `get_today_summary`,
-`list_inbox`. Мутации (`create_task`, `update_task`, `complete_task`,
-`cancel_task`, `restore_task`, `reschedule_task`, `capture_inbox`,
-`convert_inbox`, `dismiss_inbox`) включаются только при
-`LIFEOS_MCP_ALLOW_WRITES=true`.
+По умолчанию сервер **read-only**: доступны `list_tasks`, `get_task`,
+`get_today_summary`, `list_inbox`, `list_events`, `get_event`. Мутации
+(`create_task`, `update_task`, `complete_task`, `cancel_task`, `restore_task`,
+`reschedule_task`, `capture_inbox`, `convert_inbox`, `dismiss_inbox`,
+`create_event`) включаются только при `LIFEOS_MCP_ALLOW_WRITES=true`.
 
 MCP-клиент не имеет интерфейса подтверждения, поэтому включение записи — явное
 решение оператора. Встроенный ассистент всегда использует подтверждаемые

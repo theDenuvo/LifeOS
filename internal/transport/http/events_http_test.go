@@ -86,7 +86,7 @@ func TestSSEReplaysAfterLastEventID(t *testing.T) {
 	handler, cleanup := newTaskAPI(t, now)
 	defer cleanup()
 
-	broker := handler.services.Events
+	broker := handler.services.Broker
 	broker.Publish("task.created", map[string]any{"id": 1})
 	broker.Publish("task.updated", map[string]any{"id": 1})
 

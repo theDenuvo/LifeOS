@@ -208,6 +208,11 @@ export function getSummary(): Promise<Summary> {
 	return request<Summary>('/api/v1/summary/today');
 }
 
+export interface Attachment {
+	kind: 'task' | 'task_list' | 'event' | 'event_list' | 'document';
+	data: unknown;
+}
+
 export interface AssistantMessage {
 	id: number;
 	conversation_id: number;
@@ -215,6 +220,8 @@ export interface AssistantMessage {
 	content: string;
 	tool_calls?: unknown;
 	metadata?: unknown;
+	attachments?: Attachment[];
+	reasoning?: string;
 	created_at: string;
 }
 
@@ -315,4 +322,196 @@ export function snoozeInsight(key: string, until?: string): Promise<void> {
 		method: 'POST',
 		body: JSON.stringify(until ? { until } : {})
 	});
+}
+
+
+export type CalendarName = 'work' | 'meetings' | 'personal';
+
+export interface CalendarEvent {
+	id: number;
+	title: string;
+	description: string | null;
+	location: string | null;
+	calendar: CalendarName;
+	starts_at: string;
+	ends_at: string;
+	all_day: boolean;
+	timezone: string;
+	created_at: string;
+	updated_at: string;
+	version: number;
+}
+
+export interface CalendarConflict {
+	kind: 'event_event' | 'event_task';
+	event_ids: number[];
+	task_ids?: number[];
+	starts_at: string;
+	ends_at: string;
+}
+
+export interface CalendarRange {
+	from: string;
+	to: string;
+	events: CalendarEvent[];
+	tasks: Task[];
+	conflicts: CalendarConflict[];
+}
+
+export interface Profile {
+	name: string;
+	role: string;
+	initials: string;
+}
+
+export interface SystemStatus {
+	ok: boolean;
+	version: string;
+	time: string;
+	database: { ok: boolean };
+	assistant: { configured: boolean };
+	events: { revision: number };
+	pending_actions: number;
+	synced_at: string;
+}
+
+export function getProfile(): Promise<Profile> {
+	return request<Profile>('/api/v1/profile');
+}
+
+export function updateProfile(input: { name: string; role: string }): Promise<Profile> {
+	return request<Profile>('/api/v1/profile', { method: 'PUT', body: JSON.stringify(input) });
+}
+
+export function getStatus(): Promise<SystemStatus> {
+	return request<SystemStatus>('/api/v1/status');
+}
+
+export function getCalendar(
+	from: string,
+	to: string,
+	calendars: CalendarName[] = []
+): Promise<CalendarRange> {
+	const params = new URLSearchParams({ from, to });
+	for (const calendar of calendars) params.append('calendar', calendar);
+	return request<CalendarRange>(`/api/v1/calendar?${params.toString()}`);
+}
+
+export function createEvent(input: {
+	title: string;
+	starts_at: string;
+	ends_at?: string;
+	calendar?: CalendarName;
+	location?: string;
+	description?: string;
+	all_day?: boolean;
+}): Promise<CalendarEvent> {
+	return request<CalendarEvent>('/api/v1/calendar/events', {
+		method: 'POST',
+		body: JSON.stringify(input)
+	});
+}
+
+export function updateEvent(
+	id: number,
+	version: number,
+	input: Partial<{
+		title: string;
+		starts_at: string;
+		ends_at: string;
+		calendar: CalendarName;
+		location: string;
+		description: string;
+		all_day: boolean;
+	}>
+): Promise<CalendarEvent> {
+	return request<CalendarEvent>(`/api/v1/calendar/events/${id}`, {
+		method: 'PATCH',
+		headers: { 'If-Match': `"${version}"` },
+		body: JSON.stringify(input)
+	});
+}
+
+export function deleteEvent(id: number, version: number): Promise<void> {
+	return request<void>(`/api/v1/calendar/events/${id}`, {
+		method: 'DELETE',
+		headers: { 'If-Match': `"${version}"` }
+	});
+}
+
+export type DocumentStatus = 'pending' | 'processing' | 'processed' | 'failed';
+
+export interface DocumentTask {
+	id: number;
+	document_id: number;
+	title: string;
+	note: string | null;
+	due_date: string | null;
+	priority: Priority;
+	confidence: number;
+	source: string | null;
+	status: 'proposed' | 'accepted' | 'dismissed';
+	task_id: number | null;
+}
+
+export interface UploadedDocument {
+	id: number;
+	filename: string;
+	mime: string;
+	size: number;
+	status: DocumentStatus;
+	error: string | null;
+	created_at: string;
+	updated_at: string;
+	tasks?: DocumentTask[];
+}
+
+export async function uploadDocument(file: File): Promise<UploadedDocument> {
+	const form = new FormData();
+	form.append('file', file);
+	const response = await fetch('/api/v1/documents', { method: 'POST', body: form });
+	if (!response.ok) {
+		let detail = response.statusText;
+		try {
+			const problem = (await response.json()) as ProblemDetails;
+			detail = problem.detail ?? detail;
+		} catch {
+			// keep status text
+		}
+		throw new ApiError(response.status, detail, null);
+	}
+	return (await response.json()) as UploadedDocument;
+}
+
+export function getDocument(id: number): Promise<UploadedDocument> {
+	return request<UploadedDocument>(`/api/v1/documents/${id}`);
+}
+
+export function deleteDocument(id: number): Promise<void> {
+	return request<void>(`/api/v1/documents/${id}`, { method: 'DELETE' });
+}
+
+export function acceptDocumentTasks(
+	id: number,
+	taskIds: number[]
+): Promise<{ tasks: Task[]; proposals: DocumentTask[] }> {
+	return request<{ tasks: Task[]; proposals: DocumentTask[] }>(`/api/v1/documents/${id}/tasks`, {
+		method: 'POST',
+		body: JSON.stringify({ task_ids: taskIds })
+	});
+}
+
+export function reprocessDocument(id: number): Promise<{ id: number; status: DocumentStatus }> {
+	return request<{ id: number; status: DocumentStatus }>(`/api/v1/documents/${id}/reprocess`, {
+		method: 'POST'
+	});
+}
+
+export interface DocumentList {
+	data: UploadedDocument[];
+	meta: { limit: number; offset: number; total: number };
+}
+
+export function listDocuments(limit = 20, offset = 0): Promise<DocumentList> {
+	return request<DocumentList>(`/api/v1/documents?limit=${limit}&offset=${offset}`);
 }

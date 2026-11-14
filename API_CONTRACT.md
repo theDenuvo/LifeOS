@@ -371,7 +371,8 @@ POST /api/v1/assistant/messages
 ```json
 {
   "content": "Создай задачу купить молоко на завтра",
-  "conversation_id": 1
+  "conversation_id": 1,
+  "document_ids": []
 }
 ```
 
@@ -379,7 +380,7 @@ POST /api/v1/assistant/messages
 ```json
 {
   "conversation_id": 1,
-  "message": {"id": 101, "conversation_id": 1, "role": "assistant", "content": "Создание задачи ждёт подтверждения.", "created_at": "..."},
+  "message": {"id": 101, "conversation_id": 1, "role": "assistant", "content": "Создание задачи ждёт подтверждения.", "attachments": [], "created_at": "..."},
   "pending_actions": [
     {"id": 5, "tool_name": "create_task", "arguments": {"title": "Купить молоко"}, "preview": {"summary": "Создать задачу «Купить молоко»"}, "status": "pending"}
   ]
@@ -388,7 +389,40 @@ POST /api/v1/assistant/messages
 
 Обработка синхронная в рамках запроса. Изменения данных не выполняются сразу: инструменты-мутации создают `pending_action`, который пользователь подтверждает или отклоняет. События `assistant.message` и `pending_action.*` также приходят через SSE.
 
+`message.attachments` — типизированные результаты read-инструментов (`task`, `task_list`, `event`, `event_list`), которые интерфейс показывает карточками. Для старых сообщений массив пуст.
+
 **Response 503:** провайдер LLM не настроен (`LIFEOS_LLM_API_KEY` пуст и провайдер не `ollama`).
+
+#### Потоковый ответ (SSE)
+
+```
+POST /api/v1/assistant/messages/stream
+```
+
+Тело: `content`, `conversation_id`, `model`, `auto_confirm`, `interaction`. Ответ `text/event-stream`:
+- `start` — `conversation_id`, `user_message_id`;
+- `reasoning` — `delta`;
+- `content` — `delta`;
+- `tool` — `name`, `status` (`running|done`), `auto_confirmed`;
+- `retry` — `model`, `attempt`, `fallback`, `reason`: провайдер не ответил, запрос повторяется или переключается на другую модель (сообщение не прерывается);
+- `pending_action` — карточка предложенного действия;
+- `done` — `conversation_id`, `message`, `pending_actions`;
+- `error` — `message`, `retryable`, `reason`.
+
+`model` — id бесплатной модели из `/assistant/config`. `auto_confirm=true` выполняет мутации сразу; `false` оставляет `pending_action`.
+
+**Устойчивость провайдера.** Сетевые сбои, `429` и `5xx` не завершают сообщение ошибкой: модель повторяется с экспоненциальной задержкой (`LIFEOS_LLM_RETRY_ATTEMPTS`), затем ход переходит к следующей модели из `LIFEOS_LLM_FALLBACK_MODELS`, `LIFEOS_LLM_MODEL` и каталога. Стрим, который уже отдал текст, не перезапускается — клиент сохраняет видимый ответ. Повторная отправка того же текста после сбоя не создаёт второе сообщение пользователя.
+
+`message.reasoning` содержит reasoning trace, если провайдер его отдаёт.
+
+#### Настройки ассистента
+
+```
+GET /api/v1/assistant/config
+PUT /api/v1/assistant/config   {"model":"...", "auto_confirm":false}
+```
+
+Возвращает список бесплатных tool-capable моделей, выбранную модель и режим автоподтверждения.
 
 #### Получить историю диалога
 
@@ -427,6 +461,59 @@ POST /api/v1/assistant/pending-actions/{id}/reject
 Подтверждение выполняет инструмент и записывает результат как сообщение `role=tool`. Повторное подтверждение → `409`.
 
 ---
+
+### 5.1 Календарь
+
+```
+GET /api/v1/calendar?from=YYYY-MM-DD&to=YYYY-MM-DD&calendar=work&calendar=meetings
+```
+
+Возвращает `events`, `tasks` и `conflicts` за диапазон. Конфликты: `event_event` и `event_task`.
+
+```
+GET    /api/v1/calendar/events
+POST   /api/v1/calendar/events
+GET    /api/v1/calendar/events/{id}
+PATCH  /api/v1/calendar/events/{id}     If-Match: version
+DELETE /api/v1/calendar/events/{id}     If-Match: version
+```
+
+Событие: `id`, `title`, `description`, `location`, `calendar` (`work|meetings|personal`), `starts_at`, `ends_at`, `all_day`, `timezone`, `version`. `ends_at` при создании можно не передавать: по умолчанию +1 час (+1 день для all-day).
+
+`DELETE` удаляет событие безвозвратно: строка `calendar_events` удаляется, восстановления нет, событие исчезает из выдачи `/api/v1/calendar` и из инструментов ассистента. `PATCH` — частичное обновление: передаются только изменяемые поля; пустые `description`/`location` очищают поле.
+
+### 5.2 Профиль
+
+```
+GET /api/v1/profile
+PUT /api/v1/profile   {"name":"...", "role":"..."}
+```
+
+Ответ: `{"name","role","initials"}`. Дефолт: «Пользователь / Личный профиль».
+
+### 5.3 Статус
+
+```
+GET /api/v1/status
+```
+
+`ok`, `version`, `database.ok`, `assistant.configured`, `events.revision`, `pending_actions`, `synced_at`. Используется индикатором синхронизации.
+
+### 5.4 Документы
+
+```
+POST   /api/v1/documents              multipart/form-data, поле file
+GET    /api/v1/documents
+GET    /api/v1/documents/{id}
+DELETE /api/v1/documents/{id}
+POST   /api/v1/documents/{id}/reprocess
+```
+
+Загрузка возвращает `202` и документ в статусе `pending`. Backend **не извлекает задачи** при загрузке: он конвертирует документ в Markdown (DOCX/XLSX/XLS/PPTX/PDF/текст локально; изображения — через vision-модель) и сохраняет результат. UI опрашивает `GET /documents/{id}` до `processed` или `failed`.
+
+Прикрепить документ к сообщению: передать `document_ids` в `POST /assistant/messages` или `/stream`. В пользовательском сообщении сохраняются вложения типа `document`; в системный промпт ассистента добавляется список документов. Ассистент читает Markdown через инструмент `read_document(id, offset, limit)` и уже в диалоге решает, какие задачи создать. Автоподтверждение применяется к созданным задачам как к обычным мутациям.
+
+Поддерживаются `.docx`, `.xlsx`, `.xls`, `.pptx`, `.pdf`, текстовые файлы и изображения (`png/jpeg/webp/gif`). Для PDF нужен `pdftotext`. Устаревшие `.doc/.ppt` отклоняются. Максимальный размер — 25 МиБ. Повторная обработка доступна для неудачных документов.
 
 ### 6. Наблюдения (проактивность)
 

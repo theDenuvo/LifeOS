@@ -10,7 +10,11 @@ import (
 
 	"github.com/theDenuvo/LifeOS/internal/agent/tools"
 	"github.com/theDenuvo/LifeOS/internal/application/assistant"
+	appcalendar "github.com/theDenuvo/LifeOS/internal/application/calendar"
+	appevents "github.com/theDenuvo/LifeOS/internal/application/events"
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
+	"github.com/theDenuvo/LifeOS/internal/application/profile"
+	"github.com/theDenuvo/LifeOS/internal/application/settings"
 	"github.com/theDenuvo/LifeOS/internal/application/summary"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	"github.com/theDenuvo/LifeOS/internal/config"
@@ -23,6 +27,15 @@ import (
 var testEmbedFS embed.FS
 
 func setupTestHandler(t *testing.T) (*Handler, func()) {
+	t.Helper()
+	return setupTestHandlerWithProvider(t, nil)
+}
+
+// setupTestHandlerWithProvider builds the full handler over a temporary database
+// with an optional assistant provider, so streaming behaviour can be tested
+// through the real middleware chain.
+func setupTestHandlerWithProvider(t *testing.T, provider assistant.Provider) (*Handler, func()) {
+	t.Helper()
 	// Create temporary database
 	tmpDir := t.TempDir()
 	dbPath := tmpDir + "/test.db"
@@ -57,14 +70,23 @@ func setupTestHandler(t *testing.T) (*Handler, func()) {
 	taskService := tasks.NewService(sqlite.NewTaskUnitOfWork(db), clock, tasks.WithPublisher(broker))
 	inboxService := inbox.NewService(sqlite.NewInboxUnitOfWork(db), clock, cfg.Timezone, inbox.WithPublisher(broker))
 	summaryService := summary.NewService(taskService, inboxService, clock, cfg.Timezone)
+	eventService := appevents.NewService(sqlite.NewEventUnitOfWork(db), clock, appevents.WithTimezone(cfg.Timezone), appevents.WithPublisher(broker))
+	calendarService := appcalendar.NewService(eventService, taskService, cfg.Timezone)
+	settingsService := settings.NewService(sqlite.NewSettingsUnitOfWork(db), clock)
+	profileService := profile.NewService(settingsService)
 	registry := tools.NewLifeOSTools(taskService, inboxService, summaryService)
-	assistantService := assistant.NewService(sqlite.NewAssistantUnitOfWork(db), nil, registry, clock)
+	assistantService := assistant.NewService(sqlite.NewAssistantUnitOfWork(db), provider, registry, clock)
 	handler := NewHandler(db, cfg, testEmbedFS, Services{
 		Tasks:     taskService,
 		Inbox:     inboxService,
 		Summary:   summaryService,
 		Assistant: assistantService,
-		Events:    broker,
+		Settings:  settingsService,
+		Profile:   profileService,
+		Events:    eventService,
+		Calendar:  calendarService,
+		Broker:    broker,
+		Version:   "test",
 	})
 
 	cleanup := func() {
@@ -388,7 +410,7 @@ func TestHandlerServeFrontendWithRealEmbedFS(t *testing.T) {
 		Inbox:     inboxService,
 		Summary:   summaryService,
 		Assistant: assistantService,
-		Events:    broker,
+		Broker:    broker,
 	})
 
 	// Test root serves index.html

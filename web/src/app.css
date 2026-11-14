@@ -1,22 +1,25 @@
 :root {
+	/* Native form controls, pickers and scrollbars follow the dark surface. */
+	color-scheme: dark;
+
 	/* Primitives */
-	--ink-950: #09090d;
-	--ink-900: #0e0e14;
-	--ink-850: #121219;
-	--ink-800: #171720;
-	--ink-750: #1d1d28;
-	--ink-700: #262633;
-	--line: #2a2a38;
-	--line-soft: #20202c;
+	--ink-950: #0a0a0e;
+	--ink-900: #0a0a0d;
+	--ink-850: #121216;
+	--ink-800: #17171d;
+	--ink-750: #1d1d24;
+	--ink-700: #2a2a33;
+	--line: #24242c;
+	--line-soft: #1b1b22;
 
-	--text-strong: #f0f0f4;
+	--text-strong: #f2f2f5;
 	--text: #d8d8e0;
-	--text-muted: #9292a3;
-	--text-faint: #808093;
+	--text-muted: #8f8f9c;
+	--text-faint: #6f6f7d;
 
-	--violet: #8b5cf6;
-	--violet-bright: #a78bfa;
-	--violet-soft: rgba(139, 92, 246, 0.14);
+	--violet: #7c5cfc;
+	--violet-bright: #9a83ff;
+	--violet-soft: rgba(124, 92, 252, 0.14);
 	--cyan: #22d3ee;
 	--green: #34d399;
 	--amber: #fbbf24;
@@ -54,14 +57,15 @@
 	/* Type */
 	--font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
 	--font-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Code', monospace;
+	--text-2xs: 0.625rem;
 	--text-xs: 0.6875rem;
 	--text-sm: 0.75rem;
 	--text-base: 0.8125rem;
 	--text-md: 0.875rem;
 	--text-lg: 1rem;
-	--text-xl: 1.25rem;
-	--text-2xl: 1.625rem;
-	--text-3xl: 2rem;
+	--text-xl: 1.125rem;
+	--text-2xl: 1.25rem;
+	--text-3xl: 1.5rem;
 
 	/* Space */
 	--space-1: 0.25rem;
@@ -83,14 +87,18 @@
 	--shadow-overlay: 0 24px 80px rgba(0, 0, 0, 0.5);
 
 	/* Layout */
-	--sidebar-w: 248px;
-	--rail-w: 320px;
+	--sidebar-w: 200px;
+	--rail-w: 288px;
+	--topbar-h: 56px;
 	--content-max: 1440px;
 	--mobile-nav-h: 64px;
 	--composer-h: 112px;
+	--bg-panel: #101014;
+	--bg-raised-2: #17171d;
 
 	/* Motion */
 	--ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+	--ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
 	--duration-fast: 120ms;
 	--duration-normal: 200ms;
 	--duration-slow: 320ms;
@@ -106,6 +114,15 @@ html {
 	scroll-behavior: smooth;
 }
 
+* {
+	scrollbar-color: var(--ink-700) transparent;
+	scrollbar-width: thin;
+}
+
+html {
+	font-size: 100%;
+}
+
 html,
 body {
 	margin: 0;
@@ -114,12 +131,12 @@ body {
 	background: var(--bg-primary);
 	color: var(--fg-primary);
 	font-family: var(--font-sans);
-	font-size: var(--text-md);
 	line-height: 1.5;
 }
 
 body {
 	min-height: 100vh;
+	font-size: var(--text-md);
 }
 
 @font-face {
@@ -156,6 +173,18 @@ select {
 	color: var(--fg-primary);
 	border-radius: var(--radius-md);
 	padding: 0.5rem 0.75rem;
+	transition:
+		border-color var(--duration-fast) var(--ease-out),
+		box-shadow var(--duration-fast) var(--ease-out),
+		background-color var(--duration-fast) var(--ease-out);
+}
+
+button {
+	transition:
+		background-color var(--duration-fast) var(--ease-out),
+		border-color var(--duration-fast) var(--ease-out),
+		color var(--duration-fast) var(--ease-out),
+		opacity var(--duration-fast) var(--ease-out);
 }
 
 input::placeholder,
@@ -181,6 +210,7 @@ select:focus {
 	color: var(--fg-primary);
 }
 
+/* Reduced motion keeps state feedback (color, opacity) and drops movement. */
 @media (prefers-reduced-motion: reduce) {
 	html {
 		scroll-behavior: auto;
@@ -191,6 +221,7 @@ select:focus {
 	*::after {
 		animation-duration: 0.01ms !important;
 		animation-iteration-count: 1 !important;
-		transition-duration: 0.01ms !important;
+		transition-duration: 60ms !important;
+		transition-property: background-color, border-color, color, opacity !important;
 	}
 }

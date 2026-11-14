@@ -30,15 +30,21 @@ func NewOpenAIProvider(baseURL, apiKey, model string) *OpenAIProvider {
 		baseURL: strings.TrimRight(baseURL, "/"),
 		apiKey:  apiKey,
 		model:   model,
-		client:  &http.Client{Timeout: 90 * time.Second},
+		client:  &http.Client{Timeout: 5 * time.Minute},
 	}
 }
 
 type chatRequest struct {
-	Model      string        `json:"model"`
-	Messages   []chatMessage `json:"messages"`
-	Tools      []chatTool    `json:"tools,omitempty"`
-	ToolChoice string        `json:"tool_choice,omitempty"`
+	Model         string         `json:"model"`
+	Messages      []chatMessage  `json:"messages"`
+	Tools         []chatTool     `json:"tools,omitempty"`
+	ToolChoice    string         `json:"tool_choice,omitempty"`
+	Stream        bool           `json:"stream,omitempty"`
+	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+}
+
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type chatMessage struct {
@@ -145,7 +151,7 @@ func (p *OpenAIProvider) Complete(ctx context.Context, messages []assistant.Chat
 		return assistant.Completion{}, fmt.Errorf("read llm response: %w", err)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return assistant.Completion{}, fmt.Errorf("llm: status %d: %s", response.StatusCode, truncate(string(payload), 500))
+		return assistant.Completion{}, &ProviderError{Status: response.StatusCode, Body: truncate(string(payload), 500)}
 	}
 
 	var decoded chatResponse
@@ -173,6 +179,14 @@ func (p *OpenAIProvider) Complete(ctx context.Context, messages []assistant.Chat
 		})
 	}
 	return completion, nil
+}
+
+// WithModel returns a provider bound to another model.
+func (p *OpenAIProvider) WithModel(model string) assistant.Provider {
+	if model == "" {
+		model = p.model
+	}
+	return &OpenAIProvider{baseURL: p.baseURL, apiKey: p.apiKey, model: model, client: p.client}
 }
 
 func truncate(value string, limit int) string {

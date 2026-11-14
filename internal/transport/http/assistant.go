@@ -7,18 +7,21 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/theDenuvo/LifeOS/internal/agent"
 	"github.com/theDenuvo/LifeOS/internal/application/assistant"
 	domainassistant "github.com/theDenuvo/LifeOS/internal/domain/assistant"
 )
 
 type assistantMessageBody struct {
-	ID             int64           `json:"id"`
-	ConversationID int64           `json:"conversation_id"`
-	Role           string          `json:"role"`
-	Content        string          `json:"content"`
-	ToolCalls      json.RawMessage `json:"tool_calls,omitempty"`
-	Metadata       json.RawMessage `json:"metadata,omitempty"`
-	CreatedAt      string          `json:"created_at"`
+	ID             int64                        `json:"id"`
+	ConversationID int64                        `json:"conversation_id"`
+	Role           string                       `json:"role"`
+	Content        string                       `json:"content"`
+	ToolCalls      json.RawMessage              `json:"tool_calls,omitempty"`
+	Metadata       json.RawMessage              `json:"metadata,omitempty"`
+	Attachments    []domainassistant.Attachment `json:"attachments"`
+	Reasoning      string                       `json:"reasoning,omitempty"`
+	CreatedAt      string                       `json:"created_at"`
 }
 
 type pendingActionBody struct {
@@ -42,6 +45,10 @@ type conversationBody struct {
 }
 
 func newAssistantMessageBody(message *domainassistant.Message) assistantMessageBody {
+	attachments := message.Attachments
+	if attachments == nil {
+		attachments = []domainassistant.Attachment{}
+	}
 	return assistantMessageBody{
 		ID:             message.ID,
 		ConversationID: message.ConversationID,
@@ -49,6 +56,8 @@ func newAssistantMessageBody(message *domainassistant.Message) assistantMessageB
 		Content:        message.Content,
 		ToolCalls:      message.ToolCalls,
 		Metadata:       message.Metadata,
+		Attachments:    attachments,
+		Reasoning:      message.Reasoning,
 		CreatedAt:      formatTime(message.CreatedAt),
 	}
 }
@@ -75,8 +84,9 @@ func newPendingActionBody(action *domainassistant.PendingAction) pendingActionBo
 // sendAssistantMessage handles POST /api/v1/assistant/messages.
 func (h *Handler) sendAssistantMessage(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Content        string `json:"content"`
-		ConversationID int64  `json:"conversation_id"`
+		Content        string  `json:"content"`
+		ConversationID int64   `json:"conversation_id"`
+		DocumentIDs    []int64 `json:"document_ids"`
 		Interaction    struct {
 			Screen     string `json:"screen"`
 			ObjectType string `json:"object_type"`
@@ -89,11 +99,17 @@ func (h *Handler) sendAssistantMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	documents, err := h.loadDocumentRefs(r, body.DocumentIDs)
+	if err != nil {
+		h.writeProblem(w, r, http.StatusBadRequest, "validation-failed", "Validation Failed", err.Error())
+		return
+	}
 	result, err := h.services.Assistant.SendMessageWithInteraction(r.Context(), body.ConversationID, body.Content, assistant.InteractionContext{
 		Screen:     body.Interaction.Screen,
 		ObjectType: body.Interaction.ObjectType,
 		ObjectID:   body.Interaction.ObjectID,
 		Title:      body.Interaction.Title,
+		Documents:  documents,
 	})
 	if err != nil {
 		h.writeAssistantError(w, r, err)
@@ -237,6 +253,18 @@ func (h *Handler) writeAssistantError(w http.ResponseWriter, r *http.Request, er
 	case errors.Is(err, assistant.ErrToolFailed):
 		h.writeProblem(w, r, http.StatusUnprocessableEntity, "tool-failed", "Tool Failed", err.Error())
 	default:
+		// A provider outage is retryable: tell the client that, do not disguise it
+		// as an internal error.
+		if agent.RetryableError(err) || isProviderError(err) {
+			h.writeProblem(w, r, http.StatusBadGateway, "provider-unavailable", "Model Provider Unavailable",
+				assistant.FailureMessage(err))
+			return
+		}
 		h.writeProblem(w, r, http.StatusBadGateway, "assistant-error", "Assistant Error", err.Error())
 	}
+}
+
+func isProviderError(err error) bool {
+	var providerErr *agent.ProviderError
+	return errors.As(err, &providerErr)
 }

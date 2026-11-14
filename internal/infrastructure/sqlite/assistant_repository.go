@@ -35,7 +35,7 @@ type assistantRepository struct {
 }
 
 const conversationColumns = `id, title, context_screen, created_at, updated_at, ended_at`
-const messageColumns = `id, conversation_id, role, content, tool_calls, tool_results, metadata, created_at`
+const messageColumns = `id, conversation_id, role, content, tool_calls, tool_results, metadata, attachments, reasoning, created_at`
 const pendingColumns = `id, conversation_id, message_id, tool_name, arguments, preview, status, created_at, resolved_at, resolution`
 
 // CreateConversation stores a conversation and returns its ID.
@@ -110,15 +110,22 @@ func (r *assistantRepository) TouchConversation(ctx context.Context, id int64, a
 
 // InsertMessage stores a message and returns its ID.
 func (r *assistantRepository) InsertMessage(ctx context.Context, message *domainassistant.Message) (int64, error) {
+	attachments, err := encodeAttachments(message.Attachments)
+	if err != nil {
+		return 0, fmt.Errorf("insert message: encode attachments: %w", err)
+	}
+
 	result, err := r.tx.ExecContext(ctx,
-		`INSERT INTO messages (conversation_id, role, content, tool_calls, tool_results, metadata, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO messages (conversation_id, role, content, tool_calls, tool_results, metadata, attachments, reasoning, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		message.ConversationID,
 		string(message.Role),
 		message.Content,
 		encodeRaw(message.ToolCalls),
 		encodeRaw(message.ToolResults),
 		encodeRaw(message.Metadata),
+		attachments,
+		message.Reasoning,
 		unixSeconds(message.CreatedAt),
 	)
 	if err != nil {
@@ -273,9 +280,11 @@ func scanMessage(row rowScanner) (*domainassistant.Message, error) {
 		toolCalls      sql.NullString
 		toolResults    sql.NullString
 		metadata       sql.NullString
+		attachments    sql.NullString
+		reasoning      sql.NullString
 		createdAt      int64
 	)
-	if err := row.Scan(&id, &conversationID, &role, &content, &toolCalls, &toolResults, &metadata, &createdAt); err != nil {
+	if err := row.Scan(&id, &conversationID, &role, &content, &toolCalls, &toolResults, &metadata, &attachments, &reasoning, &createdAt); err != nil {
 		return nil, err
 	}
 	message := &domainassistant.Message{
@@ -286,12 +295,30 @@ func scanMessage(row rowScanner) (*domainassistant.Message, error) {
 		ToolCalls:      rawPtr(toolCalls),
 		ToolResults:    rawPtr(toolResults),
 		Metadata:       rawPtr(metadata),
+		Reasoning:      reasoning.String,
 		CreatedAt:      timeFromUnix(createdAt),
 	}
 	if !message.Role.IsValid() {
 		return nil, fmt.Errorf("message %d: invalid stored role %q", id, role)
 	}
+	if attachments.Valid && attachments.String != "" {
+		if err := json.Unmarshal([]byte(attachments.String), &message.Attachments); err != nil {
+			return nil, fmt.Errorf("message %d: decode attachments: %w", id, err)
+		}
+	}
 	return message, nil
+}
+
+// encodeAttachments serializes structured results for one message.
+func encodeAttachments(items []domainassistant.Attachment) (any, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	encoded, err := json.Marshal(items)
+	if err != nil {
+		return nil, err
+	}
+	return string(encoded), nil
 }
 
 func scanPendingAction(row rowScanner) (*domainassistant.PendingAction, error) {

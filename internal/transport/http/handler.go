@@ -11,10 +11,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/theDenuvo/LifeOS/internal/agent"
 	"github.com/theDenuvo/LifeOS/internal/agent/tools"
 	"github.com/theDenuvo/LifeOS/internal/application/assistant"
+	appcalendar "github.com/theDenuvo/LifeOS/internal/application/calendar"
+	appdocuments "github.com/theDenuvo/LifeOS/internal/application/documents"
+	appevents "github.com/theDenuvo/LifeOS/internal/application/events"
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
 	"github.com/theDenuvo/LifeOS/internal/application/proactive"
+	"github.com/theDenuvo/LifeOS/internal/application/profile"
 	"github.com/theDenuvo/LifeOS/internal/application/search"
 	"github.com/theDenuvo/LifeOS/internal/application/settings"
 	"github.com/theDenuvo/LifeOS/internal/application/summary"
@@ -33,8 +38,14 @@ type Services struct {
 	Proactive *proactive.Service
 	Search    *search.Service
 	Settings  *settings.Service
+	Profile   *profile.Service
+	Events    *appevents.Service
+	Calendar  *appcalendar.Service
+	Documents *appdocuments.Service
+	Models    *agent.ModelCatalog
 	Tools     *tools.Registry
-	Events    *events.Broker
+	Broker    *events.Broker
+	Version   string
 }
 
 type Handler struct {
@@ -87,7 +98,25 @@ func (h *Handler) apiRoutes() http.Handler {
 	mux.HandleFunc("POST /inbox/{id}/convert", h.convertInbox)
 	mux.HandleFunc("DELETE /inbox/{id}", h.dismissInbox)
 	mux.HandleFunc("GET /summary/today", h.todaySummary)
+	mux.HandleFunc("GET /calendar", h.getCalendar)
+	mux.HandleFunc("GET /calendar/events", h.listEvents)
+	mux.HandleFunc("POST /calendar/events", h.createEvent)
+	mux.HandleFunc("GET /calendar/events/{id}", h.getEvent)
+	mux.HandleFunc("PATCH /calendar/events/{id}", h.patchEvent)
+	mux.HandleFunc("DELETE /calendar/events/{id}", h.deleteEvent)
+	mux.HandleFunc("GET /profile", h.getProfile)
+	mux.HandleFunc("PUT /profile", h.putProfile)
+	mux.HandleFunc("GET /status", h.status)
+	mux.HandleFunc("POST /documents", h.uploadDocument)
+	mux.HandleFunc("GET /documents", h.listDocuments)
+	mux.HandleFunc("GET /documents/{id}", h.getDocument)
+	mux.HandleFunc("DELETE /documents/{id}", h.deleteDocument)
+	mux.HandleFunc("POST /documents/{id}/tasks", h.acceptDocumentTasks)
+	mux.HandleFunc("POST /documents/{id}/reprocess", h.reprocessDocument)
 	mux.HandleFunc("POST /assistant/messages", h.sendAssistantMessage)
+	mux.HandleFunc("POST /assistant/messages/stream", h.streamAssistantMessage)
+	mux.HandleFunc("GET /assistant/config", h.getAssistantConfig)
+	mux.HandleFunc("PUT /assistant/config", h.putAssistantConfig)
 	mux.HandleFunc("GET /assistant/conversations", h.listAssistantConversations)
 	mux.HandleFunc("GET /assistant/conversations/{id}", h.getAssistantConversation)
 	mux.HandleFunc("POST /assistant/pending-actions/{id}/confirm", h.confirmPendingAction)
@@ -221,6 +250,13 @@ func (h *Handler) corsMiddleware(next http.Handler) http.Handler {
 type responseWriter struct {
 	http.ResponseWriter
 	statusCode int
+}
+
+// Unwrap exposes the real writer to http.ResponseController. Without it,
+// SetWriteDeadline (and hijacking) silently fails under the logging middleware,
+// so Server.WriteTimeout would cut every SSE stream at 30 seconds.
+func (rw *responseWriter) Unwrap() http.ResponseWriter {
+	return rw.ResponseWriter
 }
 
 func (rw *responseWriter) WriteHeader(code int) {

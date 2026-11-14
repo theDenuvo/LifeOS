@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/theDenuvo/LifeOS/internal/application/assistant"
+	appdocuments "github.com/theDenuvo/LifeOS/internal/application/documents"
+	appevents "github.com/theDenuvo/LifeOS/internal/application/events"
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
 	"github.com/theDenuvo/LifeOS/internal/application/proactive"
 	"github.com/theDenuvo/LifeOS/internal/application/search"
@@ -21,6 +24,10 @@ type LifeOSToolOption func(*lifeOSToolConfig)
 type lifeOSToolConfig struct {
 	search    *search.Service
 	proactive *proactive.Service
+	events    *appevents.Service
+	documents *appdocuments.Service
+	timezone  string
+	workspace *workspaceConfig
 }
 
 // WithSearchService exposes unified search to the assistant.
@@ -33,13 +40,55 @@ func WithProactiveService(service *proactive.Service) LifeOSToolOption {
 	return func(config *lifeOSToolConfig) { config.proactive = service }
 }
 
+// WithEventService exposes calendar events to the assistant.
+func WithEventService(service *appevents.Service) LifeOSToolOption {
+	return func(config *lifeOSToolConfig) { config.events = service }
+}
+
+// WithDocumentService exposes attached document Markdown to the assistant.
+func WithDocumentService(service *appdocuments.Service) LifeOSToolOption {
+	return func(config *lifeOSToolConfig) { config.documents = service }
+}
+
+// WithTimezone sets the timezone used to interpret date-only tool arguments.
+func WithTimezone(timezone string) LifeOSToolOption {
+	return func(config *lifeOSToolConfig) {
+		if timezone != "" {
+			config.timezone = timezone
+		}
+	}
+}
+
+// WithMachineAccess exposes the local file and shell tools to the assistant.
+//
+// An empty root gives the assistant access to the whole machine; a non-empty
+// root keeps every path inside that directory. Shell access can be disabled
+// independently for deployments that only want file editing. Paths listed in
+// protected (the app's own database) are always refused.
+func WithMachineAccess(root string, allowShell bool, protected ...string) LifeOSToolOption {
+	return func(config *lifeOSToolConfig) {
+		workspace := &workspaceConfig{root: strings.TrimSpace(root), shell: allowShell}
+		workspace.protectLifeOSData(protected...)
+		config.workspace = workspace
+	}
+}
+
 // NewLifeOSTools builds the registry over the application services.
 func NewLifeOSTools(taskService *tasks.Service, inboxService *inbox.Service, summaryService *summary.Service, opts ...LifeOSToolOption) *Registry {
-	config := lifeOSToolConfig{}
+	config := lifeOSToolConfig{timezone: "Europe/Moscow"}
 	for _, opt := range opts {
 		opt(&config)
 	}
 	registry := NewRegistry()
+	if config.events != nil {
+		registerEventTools(registry, config.events, config.timezone)
+	}
+	if config.documents != nil {
+		registerDocumentTools(registry, config.documents)
+	}
+	if config.workspace != nil {
+		registerWorkspaceTools(registry, *config.workspace)
+	}
 
 	registry.Register(Tool{
 		Spec: assistantSpec("list_tasks", "Список задач с фильтрами. Используй для чтения состояния.",

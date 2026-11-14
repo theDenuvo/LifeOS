@@ -38,8 +38,8 @@ func TestMigrationsApply(t *testing.T) {
 	if err != nil {
 		t.Fatalf("goose.GetDBVersion failed: %v", err)
 	}
-	if version != 11 {
-		t.Errorf("Expected version 11, got %d", version)
+	if version != 15 {
+		t.Errorf("Expected version 15, got %d", version)
 	}
 }
 
@@ -53,8 +53,8 @@ func TestMigrationsIdempotent(t *testing.T) {
 	}
 
 	version, _ := goose.GetDBVersion(db)
-	if version != 11 {
-		t.Errorf("Expected version 11 after re-apply, got %d", version)
+	if version != 15 {
+		t.Errorf("Expected version 15 after re-apply, got %d", version)
 	}
 }
 
@@ -64,7 +64,7 @@ func TestSchemaTablesExist(t *testing.T) {
 
 	expectedTables := []string{
 		"tasks", "inbox_items", "task_events", "conversations",
-		"messages", "pending_actions", "app_settings", "goose_db_version",
+		"messages", "pending_actions", "app_settings", "calendar_events", "documents", "document_tasks", "goose_db_version",
 	}
 
 	for _, table := range expectedTables {
@@ -87,6 +87,8 @@ func TestSchemaIndexesExist(t *testing.T) {
 		"idx_task_events_task_id", "idx_task_events_type",
 		"idx_messages_conversation", "idx_pending_actions_conversation",
 		"idx_pending_actions_status",
+		"idx_calendar_events_range", "idx_calendar_events_calendar",
+		"idx_documents_status", "idx_document_tasks_document",
 	}
 
 	for _, index := range expectedIndexes {
@@ -340,8 +342,8 @@ func TestProductionMigrationPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("goose.GetDBVersion failed: %v", err)
 	}
-	if version != 11 {
-		t.Errorf("Expected version 11, got %d", version)
+	if version != 15 {
+		t.Errorf("Expected version 15, got %d", version)
 	}
 }
 

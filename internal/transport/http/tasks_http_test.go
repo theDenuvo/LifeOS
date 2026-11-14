@@ -75,7 +75,7 @@ func newTaskAPIWithProvider(t *testing.T, now time.Time, provider assistant.Prov
 		Proactive: proactiveService,
 		Search:    searchService,
 		Settings:  settingsService,
-		Events:    broker,
+		Broker:    broker,
 	})
 	handler.now = func() time.Time { return now }
 

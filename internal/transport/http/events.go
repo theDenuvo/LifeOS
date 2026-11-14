@@ -3,6 +3,7 @@ package httptransport
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -23,7 +24,7 @@ func (h *Handler) streamEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	broker := h.services.Events
+	broker := h.services.Broker
 	if broker == nil {
 		// Without a broker the stream stays open but silent; this only happens
 		// in tests that construct a partial Services value.
@@ -40,6 +41,11 @@ func (h *Handler) streamEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
+	// The live stream is open for the whole session; Server.WriteTimeout must not
+	// cut it every 30 seconds.
+	if err := clearWriteDeadline(w); err != nil {
+		slog.Warn("events stream: write deadline is not cleared", "error", err)
+	}
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 

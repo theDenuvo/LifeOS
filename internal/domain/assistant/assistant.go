@@ -73,6 +73,22 @@ type Conversation struct {
 	EndedAt       *time.Time
 }
 
+// Attachment kinds persisted with an assistant message.
+const (
+	AttachmentTask      = "task"
+	AttachmentTaskList  = "task_list"
+	AttachmentEvent     = "event"
+	AttachmentEventList = "event_list"
+	AttachmentDocument  = "document"
+)
+
+// Attachment is a structured result rendered by the workspace instead of
+// forcing the model to describe it in prose.
+type Attachment struct {
+	Kind string          `json:"kind"`
+	Data json.RawMessage `json:"data"`
+}
+
 // Message is one turn in a conversation.
 type Message struct {
 	ID             int64
@@ -82,6 +98,8 @@ type Message struct {
 	ToolCalls      json.RawMessage
 	ToolResults    json.RawMessage
 	Metadata       json.RawMessage
+	Attachments    []Attachment
+	Reasoning      string
 	CreatedAt      time.Time
 }
 

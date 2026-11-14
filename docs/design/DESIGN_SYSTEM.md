@@ -1,6 +1,6 @@
 # LifeOS — design system
 
-Tokens are CSS custom properties on `:root` in `web/src/app.css`. Components consume semantic tokens, never raw hex values. `app.css` currently carries a small legacy set; extend it rather than adding page-local palettes.
+Tokens are CSS custom properties on `:root` in `web/src/app.css`. Components consume semantic tokens, never raw hex values. `app.css` carries the reference token set plus semantic aliases kept for older screens; extend it rather than adding page-local palettes.
 
 ## Color
 
@@ -8,21 +8,21 @@ Tokens are CSS custom properties on `:root` in `web/src/app.css`. Components con
 
 | Token | Value | Use |
 |---|---|---|
-| `--ink-950` | `#09090d` | app background |
-| `--ink-900` | `#0e0e14` | sidebar / deep surface |
-| `--ink-850` | `#121219` | primary surface |
-| `--ink-800` | `#171720` | raised surface / input |
-| `--ink-750` | `#1d1d28` | hover surface |
-| `--ink-700` | `#262633` | strong hover / border emphasis |
-| `--line` | `#2a2a38` | default border |
-| `--line-soft` | `#20202c` | quiet divider |
-| `--text-strong` | `#f0f0f4` | titles |
+| `--ink-950` | `#0a0a0e` | app background |
+| `--ink-900` | `#0a0a0d` | sidebar / deep surface |
+| `--ink-850` | `#121216` | primary surface / rail card |
+| `--ink-800` | `#17171d` | raised surface / task card |
+| `--ink-750` | `#1d1d24` | hover surface |
+| `--ink-700` | `#2a2a33` | strong hover / border emphasis |
+| `--line` | `#24242c` | default border |
+| `--line-soft` | `#1b1b22` | quiet divider |
+| `--text-strong` | `#f2f2f5` | titles |
 | `--text` | `#d8d8e0` | body |
-| `--text-muted` | `#9292a3` | metadata |
-| `--text-faint` | `#808093` | disabled / hints |
-| `--violet` | `#8b5cf6` | assistant / brand |
-| `--violet-bright` | `#a78bfa` | hover / active text |
-| `--violet-soft` | `rgba(139,92,246,.14)` | selected surface |
+| `--text-muted` | `#8f8f9c` | metadata |
+| `--text-faint` | `#6f6f7d` | disabled / hints |
+| `--violet` | `#7c5cfc` | assistant / brand |
+| `--violet-bright` | `#9a83ff` | hover / active text |
+| `--violet-soft` | `rgba(124,92,252,.14)` | selected surface |
 | `--cyan` | `#22d3ee` | live / informational signal |
 | `--success` | `#34d399` | done / positive |
 | `--warning` | `#fbbf24` | attention |
@@ -43,14 +43,14 @@ Tokens are CSS custom properties on `:root` in `web/src/app.css`. Components con
 --border: var(--line);
 --border-soft: var(--line-soft);
 --accent: var(--violet);
---accent-strong: var(--violet-bright);
+--accent-bright: var(--violet-bright);
 --accent-surface: var(--violet-soft);
 --accent-border: rgba(139, 92, 246, 0.28);
 --on-accent: #0b0b10;
 --info: var(--cyan);
---success: var(--success);
---warning: var(--warning);
---danger: var(--danger);
+--success: var(--green);
+--warning: var(--amber);
+--danger: var(--red);
 --danger-text: #fecaca;
 --danger-surface: rgba(248, 113, 113, 0.08);
 --danger-border: rgba(248, 113, 113, 0.4);
@@ -77,9 +77,9 @@ Fonts: **Inter** for UI, **JetBrains Mono** for IDs, counts, timestamps, keyboar
 | `--text-base` | 13 / 1.5 | dense UI, table rows |
 | `--text-md` | 14 / 1.55 | body, controls |
 | `--text-lg` | 16 / 1.45 | assistant prose, card titles |
-| `--text-xl` | 20 / 1.25 | section titles |
-| `--text-2xl` | 26 / 1.15 | screen titles |
-| `--text-3xl` | 32 / 1.1 | assistant hero / empty state |
+| `--text-xl` | 18 / 1.3 | section titles |
+| `--text-2xl` | 20 / 1.2 | screen titles |
+| `--text-3xl` | 24 / 1.2 | assistant hero / empty state |
 
 Rules:
 
@@ -101,15 +101,17 @@ Rules:
 
 | Token | Value | Use |
 |---|---|---|
-| `--sidebar-w` | `248px` | desktop sidebar |
-| `--rail-w` | `320px` | assistant context rail |
+| `--sidebar-w` | `200px` | desktop sidebar |
+| `--rail-w` | `288px` | assistant context rail |
 | `--content-max` | `1440px` | workspace max width |
+| `--topbar-h` | `56px` | workspace column headers |
 | `--mobile-nav-h` | `64px` | bottom navigation |
 | `--composer-h` | `112px` | assistant composer area |
 
 Breakpoints:
 
 - `1280px`: full sidebar + context rail.
+- `1360px`, `1600px`, `1920px`, `2560px`: the assistant reading column (`--chat-measure`) grows from 776 px to 856, 920, 1000 and 1120 px (+10 % and up). A transcript capped at 776 px wastes most of a large display; the measure grows only above these widths, so smaller laptops, tablets and phones keep the comfortable column.
 - `1100px`: context rail moves below transcript.
 - `820px`: sidebar becomes bottom navigation; content uses full width.
 - `560px`: single-column controls, 16 px page padding, composer respects safe area.
@@ -122,11 +124,14 @@ Rules:
 
 ## Motion
 
-- `--ease-out: cubic-bezier(.16,1,.3,1)`.
+- `--ease-out: cubic-bezier(.16,1,.3,1)` for entrances; `--ease-in-out` for state loops.
 - `--duration-fast: 120ms`, `--duration-normal: 200ms`, `--duration-slow: 320ms`.
 - Animate opacity/transform only. Never animate height/width for large panels.
-- Message entry: 180 ms fade + 4 px rise. Pending card resolution: 160 ms fade.
-- `@media (prefers-reduced-motion: reduce)` removes non-essential transforms and shortens durations; do not globally set `0.01ms` because focus/state feedback still matters.
+- Interactive surfaces (buttons, chips, rows, nav items, inputs) transition `background-color`, `border-color`, `color`, `opacity` and `transform` at `--duration-fast`; focus and hover never snap.
+- Message entry: 180 ms fade + 4 px rise. Cards, action cards and tool activity: `card-in` (200 ms fade + 6 px rise). Pending card resolution: 160 ms fade.
+- Popovers and menus: `pop-in` (fade + 4 px rise + 0.98 scale) with `transform-origin` at the trigger edge.
+- Scrolling: programmatic “jump to latest” uses smooth scrolling; streaming auto-follow stays instant so tokens do not lag behind the viewport.
+- `@media (prefers-reduced-motion: reduce)` drops animation and transform transitions and keeps 60 ms color/opacity feedback; do not globally set `0.01ms` because focus/state feedback still matters.
 
 ## Components
 
@@ -148,6 +153,19 @@ Rules:
 - `--bg-raised`, `--border`, `--radius-md`, 36–44 px height.
 - Focus: `--accent` border + 2 px `--accent-surface` ring, never remove outline without replacement.
 - Error: danger border + message below, not color alone.
+- Native `<select>` renders its popup with the operating system palette; `:root` therefore sets `color-scheme: dark`. Prefer a token-styled listbox for pickers the user opens often.
+
+### Model picker (assistant header)
+
+- Compact trigger: 28 px height, `--bg-panel`, `--border`, truncated model name, chevron that rotates while open.
+- Popup: `--bg-raised`, `--border`, `--radius-md`, `--shadow-overlay`, `min(340px, 100vw - 32px)` wide, max 60 vh with its own scroll; `pop-in` entrance anchored top-right.
+- Options show the full model name with ellipsis and a check on the selected row; selected row uses `--accent-surface` and `--violet-bright`.
+- Keyboard: trigger opens with `ArrowUp`/`ArrowDown`, options support arrows/`Home`/`End`, `Escape` closes and returns focus to the trigger, click outside closes.
+
+### Listbox / popover (scrollable)
+
+- Use the app's own listbox instead of a native dropdown when the list is long, needs token colors, or carries state (badges, checks).
+- Always provide `role="listbox"`/`role="option"`, `aria-selected`, and a focus path that does not trap the keyboard.
 
 ### Panel / card
 

@@ -5,11 +5,24 @@
 Primary navigation:
 
 1. **Assistant** (`/`) — default workspace, conversation + context rail.
-2. **Today** (`/today`) — daily briefing: focus, timeline, overdue, insights.
-3. **Inbox** (`/inbox`) — processing queue for unprocessed captures.
+2. **Today** (`/today`) — daily briefing: focus, timeline, overdue, insights. Reached from the rail and the secondary links.
+3. **Inbox** (`/inbox`) — processing queue for unprocessed captures. Reached from the secondary links and mobile navigation.
 4. **Tasks** (`/tasks`) — full task list, filters, inline actions.
+5. **Calendar** (`/calendar`) — month grid plus the selected day's tasks. Reached from primary navigation.
 
-Future modules (calendar, notes, goals, documents) become assistant capabilities and views, not disconnected mini-apps. They use the same header rhythm, tokens, and assistant integration.
+Future modules (notes, goals, documents) become assistant capabilities and views, not disconnected mini-apps. They use the same header rhythm, tokens, and assistant integration.
+
+## App shell sidebar
+
+- Workspace row: “Рабочее пространство” and the collapse control.
+- Assistant identity: circular mark and “Ассистент” label.
+- Primary action: “+ Новый диалог” (accent surface, full width).
+- Primary navigation: Чат, Задачи, Календарь.
+- Recent dialogs from `GET /assistant/conversations`; selecting one loads it in the assistant.
+- Secondary links to Сегодня and Входящие stay available without adding more primary items.
+- Calendar route replaces the recent list with “Мои календари” and the assistant hint.
+- Profile card at the bottom; identity is a placeholder until the settings API exposes it.
+- Collapsed state: 64 px icon rail, labels and secondary sections hidden.
 
 ## Assistant workspace
 
@@ -17,17 +30,26 @@ Future modules (calendar, notes, goals, documents) become assistant capabilities
 
 The assistant is the landing screen. The user should not have to find it.
 
-- Header: “Ассистент”, short status, “Новый диалог”.
-- Context strip: current screen/selected object, today’s state, inbox count.
-- Transcript: turns, tool activity, rich result cards, pending actions.
-- Context rail: today stats, focus, insights, quick links.
-- Composer: always visible, multiline, context-aware.
+- Header: “Личный ассистент”, sync line, in-dialog search, and the conversation menu.
+- Context: the current screen is shown as a chip in the composer when the workspace was opened with `from`; there is no separate context strip.
+- Transcript: turns, rich result cards, pending actions.
+- Context rail: “Сегодня” progress and day plan, then the week’s open tasks with day links. Focus and insights live on Today, not in the rail.
+- Composer: always visible, multiline, context-aware; attach/voice affordances are present but disabled until the backend supports them.
+
+### Streaming and assistant controls
+
+- Answers stream token by token; a cursor shows generation, and `Остановить` cancels it while keeping the partial response.
+- Reasoning is a separate collapsible block (`Размышления`), open while streaming and collapsed in history.
+- Tool activity is shown as quiet rows (`Проверяю задачи…` → done), not as fake chat messages.
+- The model picker lists free tool-capable models from the configured provider and persists the choice.
+- Auto-confirm is an explicit setting with a warning. When off, mutations remain pending cards; when on, the tool row shows completion and the transcript records the result.
+- Copy is available per assistant answer; smart scrolling only follows the stream when the user is already near the bottom.
 
 ### Turn anatomy
 
 **User turn:** right-aligned, `--accent-surface`, role “Вы”, time. Keep it compact; the user’s words are not the main visual.
 
-**Assistant turn:** full-width body, small role row, prose max 68ch. Do not wrap every answer in a bubble.
+**Assistant turn:** full-width body, small role row, prose fills the transcript column (about 90ch at 13 px). Do not wrap every answer in a bubble.
 
 **Tool activity:** a single quiet row such as “Проверяю календарь…” with status icon. It can expand to arguments/result for debugging, but the default is human language.
 
@@ -74,6 +96,23 @@ Below: one line explaining that the assistant reads the system and asks before c
 - Submitting asks the assistant with `interaction.screen` set to the current route.
 - If already on the assistant route, it sends without navigation.
 - On mobile, the composer is fixed above the nav and respects `safe-area-inset-bottom`.
+
+## Document intake
+
+- The composer paperclip and image buttons upload a file and convert it to Markdown; the document is not interpreted for tasks at upload time.
+- After conversion the document is attached to the next message as a chip. Attachments are visible in the user turn and survive reloads.
+- The assistant receives document metadata and a `read_document` tool. It reads Markdown in chunks and decides which tasks to create during the conversation.
+- Auto-confirm applies to the resulting task mutations exactly like any other assistant action.
+- Conversion failure shows the actual reason and never claims tasks were found.
+- Supported files: DOCX, XLSX, XLS, PPTX, PDF (with `pdftotext`), text formats, and images via a free vision model. Legacy `.doc/.ppt` are rejected with a conversion hint.
+
+## Calendar
+
+- Header: month, month picker, previous/today/next, “Создать задачу”.
+- Month grid: Monday-first weeks, day numbers, task chips from task dates; selected day outlined in accent; legend for task/overdue/completed.
+- Day panel: selected date, open/completed counts, daily progress, grouped task rows with completion control, priority, and time; “Добавить задачу на этот день”.
+- Footer: assistant sync line and “показано N из M”.
+- Calendar events (meetings) require a dedicated events model; until it lands the grid renders tasks only.
 
 ## Today
 

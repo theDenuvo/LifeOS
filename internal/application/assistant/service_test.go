@@ -35,6 +35,7 @@ type fakeTools struct {
 	readOnly map[string]bool
 	executed []string
 	previews map[string]string
+	result   any
 }
 
 func (f *fakeTools) Specs() []assistant.ToolSpec {
@@ -45,6 +46,9 @@ func (f *fakeTools) IsReadOnly(name string) bool { return f.readOnly[name] }
 
 func (f *fakeTools) Execute(_ context.Context, name string, _ json.RawMessage) (any, error) {
 	f.executed = append(f.executed, name)
+	if f.result != nil {
+		return f.result, nil
+	}
 	return map[string]any{"ok": true, "tool": name}, nil
 }
 
@@ -306,5 +310,55 @@ func TestSendMessageRejectsEmptyContent(t *testing.T) {
 	service, _ := newService(t, &scriptedProvider{}, &fakeTools{})
 	if _, err := service.SendMessage(context.Background(), 0, "   "); !errors.Is(err, domainassistant.ErrInvalidContent) {
 		t.Errorf("error = %v, want ErrInvalidContent", err)
+	}
+}
+
+func TestReadToolAttachmentsPersistOnAssistantMessage(t *testing.T) {
+	provider := &scriptedProvider{responses: []assistant.Completion{
+		{ToolCalls: []assistant.ToolCall{{ID: "call-1", Name: "get_task", Arguments: json.RawMessage(`{"id":1}`)}}},
+		{Content: "Вот задача."},
+	}}
+	tools := &fakeTools{
+		readOnly: map[string]bool{"get_task": true},
+		result: map[string]any{
+			"id":       int64(1),
+			"title":    "Купить молоко",
+			"status":   "open",
+			"priority": "medium",
+			"version":  1,
+		},
+	}
+	service, _ := newService(t, provider, tools)
+
+	result, err := service.SendMessage(context.Background(), 0, "Покажи задачу 1")
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if len(result.Message.Attachments) != 1 {
+		t.Fatalf("expected one attachment, got %d", len(result.Message.Attachments))
+	}
+	attachment := result.Message.Attachments[0]
+	if attachment.Kind != domainassistant.AttachmentTask {
+		t.Errorf("expected task attachment, got %q", attachment.Kind)
+	}
+	if !strings.Contains(string(attachment.Data), "Купить молоко") {
+		t.Errorf("attachment data missing task: %s", attachment.Data)
+	}
+
+	view, err := service.GetConversation(context.Background(), result.ConversationID)
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	var persisted *domainassistant.Message
+	for _, message := range view.Messages {
+		if message.ID == result.Message.ID {
+			persisted = message
+		}
+	}
+	if persisted == nil {
+		t.Fatal("final assistant message not found")
+	}
+	if len(persisted.Attachments) != 1 || persisted.Attachments[0].Kind != domainassistant.AttachmentTask {
+		t.Fatalf("persisted attachments not loaded: %+v", persisted.Attachments)
 	}
 }

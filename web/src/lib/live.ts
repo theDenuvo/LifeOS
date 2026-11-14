@@ -5,6 +5,14 @@ import { writable } from 'svelte/store';
 // appears everywhere without polling.
 export const liveRevision = writable(0);
 
+// Bumped by the assistant workspace after a conversation is created or a
+// message is sent, so the shell can refresh the recent dialog list.
+export const conversationsRevision = writable(0);
+
+export function bumpConversations(): void {
+	conversationsRevision.update((value) => value + 1);
+}
+
 const eventTypes = [
 	'task.created',
 	'task.updated',
@@ -15,7 +23,13 @@ const eventTypes = [
 	'inbox.captured',
 	'inbox.converted',
 	'inbox.dismissed',
-	'insight.detected'
+	'insight.detected',
+	'event.created',
+	'event.updated',
+	'event.deleted',
+	'assistant.message',
+	'pending_action.created',
+	'pending_action.resolved'
 ];
 
 let started = false;

@@ -24,8 +24,12 @@ LIFEOS_LLM_PROVIDER=openrouter
 LIFEOS_LLM_BASE_URL=https://openrouter.ai/api/v1
 LIFEOS_LLM_API_KEY=sk-...
 LIFEOS_LLM_MODEL=openai/gpt-4o-mini
+LIFEOS_LLM_RETRY_ATTEMPTS=3
+LIFEOS_LLM_FALLBACK_MODELS=
 LIFEOS_MCP_ENABLED=false
 LIFEOS_MCP_PATH=/mcp
+LIFEOS_TOOLS_ROOT=
+LIFEOS_TOOLS_SHELL=true
 ```
 
 ### Запуск
@@ -163,6 +167,14 @@ curl -I http://127.0.0.1:8787/healthz # 200 OK, application/json
 
 ---
 
+### Документы
+
+- `LIFEOS_DOCUMENTS_DIR` — каталог исходных файлов (по умолчанию `<data>/documents`).
+- `LIFEOS_DOC_LLM_BASE_URL`, `LIFEOS_DOC_LLM_API_KEY`, `LIFEOS_DOC_LLM_MODEL` — модель извлечения задач. При отсутствии наследуются обычные LLM-настройки.
+- Документы конвертируются в Markdown при загрузке (DOCX, XLSX, XLS (BIFF), PPTX, PDF, текст). Для PDF нужен `pdftotext` из poppler; изображения распознаются vision-моделью. Задачи извлекаются ассистентом в диалоге через `read_document`, а не при загрузке.
+- Для OpenRouter используйте только бесплатные модели (`:free`), например `particle-ai/particle-1:free`.
+- Максимальный размер загрузки — 25 МиБ; файлы хранятся на диске, а не в SQLite.
+
 ## 5. Конфигурация через переменные окружения
 
 ### Полный список
@@ -176,9 +188,15 @@ curl -I http://127.0.0.1:8787/healthz # 200 OK, application/json
 | `LIFEOS_LLM_BASE_URL` | Нет* | `https://openrouter.ai/api/v1` | Base URL для LLM |
 | `LIFEOS_LLM_API_KEY` | Нет* | — | API ключ (обязателен для OpenRouter) |
 | `LIFEOS_LLM_MODEL` | Нет | `openai/gpt-4o-mini` | Модель по умолчанию |
+| `LIFEOS_LLM_RETRY_ATTEMPTS` | Нет | `3` | Попыток на модель перед фоллбеком |
+| `LIFEOS_LLM_RETRY_DELAY_MS` | Нет | `400` | Базовая задержка ретрая (удваивается) |
+| `LIFEOS_LLM_FALLBACK_MODELS` | Нет | — | Список моделей через запятую для фоллбека |
+| `LIFEOS_ASSISTANT_MAX_ROUNDS` | Нет | `12` | Раундов инструментов на один ход (массовые импорты) |
 | `LIFEOS_MCP_ENABLED` | Нет | `false` | Включить MCP endpoint |
 | `LIFEOS_MCP_PATH` | Нет | `/mcp` | Путь для MCP Streamable HTTP |
 | `LIFEOS_MCP_ALLOW_WRITES` | Нет | `false` | Разрешить мутирующие MCP-инструменты |
+| `LIFEOS_TOOLS_ROOT` | Нет | — (вся машина) | Ограничить файловые инструменты каталогом |
+| `LIFEOS_TOOLS_SHELL` | Нет | `true` | Разрешить инструмент `run_command` |
 
 * — обязательны если соответствующий провайдер включен
 

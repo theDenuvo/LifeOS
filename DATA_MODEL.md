@@ -279,6 +279,63 @@
 
 ---
 
+### 8. CalendarEvent (Событие календаря)
+
+| Поле | Тип | Правила |
+|---|---|---|
+| `id` | int64 | PK |
+| `title` | string | 1–200 символов |
+| `description` | string? | ≤ 2000 |
+| `location` | string? | ≤ 200 |
+| `calendar` | string | `work`, `meetings`, `personal` |
+| `starts_at` | timestamp | UTC |
+| `ends_at` | timestamp | UTC, строго позже `starts_at`, ≤ 31 дня |
+| `all_day` | bool | событие на весь день |
+| `timezone` | string | IANA, для отображения |
+| `created_at`, `updated_at` | timestamp | UTC |
+| `version` | int | optimistic locking |
+
+Таблица `calendar_events`. Задачи в календарь не копируются: read-model объединяет события и задачи.
+
+### Вложения сообщений
+
+`messages.attachments` — JSON-массив `{kind, data}` (`task`, `task_list`, `event`, `event_list`). Заполняется из read-инструментов ассистента. Старые сообщения имеют `NULL`.
+
+### Профиль
+
+Хранится в `app_settings` под ключами `profile.name` и `profile.role`; инициалы выводятся из имени. Отдельной таблицы нет — приложение однопользовательское.
+
+### 9. Document (Документ)
+
+| Поле | Тип | Правила |
+|---|---|---|
+| `id` | int64 | PK |
+| `filename` | string | исходное имя |
+| `mime` | string | MIME |
+| `size` | int64 | размер, ≤ 25 МиБ |
+| `sha256` | string | хеш содержимого |
+| `path` | string | файл в `LIFEOS_DOCUMENTS_DIR` |
+| `status` | string | `pending`, `processing`, `processed`, `failed` |
+| `error` | string? | причина ошибки |
+| `extracted_text` | text? | извлечённый текст |
+| `created_at`, `updated_at` | timestamp | UTC |
+
+### 10. DocumentProposedTask (Предложенная задача)
+
+| Поле | Тип | Правила |
+|---|---|---|
+| `id` | int64 | PK |
+| `document_id` | int64 | FK → documents, cascade |
+| `title`, `note` | string | как у задачи |
+| `due_date` | date? | опционально |
+| `priority` | string | low/medium/high |
+| `confidence` | float | 0–1 |
+| `source` | string? | цитата из документа |
+| `status` | string | `proposed`, `accepted`, `dismissed` |
+| `task_id` | int64? | FK → tasks после принятия |
+
+Таблицы `documents`, `document_tasks` (миграция 014). Исходные файлы хранятся вне БД; удаление документа удаляет файл и предложения, но не созданные задачи.
+
 ## Работа с датами и часовыми поясами
 
 ### Правила (критично)

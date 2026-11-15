@@ -308,6 +308,22 @@ func (r *taskEventRepository) Insert(ctx context.Context, e *task.TaskEvent) err
 	return nil
 }
 
+// HasType reports whether the task ever recorded an event of this type.
+func (r *taskEventRepository) HasType(ctx context.Context, taskID int64, eventType task.EventType) (bool, error) {
+	var found int
+	err := r.tx.QueryRowContext(ctx, `
+		SELECT 1 FROM task_events WHERE task_id = ? AND type = ? LIMIT 1`,
+		taskID, string(eventType),
+	).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read task event type: %w", err)
+	}
+	return true, nil
+}
+
 // buildTaskWhere renders the SQL predicate for a filter.
 func buildTaskWhere(filter tasks.TaskFilter) (string, []any) {
 	var clauses []string

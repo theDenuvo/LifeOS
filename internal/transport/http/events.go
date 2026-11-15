@@ -51,13 +51,32 @@ func (h *Handler) streamEvents(w http.ResponseWriter, r *http.Request) {
 
 	if raw := strings.TrimSpace(r.Header.Get("Last-Event-ID")); raw != "" {
 		if parsed, err := strconv.ParseUint(raw, 10, 64); err == nil {
-			for _, event := range broker.Replay(parsed) {
-				if err := writeSSE(w, event); err != nil {
+			// The reconnect path has the same limit as the live one: after a long
+			// enough absence the ring no longer starts where the client stopped,
+			// and replaying whatever survived would hand the client a history
+			// with a silent hole. Say so and let it re-read its state.
+			replayed := broker.Replay(parsed)
+			if !closesGap(replayed, parsed) {
+				if err := writeResync(w, parsed, oldestID(replayed, parsed), len(replayed)); err != nil {
 					return
 				}
-				lastSent = event.ID
+				// Continue from the newest buffered event so the live loop does
+				// not report the same gap on every subsequent event.
+				if len(replayed) > 0 {
+					lastSent = replayed[len(replayed)-1].ID
+				} else {
+					lastSent = parsed
+				}
+				flusher.Flush()
+			} else {
+				for _, event := range replayed {
+					if err := writeSSE(w, event); err != nil {
+						return
+					}
+					lastSent = event.ID
+				}
+				flusher.Flush()
 			}
-			flusher.Flush()
 		}
 	}
 
@@ -121,6 +140,19 @@ func (h *Handler) streamEvents(w http.ResponseWriter, r *http.Request) {
 // resyncType is a client signal, not a domain event to store: it says that the
 // stream could not be repaired and the client must re-read the current state.
 const resyncType = "resync"
+
+// oldestID returns the newest id that is known to be unrecoverable: everything
+// between it and the first buffered event is gone. Without a buffer, the gap
+// ends where the client stopped.
+func oldestID(replayed []events.Event, parsed uint64) uint64 {
+	if len(replayed) == 0 {
+		return parsed
+	}
+	if replayed[0].ID == 0 {
+		return parsed
+	}
+	return replayed[0].ID - 1
+}
 
 // closesGap reports whether the buffered events can cover a gap that starts
 // right after lastSent.

@@ -355,8 +355,10 @@ func main() {
 	// it restores entries whose write failed, and it repairs journals after an
 	// interrupted run.
 	taskService.SetCompletionHook(func(ctx context.Context, completed tasks.TaskWithVersion) error {
-		goalsService.OnTaskCompleted(ctx, completed.Task.ID)
-		return nil
+		// The error is returned, not swallowed: the task service logs it, and a
+		// failed write stays recoverable because the completion itself is
+		// durable in the task history.
+		return goalsService.OnTaskCompleted(ctx, completed.Task.ID)
 	})
 	go goals.NewReconciler(goalsService, goals.DefaultReconcileInterval).Run(ctx)
 

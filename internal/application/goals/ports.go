@@ -114,6 +114,10 @@ type TaskView struct {
 // TaskProvider fetches linked tasks for progress and stall detection.
 type TaskProvider interface {
 	GetTask(ctx context.Context, id int64) (TaskView, error)
+	// HasCompletionEvent reports whether the task engine durably recorded that
+	// the task was completed, even if it was reopened afterwards. The progress
+	// journal is rebuilt from this fact, not only from the current status.
+	HasCompletionEvent(ctx context.Context, taskID int64) (bool, error)
 }
 
 // Repository is the persistence boundary of the goal aggregate.

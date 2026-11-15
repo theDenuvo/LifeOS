@@ -120,6 +120,13 @@ const eventTypes = [
 	'memory.deleted',
 	'memory.conflict.detected',
 	'memory.conflict.resolved',
+	// Sources and links change what an entry shows even though the entry
+	// itself is not edited, so they need the same refresh.
+	'memory.source.added',
+	'memory.linked',
+	'memory.unlinked',
+	// Captures can be edited without being created, converted or dismissed.
+	'inbox.updated',
 	// The server sends resync when a burst outran the replay buffer: some events
 	// are gone, so every page must re-read its state instead of trusting the
 	// stream to be complete.

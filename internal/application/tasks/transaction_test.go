@@ -25,6 +25,13 @@ func (r *erroringEventRepo) Insert(ctx context.Context, e *task.TaskEvent) error
 	return r.inner.Insert(ctx, e)
 }
 
+func (r *erroringEventRepo) HasType(ctx context.Context, taskID int64, eventType task.EventType) (bool, error) {
+	if r.err != nil {
+		return false, r.err
+	}
+	return r.inner.HasType(ctx, taskID, eventType)
+}
+
 // erroringUnitOfWork wraps a fake and injects a failing event repository.
 type erroringUnitOfWork struct {
 	inner    *FakeUnitOfWork

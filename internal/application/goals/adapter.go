@@ -30,4 +30,9 @@ func (a TaskEngineAdapter) GetTask(ctx context.Context, id int64) (TaskView, err
 	}, nil
 }
 
+// HasCompletionEvent exposes the durable completion fact of the task engine.
+func (a TaskEngineAdapter) HasCompletionEvent(ctx context.Context, id int64) (bool, error) {
+	return a.Service.HasCompletionEvent(ctx, id)
+}
+
 var _ TaskProvider = TaskEngineAdapter{}

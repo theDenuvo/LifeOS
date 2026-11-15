@@ -771,76 +771,127 @@ func (s *Service) record(ctx context.Context, tx Transaction, goalID int64, kind
 }
 
 // OnTaskCompleted records factual progress for every goal the task is linked
-// to. It is called from the event pump, so a failure here must never fail the
-// task completion that caused it — but the failure is logged and the catch-up
-// reconciliation will retry it, because progress must survive a missed event.
-func (s *Service) OnTaskCompleted(ctx context.Context, taskID int64) {
+// to and reports whether the journal now holds the entry.
+//
+// It is called synchronously after the completion commits, so the caller learns
+// about a failure instead of assuming success. An error never undoes the
+// completion; it means the journal still depends on reconciliation, which can
+// rebuild the entry because the completion itself is durable in the task
+// history.
+func (s *Service) OnTaskCompleted(ctx context.Context, taskID int64) error {
 	// Resolve the task title before opening the transaction: the task engine
 	// reads through the same single-connection pool.
-	summary := s.taskSummary(ctx, taskID, "completed")
+	summary, err := s.taskSummary(ctx, taskID)
+	if err != nil {
+		return err
+	}
 	var recorded int
-	err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
+	err = s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
 		links, err := tx.Goals().ListLinksByTarget(ctx, domaingoal.TargetTask, taskID)
 		if err != nil {
 			return err
 		}
+		if len(links) == 0 {
+			return nil
+		}
 		now := s.clock.Now().UTC()
 		for _, link := range links {
-			recorded += s.recordTaskProgress(ctx, tx, link.GoalID, taskID, summary, now)
+			added, err := s.recordTaskProgress(ctx, tx, link.GoalID, taskID, summary, now)
+			if err != nil {
+				return err
+			}
+			recorded += added
 		}
 		return nil
 	})
 	if err != nil {
-		slog.Warn("goal progress for a completed task failed; the catch-up reconciliation will retry",
-			"task_id", taskID, "error", err)
-		return
+		return fmt.Errorf("record goal progress for task %d: %w", taskID, err)
 	}
 	if recorded > 0 {
 		slog.Debug("goal progress recorded", "task_id", taskID, "goals", recorded)
 	}
+	return nil
 }
 
 // recordTaskProgress appends one task_done journal entry unless the same
 // completion is already recorded. It returns 1 when a row was written, so the
-// caller knows whether the goal changed.
-func (s *Service) recordTaskProgress(ctx context.Context, tx Transaction, goalID, taskID int64, summary string, now time.Time) int {
+// caller knows whether the goal changed, and an error when the journal could
+// not be checked or written — silence would hide a progress write that never
+// happened.
+func (s *Service) recordTaskProgress(ctx context.Context, tx Transaction, goalID, taskID int64, summary string, now time.Time) (int, error) {
 	repo := tx.Goals()
 	exists, err := repo.HasProgressSource(ctx, goalID, domaingoal.ProgressTaskDone, domaingoal.TargetTask, taskID)
 	if err != nil {
-		slog.Warn("check goal progress source failed", "goal_id", goalID, "task_id", taskID, "error", err)
-		return 0
+		return 0, fmt.Errorf("check goal progress source for goal %d: %w", goalID, err)
 	}
 	if exists {
-		return 0
+		return 0, nil
 	}
 	sourceType := domaingoal.TargetTask
 	sourceID := taskID
 	if err := s.record(ctx, tx, goalID, domaingoal.ProgressTaskDone, summary, &sourceType, &sourceID, now); err != nil {
-		slog.Warn("record goal progress failed", "goal_id", goalID, "task_id", taskID, "error", err)
-		return 0
+		return 0, fmt.Errorf("record goal progress for goal %d: %w", goalID, err)
 	}
-	return 1
+	return 1, nil
 }
 
 // taskSummary describes a linked task in the journal, falling back to a
 // generic sentence when the task cannot be read.
-func (s *Service) taskSummary(ctx context.Context, taskID int64, _ string) string {
-	if s.tasks != nil {
-		if task, err := s.tasks.GetTask(ctx, taskID); err == nil && strings.TrimSpace(task.Title) != "" {
-			return fmt.Sprintf("Задача «%s» выполнена", task.Title)
-		}
+func (s *Service) taskSummary(ctx context.Context, taskID int64) (string, error) {
+	if s.tasks == nil {
+		return fmt.Sprintf("Связанная задача #%d выполнена", taskID), nil
+	}
+	task, err := s.tasks.GetTask(ctx, taskID)
+	if err != nil {
+		return "", err
+	}
+	return taskDoneSummary(taskID, task.Title), nil
+}
+
+// taskDoneSummary renders the journal line for one completed task.
+func taskDoneSummary(taskID int64, title string) string {
+	if title = strings.TrimSpace(title); title != "" {
+		return fmt.Sprintf("Задача «%s» выполнена", title)
 	}
 	return fmt.Sprintf("Связанная задача #%d выполнена", taskID)
+}
+
+// completedTaskSummary answers "was this task ever completed" from both the
+// current record and the durable task history.
+//
+// The current status alone is not enough: a completion whose journal write
+// failed and whose task was reopened before the next reconciliation looks open.
+// The audit log still holds the completed event, because it was written in the
+// same transaction as the completion, so the journal entry can be rebuilt.
+func (s *Service) completedTaskSummary(ctx context.Context, taskID int64) (string, bool, error) {
+	title := ""
+	view, viewErr := s.tasks.GetTask(ctx, taskID)
+	if viewErr == nil {
+		if view.Status == "completed" {
+			return taskDoneSummary(taskID, view.Title), true, nil
+		}
+		title = view.Title
+	}
+	recorded, err := s.tasks.HasCompletionEvent(ctx, taskID)
+	if err != nil {
+		return "", false, err
+	}
+	if !recorded {
+		// An unreadable task that was never completed is a read failure worth
+		// reporting; a readable open task is simply not progress.
+		return "", false, viewErr
+	}
+	return taskDoneSummary(taskID, title), true, nil
 }
 
 // ReconcileTaskProgress is the catch-up path behind the synchronous completion
 // observer. It repairs journals whose write failed, and it rebuilds a journal
 // after an interrupted run.
 //
-// Its scope is deliberate and worth stating plainly: it observes the current
-// task state. A completion whose event was lost *and* whose task was reopened
-// before the next pass looks like an open task and is not restored. That is why
-// the primary path is the synchronous hook, not this reconciliation.
+// A completion is a durable fact: the task history records it in the same
+// transaction as the completion itself. This pass therefore treats "a completed
+// event exists" as completed, not only the current status, so an entry whose
+// write failed is still rebuilt after the task was reopened.
 //
 // Recording is idempotent, so a scheduled pass over consistent data writes
 // nothing. It returns how many entries it added.
@@ -859,30 +910,26 @@ func (s *Service) ReconcileTaskProgress(ctx context.Context) (int, error) {
 		return 0, err
 	}
 
-	// Group completed tasks by id so the task engine is asked once per task.
+	// Resolve each linked task once: one task can belong to several goals.
 	completed := make(map[int64]string)
 	failed := 0
+	checked := make(map[int64]bool)
 	for _, link := range links {
-		if _, seen := completed[link.TargetID]; seen {
+		if checked[link.TargetID] {
 			continue
 		}
-		task, err := s.tasks.GetTask(ctx, link.TargetID)
+		checked[link.TargetID] = true
+		summary, done, err := s.completedTaskSummary(ctx, link.TargetID)
 		if err != nil {
-			// A read failure is not "the task is open": without the record the
+			// A read failure is not "the task is open": without the records the
 			// journal cannot be checked, so say so instead of skipping silently.
 			failed++
 			slog.Warn("goal progress reconciliation could not read a linked task",
 				"task_id", link.TargetID, "goal_id", link.GoalID, "error", err)
 			continue
 		}
-		if task.Status != "completed" {
-			continue
-		}
-		title := strings.TrimSpace(task.Title)
-		if title == "" {
-			completed[link.TargetID] = fmt.Sprintf("Связанная задача #%d выполнена", link.TargetID)
-		} else {
-			completed[link.TargetID] = fmt.Sprintf("Задача «%s» выполнена", title)
+		if done {
+			completed[link.TargetID] = summary
 		}
 	}
 	if len(completed) == 0 {
@@ -900,7 +947,11 @@ func (s *Service) ReconcileTaskProgress(ctx context.Context) (int, error) {
 			if !ok {
 				continue
 			}
-			added += s.recordTaskProgress(ctx, tx, link.GoalID, link.TargetID, summary, now)
+			count, err := s.recordTaskProgress(ctx, tx, link.GoalID, link.TargetID, summary, now)
+			if err != nil {
+				return err
+			}
+			added += count
 		}
 		return nil
 	})

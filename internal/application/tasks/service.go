@@ -215,6 +215,26 @@ func (s *Service) CreateTask(ctx context.Context, in CreateTaskInput, actor task
 }
 
 // GetTask returns a task and its version. Reads never bump the version.
+// HasCompletionEvent reports whether the task engine durably recorded a
+// completion, even if the task has been reopened since.
+//
+// The audit log is written in the same transaction as the completion, so this
+// answers "was this ever completed" from a fact that a later restore cannot
+// change. It exists so goal progress can be rebuilt from history instead of
+// trusting the mutable task status.
+func (s *Service) HasCompletionEvent(ctx context.Context, id int64) (bool, error) {
+	var found bool
+	err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
+		var err error
+		found, err = tx.Events().HasType(ctx, id, task.EventTypeCompleted)
+		return err
+	})
+	if err != nil {
+		return false, err
+	}
+	return found, nil
+}
+
 func (s *Service) GetTask(ctx context.Context, id int64) (TaskWithVersion, error) {
 	var result TaskWithVersion
 

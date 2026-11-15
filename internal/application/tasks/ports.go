@@ -76,6 +76,10 @@ type TaskRepository interface {
 type TaskEventRepository interface {
 	// Insert appends an event to the history.
 	Insert(ctx context.Context, e *task.TaskEvent) error
+	// HasType reports whether a task ever recorded an event of this type. It is
+	// a narrow read for facts that outlive the mutable task row: a completion
+	// stays a completion even after the task is reopened.
+	HasType(ctx context.Context, taskID int64, eventType task.EventType) (bool, error)
 }
 
 // UnitOfWork defines a transaction boundary.

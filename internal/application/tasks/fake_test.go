@@ -360,6 +360,18 @@ func (r *fakeEventRepo) Insert(ctx context.Context, e *task.TaskEvent) error {
 	return nil
 }
 
+func (r *fakeEventRepo) HasType(ctx context.Context, taskID int64, eventType task.EventType) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	for _, event := range r.tx.events {
+		if event.TaskID == taskID && event.Type == eventType {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // matchesFilter implements the filter semantics the application promises.
 func matchesFilter(t *task.Task, filter TaskFilter) bool {
 	if len(filter.Statuses) > 0 {

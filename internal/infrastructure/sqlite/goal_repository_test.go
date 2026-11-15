@@ -183,3 +183,91 @@ func TestCompletionHookWritesGoalProgressSynchronously(t *testing.T) {
 		t.Fatalf("reconcile after restore added %d entries (err=%v), want 0", added, err)
 	}
 }
+
+// TestReconcileRestoresProgressFromDurableCompletion covers the residual gap the
+// review named: if the synchronous journal write fails and the task is reopened
+// before the next pass, reconciliation can still rebuild the entry, because the
+// completion is durable in the task history even though the task status no
+// longer says "completed".
+func TestReconcileRestoresProgressFromDurableCompletion(t *testing.T) {
+	db := setupProductionDB(t)
+	defer db.Close()
+
+	clock := tasks.SystemClock()
+	broker := events.NewBroker()
+	taskService := tasks.NewService(NewTaskUnitOfWork(db), clock, tasks.WithPublisher(broker))
+	goalService := appgoals.NewService(
+		NewGoalUnitOfWork(db),
+		clock,
+		appgoals.WithTaskProvider(appgoals.TaskEngineAdapter{Service: taskService}),
+		appgoals.WithPublisher(broker),
+	)
+	taskService.SetCompletionHook(func(ctx context.Context, completed tasks.TaskWithVersion) error {
+		return goalService.OnTaskCompleted(ctx, completed.Task.ID)
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	created, err := taskService.CreateTask(ctx, tasks.CreateTaskInput{Title: "Проверить смету"}, "user")
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	goal, err := goalService.Create(ctx, appgoals.CreateInput{Title: "Запуск проекта"})
+	if err != nil {
+		t.Fatalf("create goal: %v", err)
+	}
+	if _, err := goalService.AddLink(ctx, goal.Goal.ID, appgoals.LinkInput{
+		TargetType: domaingoal.TargetTask, TargetID: created.Task.ID, Relation: "смета",
+	}); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+
+	completed, err := taskService.CompleteTask(ctx, created.Task.ID, created.Version, "user")
+	if err != nil {
+		t.Fatalf("complete task: %v", err)
+	}
+	// Simulate the failed write the review describes: the completion committed,
+	// the journal entry did not land.
+	if _, err := db.ExecContext(ctx, `DELETE FROM goal_progress WHERE goal_id = ? AND kind = 'task_done'`, goal.Goal.ID); err != nil {
+		t.Fatalf("simulate failed journal write: %v", err)
+	}
+	// The task is then reopened before any reconciliation runs, so the current
+	// status no longer proves the completion.
+	if _, err := taskService.RestoreTask(ctx, created.Task.ID, completed.Version, "user"); err != nil {
+		t.Fatalf("restore task: %v", err)
+	}
+
+	view, err := goalService.Get(ctx, goal.Goal.ID)
+	if err != nil {
+		t.Fatalf("get goal: %v", err)
+	}
+	if view.Review.Progress.LinkedTasksDone != 0 {
+		t.Fatalf("task should be open again, got %d done", view.Review.Progress.LinkedTasksDone)
+	}
+
+	added, err := goalService.ReconcileTaskProgress(ctx)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if added != 1 {
+		t.Fatalf("reconcile added %d entries, want 1 from the durable completion", added)
+	}
+	restored, err := goalService.Get(ctx, goal.Goal.ID)
+	if err != nil {
+		t.Fatalf("get goal after reconcile: %v", err)
+	}
+	found := false
+	for _, entry := range restored.ProgressLog {
+		if entry.Kind == domaingoal.ProgressTaskDone {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("journal still has no task_done entry: %+v", restored.ProgressLog)
+	}
+	// Reconciliation stays idempotent: a second pass writes nothing.
+	if again, err := goalService.ReconcileTaskProgress(ctx); err != nil || again != 0 {
+		t.Fatalf("second reconcile added %d (err=%v), want 0", again, err)
+	}
+}

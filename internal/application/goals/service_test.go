@@ -34,6 +34,13 @@ func (t fakeTasks) GetTask(_ context.Context, id int64) (appgoals.TaskView, erro
 	return view, nil
 }
 
+// HasCompletionEvent is false here on purpose: the fake table describes the
+// current state only, and the durable-history recovery is covered against a
+// real SQLite database where an audit log exists.
+func (t fakeTasks) HasCompletionEvent(_ context.Context, _ int64) (bool, error) {
+	return false, nil
+}
+
 // fakeRepo mirrors the SQLite semantics the goal service depends on:
 // versioned goal writes, ordered milestones, target existence checks.
 type fakeRepo struct {
@@ -864,5 +871,20 @@ func TestReconcileTaskProgressIsIdempotent(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("task_done entries = %d, want exactly 1", count)
+	}
+}
+
+// TestOnTaskCompletedReportsFailures pins the contract the review asked for:
+// a journal write that did not happen must reach the caller instead of being
+// logged and reported as success.
+func TestOnTaskCompletedReportsFailures(t *testing.T) {
+	service, _, _, _ := newService(t)
+	// The task cannot be read, so the journal cannot be written at all.
+	if err := service.OnTaskCompleted(context.Background(), 999); err == nil {
+		t.Fatal("OnTaskCompleted returned nil although the progress was not recorded")
+	}
+	// A task nobody linked to is a successful no-op, not a failure.
+	if err := service.OnTaskCompleted(context.Background(), 1); err != nil {
+		t.Fatalf("OnTaskCompleted on an unlinked task: %v", err)
 	}
 }

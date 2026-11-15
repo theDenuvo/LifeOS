@@ -187,11 +187,16 @@ func TestClosesGapDistinguishesRecoverableFromLost(t *testing.T) {
 // decides to re-read its state.
 func TestWriteResyncReportsTheRange(t *testing.T) {
 	recorder := httptest.NewRecorder()
-	if err := writeResync(recorder, 10, 400, 256); err != nil {
+	if err := writeResync(recorder, 10, 10, 400, 256); err != nil {
 		t.Fatalf("writeResync: %v", err)
 	}
 	body := recorder.Body.String()
-	if !strings.HasPrefix(body, "event: resync") {
+	// The frame must advance the browser cursor, otherwise a reconnect reports
+	// the same gap again and the client stays behind forever.
+	if !strings.HasPrefix(body, "id: 10\n") {
+		t.Fatalf("resync does not advance the EventSource cursor: %q", body)
+	}
+	if !strings.Contains(body, "event: resync") {
 		t.Fatalf("resync event type missing: %q", body)
 	}
 	if !strings.Contains(body, "\"reason\":\"gap\"") || !strings.Contains(body, "\"until\":400") {

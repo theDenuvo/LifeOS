@@ -43,10 +43,24 @@ func NewBroker() *Broker {
 
 // NewBrokerWithReplay builds a broker with a custom replay buffer size.
 func NewBrokerWithReplay(size int) *Broker {
+	return NewBrokerAt(1, size)
+}
+
+// NewBrokerAt builds a broker whose first published event gets exactly start.
+//
+// A process may live for a while, so its ids have to be unique beyond its own
+// lifetime: a browser reconnecting after a restart sends the last id it saw, and
+// ids that begin again at one would all look older than that position. The
+// caller passes the first id of a durably reserved range.
+func NewBrokerAt(start uint64, size int) *Broker {
 	if size < 1 {
 		size = 1
 	}
+	if start == 0 {
+		start = 1
+	}
 	return &Broker{
+		nextID:   start - 1,
 		ring:     make([]Event, 0, size),
 		ringSize: size,
 		subs:     make(map[int]chan Event),

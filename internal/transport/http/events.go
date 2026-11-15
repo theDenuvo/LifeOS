@@ -51,31 +51,9 @@ func (h *Handler) streamEvents(w http.ResponseWriter, r *http.Request) {
 
 	if raw := strings.TrimSpace(r.Header.Get("Last-Event-ID")); raw != "" {
 		if parsed, err := strconv.ParseUint(raw, 10, 64); err == nil {
-			// The reconnect path has the same limit as the live one: after a long
-			// enough absence the ring no longer starts where the client stopped,
-			// and replaying whatever survived would hand the client a history
-			// with a silent hole. Say so and let it re-read its state.
-			replayed := broker.Replay(parsed)
-			if !closesGap(replayed, parsed) {
-				if err := writeResync(w, parsed, oldestID(replayed, parsed), len(replayed)); err != nil {
-					return
-				}
-				// Continue from the newest buffered event so the live loop does
-				// not report the same gap on every subsequent event.
-				if len(replayed) > 0 {
-					lastSent = replayed[len(replayed)-1].ID
-				} else {
-					lastSent = parsed
-				}
-				flusher.Flush()
-			} else {
-				for _, event := range replayed {
-					if err := writeSSE(w, event); err != nil {
-						return
-					}
-					lastSent = event.ID
-				}
-				flusher.Flush()
+			lastSent, err = catchUp(w, broker, flusher, parsed)
+			if err != nil {
+				return
 			}
 		}
 	}
@@ -91,37 +69,19 @@ func (h *Handler) streamEvents(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
+			// A subscriber channel is deliberately non-blocking, so a burst can
+			// drop an event. When the next delivered event skips an id, catch up
+			// from the ring before continuing.
+			if lastSent > 0 && event.ID > lastSent+1 {
+				caughtUp, err := catchUp(w, broker, flusher, lastSent)
+				if err != nil {
+					return
+				}
+				lastSent = caughtUp
+			}
+			// catchUp already sent this event from the buffer when it could.
 			if event.ID <= lastSent {
 				continue
-			}
-			// A subscriber channel is deliberately non-blocking, so a burst can
-			// drop an event. The replay buffer usually still holds it: when the
-			// next delivered event skips an id, send the missing ones from the
-			// ring instead of letting a gap reach the browser.
-			if lastSent > 0 && event.ID > lastSent+1 {
-				from := lastSent
-				replayed := broker.Replay(lastSent)
-				// The ring is bounded, so a long enough gap can outrun it. When
-				// the oldest buffered event is already past the gap, some events
-				// are genuinely gone and replaying the rest would leave the
-				// client silently inconsistent. Tell it to re-read its state
-				// instead of pretending the stream is complete.
-				if closesGap(replayed, lastSent) {
-					for _, missed := range replayed {
-						if missed.ID >= event.ID {
-							break
-						}
-						if err := writeSSE(w, missed); err != nil {
-							return
-						}
-						lastSent = missed.ID
-					}
-				} else {
-					if err := writeResync(w, from, event.ID, len(replayed)); err != nil {
-						return
-					}
-					lastSent = event.ID - 1
-				}
 			}
 			if err := writeSSE(w, event); err != nil {
 				return
@@ -141,17 +101,56 @@ func (h *Handler) streamEvents(w http.ResponseWriter, r *http.Request) {
 // stream could not be repaired and the client must re-read the current state.
 const resyncType = "resync"
 
-// oldestID returns the newest id that is known to be unrecoverable: everything
-// between it and the first buffered event is gone. Without a buffer, the gap
-// ends where the client stopped.
-func oldestID(replayed []events.Event, parsed uint64) uint64 {
-	if len(replayed) == 0 {
-		return parsed
+// catchUp sends everything the client is missing after its position and returns
+// the newest id it now has.
+//
+// The ring covers short absences. When it cannot, the client gets a resync frame
+// that both says "re-read your state" and advances the EventSource cursor, so a
+// second reconnect does not report the same gap again. An empty replay is not a
+// gap by itself: it also means the client is already at the head, or that a
+// restarted process has published nothing yet.
+func catchUp(w http.ResponseWriter, broker *events.Broker, flusher http.Flusher, after uint64) (uint64, error) {
+	// Every branch below writes something the client must see immediately: a
+	// resync that sits in the buffer until the next heartbeat would leave the
+	// interface stale for seconds.
+	defer flusher.Flush()
+
+	lastID := broker.LastID()
+	replayed := broker.Replay(after)
+
+	switch {
+	case after == 0:
+		// The client says it has nothing, so the buffer is a bonus, not a gap.
+	case len(replayed) == 0 && after == lastID:
+		// The client is exactly at the head: it missed nothing.
+		return after, nil
+	case len(replayed) == 0:
+		// Either the client is behind the head with an empty buffer, or it is
+		// ahead of it. Both need a resync; the second only happens when the
+		// durable id range was lost with the database, and rebasing the cursor
+		// is what stops every new event from looking older than the client.
+		if err := writeResync(w, lastID, after, lastID, 0); err != nil {
+			return after, err
+		}
+		return lastID, nil
+	case !closesGap(replayed, after):
+		// The oldest buffered event is already past the client's position, so
+		// replay cannot start where it stopped. Announce what is lost, then send
+		// what survived.
+		oldest := replayed[0].ID
+		if err := writeResync(w, oldest-1, after, oldest-1, len(replayed)); err != nil {
+			return after, err
+		}
 	}
-	if replayed[0].ID == 0 {
-		return parsed
+
+	sent := after
+	for _, event := range replayed {
+		if err := writeSSE(w, event); err != nil {
+			return sent, err
+		}
+		sent = event.ID
 	}
-	return replayed[0].ID - 1
+	return sent, nil
 }
 
 // closesGap reports whether the buffered events can cover a gap that starts
@@ -167,15 +166,19 @@ func closesGap(replayed []events.Event, lastSent uint64) bool {
 	return replayed[0].ID <= lastSent+1
 }
 
-// writeResync tells the client that events between from and to are no longer
+// writeResync tells the client that events after `after` up to `until` are not
 // recoverable, so pages reload instead of rendering a state built on a stream
 // with a silent hole.
-func writeResync(w http.ResponseWriter, from, to uint64, recovered int) error {
+//
+// The frame carries an id on purpose: it advances the browser's Last-Event-ID to
+// cursor, so reconnecting after a resync asks for the right range instead of
+// reporting the same gap forever.
+func writeResync(w http.ResponseWriter, cursor, after, until uint64, recovered int) error {
 	payload, _ := json.Marshal(map[string]any{
-		"reason": "gap", "missed_after": from, "until": to, "recovered": recovered,
+		"reason": "gap", "missed_after": after, "until": until, "recovered": recovered,
 	})
-	slog.Warn("events stream gap exceeded the replay buffer", "after", from, "until", to, "recovered", recovered)
-	_, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", resyncType, payload)
+	slog.Warn("events stream gap exceeded the replay buffer", "after", after, "until", until, "recovered", recovered)
+	_, err := fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", cursor, resyncType, payload)
 	return err
 }
 

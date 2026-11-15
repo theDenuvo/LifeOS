@@ -637,6 +637,15 @@ Goal 1 ──< GoalProposal
 | 018 | Память и база знаний: `memory_entries`, `memory_sources`, `memory_links`, `memory_conflicts`, `memory_fts` с триггерами |
 | 019 | Рабочие пространства: `conversations.kind`, `purpose`, `source_conversation_id`, индекс `idx_conversations_kind` |
 | 020 | Долгосрочные цели: `goals`, `goal_milestones`, `goal_links`, `goal_progress`, `goal_proposals` с CHECK-ограничениями статусов и каскадным удалением |
+| 021 | `event_sequence`: долговечный счётчик ID событий SSE, резервируемый блоками |
+
+### Идентификаторы событий
+
+`event_sequence` — одна строка (`id = 1`) с текущим потолком выданных ID. Процесс при
+старте резервирует блок (`4096`) и раздаёт ID из него в памяти; резервирование
+переживает перезапуск и падение, поэтому ID не повторяются. Это требование SSE:
+браузер присылает `Last-Event-ID`, и счётчик, начинающийся заново с единицы, сделал
+бы все новые события «старее» позиции клиента.
 
 > Детальные SQL миграции в `internal/infrastructure/sqlite/migrations/`.
 

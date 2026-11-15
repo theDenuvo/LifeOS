@@ -44,6 +44,11 @@ import (
 
 var version = "dev"
 
+// eventIDBlock is how many event ids one process reserves at startup. It trades
+// a bounded gap in the ids after a restart for a single write instead of a write
+// per published event.
+const eventIDBlock = 4096
+
 func main() {
 	var (
 		showVersion = flag.Bool("version", false, "Show version and exit")
@@ -84,7 +89,18 @@ func main() {
 
 	// Application services over the SQLite units of work.
 	clock := tasks.SystemClock()
-	broker := events.NewBroker()
+	// Event ids are durable, not per-process. A browser that reconnects after a
+	// restart sends the last id it saw, so a counter starting again at one would
+	// make every new event look older than the client's position and be dropped.
+	// The counter is reserved in blocks: one write at startup, no reuse even
+	// after a crash.
+	brokerStart := uint64(1)
+	if reserved, err := sqlite.NewEventSequence(db).Reserve(context.Background(), eventIDBlock); err != nil {
+		slog.Error("Could not reserve event ids; the stream restarts its numbering", "error", err)
+	} else {
+		brokerStart = reserved
+	}
+	broker := events.NewBrokerAt(brokerStart, events.DefaultReplaySize)
 	// planningService is assigned below; the task engine keeps the reference so a
 	// task change re-derives its reminders in the same breath.
 	var planningService *planning.Service

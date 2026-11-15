@@ -75,6 +75,21 @@ func (h *Handler) streamEvents(w http.ResponseWriter, r *http.Request) {
 			if event.ID <= lastSent {
 				continue
 			}
+			// A subscriber channel is deliberately non-blocking, so a burst can
+			// drop an event. The replay buffer still holds it: when the next
+			// delivered event skips an id, send the missing ones from the ring
+			// instead of letting a gap reach the browser.
+			if lastSent > 0 && event.ID > lastSent+1 {
+				for _, missed := range broker.Replay(lastSent) {
+					if missed.ID >= event.ID {
+						break
+					}
+					if err := writeSSE(w, missed); err != nil {
+						return
+					}
+					lastSent = missed.ID
+				}
+			}
 			if err := writeSSE(w, event); err != nil {
 				return
 			}

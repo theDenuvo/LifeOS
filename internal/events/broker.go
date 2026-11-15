@@ -55,24 +55,24 @@ func NewBrokerWithReplay(size int) *Broker {
 
 // Publish records an event and delivers it to every current subscriber.
 //
-// Delivery is non-blocking: a subscriber that cannot keep up misses the event
-// rather than stalling the writer. SSE clients recover missed events by
-// reconnecting with Last-Event-ID.
+// The whole operation happens under the mutex, and delivery is non-blocking:
+// a subscriber that cannot keep up misses the event rather than stalling the
+// writer, while SSE clients recover missed events by reconnecting with
+// Last-Event-ID. Holding the lock across the non-blocking sends is what
+// guarantees two things the stream relies on: events reach subscribers in
+// ascending ID order, and a channel cancelled concurrently cannot be closed
+// while a send is in flight (no "send on closed channel" panic).
 func (b *Broker) Publish(eventType string, data any) {
 	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	b.nextID++
 	event := Event{ID: b.nextID, Type: eventType, Data: data}
 	b.ring = append(b.ring, event)
 	if len(b.ring) > b.ringSize {
 		b.ring = b.ring[len(b.ring)-b.ringSize:]
 	}
-	subs := make([]chan Event, 0, len(b.subs))
 	for _, ch := range b.subs {
-		subs = append(subs, ch)
-	}
-	b.mu.Unlock()
-
-	for _, ch := range subs {
 		select {
 		case ch <- event:
 		default:

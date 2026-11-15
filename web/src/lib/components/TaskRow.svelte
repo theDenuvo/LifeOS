@@ -17,10 +17,10 @@
 	<button
 		class="check"
 		class:checked={task.status === 'completed'}
-		aria-label={task.status === 'completed' ? 'Восстановить задачу' : 'Завершить задачу'}
+		aria-label={task.status === 'open' ? 'Завершить задачу' : 'Восстановить задачу'}
 		aria-pressed={task.status === 'completed'}
 		disabled={busy}
-		on:click={() => (task.status === 'completed' ? onrestore(task) : oncomplete(task))}
+		on:click={() => (task.status === 'open' ? oncomplete(task) : onrestore(task))}
 	>
 		{#if task.status === 'completed'}
 			<svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -75,8 +75,14 @@
 				<span class="sr-only">Новая дата</span>
 				<input type="date" bind:value={date} disabled={busy} />
 			</label>
-			<button class="ghost" disabled={busy || !date} on:click={() => onreschedule(task, date)}>
-				Перенести
+			<!-- An empty date clears an existing deadline; it is only a no-op when
+			     the task has no deadline to clear. -->
+			<button
+				class="ghost"
+				disabled={busy || (!date && !task.due_date && !task.due_at)}
+				on:click={() => onreschedule(task, date)}
+			>
+				{date ? 'Перенести' : 'Убрать срок'}
 			</button>
 			<button class="ghost danger-text" disabled={busy} on:click={() => oncancel(task)}>Отменить</button>
 		{:else}

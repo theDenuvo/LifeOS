@@ -35,6 +35,10 @@ func Open(dbPath string) (*sql.DB, error) {
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(0)
 
+	// The overdue filter needs domain semantics inside SQL; see
+	// task_overdue_function.go.
+	registerTaskOverdueFunction()
+
 	// Verify connection
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

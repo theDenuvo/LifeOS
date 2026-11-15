@@ -359,6 +359,12 @@ func (s *Service) RescheduleTask(ctx context.Context, id int64, expectedVersion 
 		}
 
 		if !in.anySet() {
+			// An empty request changes nothing, but a client that cached an old
+			// version must still learn that the task moved on instead of reading
+			// a success it would build its next request on.
+			if current.Version != expectedVersion {
+				return ErrVersionConflict
+			}
 			result = current
 			return nil
 		}
@@ -378,7 +384,7 @@ func (s *Service) RescheduleTask(ctx context.Context, id int64, expectedVersion 
 			}
 		}
 
-		applyClears(current.Task, rescheduleClears(in))
+		applyClears(current.Task, rescheduleClearsFor(in))
 
 		updated, err := tx.Tasks().Update(ctx, id, expectedVersion, current.Task)
 		if err != nil {
@@ -602,6 +608,19 @@ func rescheduleClears(in RescheduleTaskInput) nullableClear {
 		c.dueAt = true
 	}
 	return c
+}
+
+// rescheduleClearsFor derives the clear set for a reschedule, including the
+// date-only rule: the domain gives due_at priority over due_date, so a
+// reschedule that supplies a new date without a new exact time must drop the
+// old exact time. Otherwise the stored due_at would keep the previous instant
+// in effect no matter which date the caller moved to.
+func rescheduleClearsFor(in RescheduleTaskInput) nullableClear {
+	clears := rescheduleClears(in)
+	if value, ok := in.DueDate.Get(); ok && !value.IsZero() && !in.DueAt.IsSet() {
+		clears.dueAt = true
+	}
+	return clears
 }
 
 // applyClears stores "absent" for the fields the caller explicitly cleared.

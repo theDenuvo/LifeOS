@@ -231,46 +231,33 @@ func (r *taskRepository) Update(ctx context.Context, id int64, expectedVersion i
 
 // List returns a filtered page plus the total number of matching rows.
 //
-// Overdue is derived from each task's own timezone and deadline semantics
-// (Task.IsOverdue), which SQLite cannot evaluate, so the overdue filter is
-// applied in Go after a broad SQL prefilter. Every other filter is pushed into
-// SQL and paginated there.
+// Every filter, including overdue, is pushed into SQL and paginated there.
+// Overdue semantics live in the domain (Task.IsOverdue: task timezone, exact
+// instant versus end-of-day boundary), which plain SQL cannot express, so the
+// same rule is exposed to queries as the deterministic scalar function
+// lifeos_task_overdue registered in Open.
 func (r *taskRepository) List(ctx context.Context, filter tasks.TaskFilter) (tasks.ListTasksResult, error) {
 	where, args := buildTaskWhere(filter)
 	order := buildTaskOrder(filter.Sorts)
 
+	if filter.Overdue.IsSet() {
+		// The overdue comparison needs the reference instant; the service fills
+		// filter.AsOf from its clock so every caller agrees on "now".
+		predicate := "lifeos_task_overdue(status, due_date, due_at, timezone, ?)"
+		if !filter.Overdue.Or(false) {
+			predicate = "NOT " + predicate
+		}
+		if len(where) > 0 {
+			where += " AND "
+		} else {
+			where = " WHERE "
+		}
+		where += predicate
+		args = append(args, filter.AsOf.Or(time.Time{}).Unix())
+	}
+
 	limit := filter.Limit.Or(tasks.DefaultPageLimit)
 	offset := filter.Offset.Or(0)
-
-	if filter.Overdue.IsSet() {
-		rows, err := r.tx.QueryContext(ctx, `SELECT `+taskColumns+` FROM tasks`+where+order, args...)
-		if err != nil {
-			return tasks.ListTasksResult{}, fmt.Errorf("list tasks: %w", err)
-		}
-		defer rows.Close()
-
-		matches, err := scanTasks(rows)
-		if err != nil {
-			return tasks.ListTasksResult{}, err
-		}
-
-		asOf := filter.AsOf.Or(time.Time{})
-		wantOverdue := filter.Overdue.Or(false)
-		filtered := make([]tasks.TaskWithVersion, 0, len(matches))
-		for _, item := range matches {
-			if item.Task.IsOverdue(asOf) == wantOverdue {
-				filtered = append(filtered, item)
-			}
-		}
-
-		total := len(filtered)
-		return tasks.ListTasksResult{
-			Tasks:  page(filtered, limit, offset),
-			Total:  total,
-			Limit:  limit,
-			Offset: offset,
-		}, nil
-	}
 
 	var total int
 	if err := r.tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks`+where, args...).Scan(&total); err != nil {
@@ -698,7 +685,8 @@ func escapeLike(value string) string {
 	return value
 }
 
-// page slices a fully filtered result set for the overdue path.
+// page slices a fully filtered result set. Kept for other in-memory slicing
+// needs; List paginates in SQL.
 func page(items []tasks.TaskWithVersion, limit, offset int) []tasks.TaskWithVersion {
 	if offset >= len(items) {
 		return []tasks.TaskWithVersion{}

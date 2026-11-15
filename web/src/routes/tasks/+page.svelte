@@ -12,7 +12,7 @@
 		type Status,
 		type Task
 	} from '$lib/api';
-	import { errorMessage, todayISO } from '$lib/format';
+	import { errorMessage } from '$lib/format';
 	import { liveRevision } from '$lib/live';
 
 	const limit = 20;
@@ -23,6 +23,11 @@
 	let loading = true;
 	let error = '';
 	let busyId: number | null = null;
+
+	// Every load is numbered; a slower response from an earlier request is
+	// dropped instead of overwriting the fresher results already on screen.
+	let requestSeq = 0;
+	let searchTimer: ReturnType<typeof setTimeout> | undefined;
 
 	let status: '' | Status = '';
 	let priority: '' | Priority = '';
@@ -38,6 +43,7 @@
 	let creating = false;
 
 	async function load() {
+		const seq = ++requestSeq;
 		loading = true;
 		try {
 			const result = await listTasks({
@@ -48,19 +54,28 @@
 				limit,
 				offset
 			});
+			if (seq !== requestSeq) return;
 			tasks = result.data;
 			total = result.meta.total;
 			error = '';
 		} catch (err) {
+			if (seq !== requestSeq) return;
 			error = errorMessage(err);
 		} finally {
-			loading = false;
+			if (seq === requestSeq) loading = false;
 		}
 	}
 
 	function applyFilters() {
 		offset = 0;
 		load();
+	}
+
+	/** Keystrokes do not fire a request each: they debounce, then load. */
+	function handleSearchInput() {
+		offset = 0;
+		clearTimeout(searchTimer);
+		searchTimer = setTimeout(load, 250);
 	}
 
 	async function run(id: number, action: () => Promise<unknown>) {
@@ -78,8 +93,9 @@
 	const complete = (task: Task) => run(task.id, () => completeTask(task.id, task.version));
 	const restore = (task: Task) => run(task.id, () => restoreTask(task.id, task.version));
 	const cancel = (task: Task) => run(task.id, () => cancelTask(task.id, task.version));
+	// An empty date clears the deadline: the API accepts an explicit null.
 	const reschedule = (task: Task, date: string) =>
-		run(task.id, () => rescheduleTask(task.id, task.version, { due_date: date }));
+		run(task.id, () => rescheduleTask(task.id, task.version, { due_date: date || null }));
 
 	async function create() {
 		const title = newTitle.trim();
@@ -134,6 +150,7 @@
 		return () => {
 			unsubscribe();
 			clearTimeout(timer);
+			clearTimeout(searchTimer);
 		};
 	});
 </script>
@@ -167,7 +184,7 @@
 			<option value="medium">Средний</option>
 			<option value="low">Низкий</option>
 		</select>
-		<input type="date" bind:value={newDue} aria-label="Дедлайн" min={todayISO()} />
+		<input type="date" bind:value={newDue} aria-label="Дедлайн" />
 		<input
 			class="estimate"
 			type="number"
@@ -192,7 +209,7 @@
 	<input
 		class="search"
 		bind:value={search}
-		on:input={applyFilters}
+		on:input={handleSearchInput}
 		placeholder="Поиск по названию и заметке"
 		aria-label="Поиск задач"
 	/>

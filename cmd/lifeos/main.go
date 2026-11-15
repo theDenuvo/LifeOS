@@ -18,6 +18,7 @@ import (
 	"github.com/theDenuvo/LifeOS/internal/agent/tools"
 	"github.com/theDenuvo/LifeOS/internal/application/assistant"
 	appcalendar "github.com/theDenuvo/LifeOS/internal/application/calendar"
+	"github.com/theDenuvo/LifeOS/internal/application/completion"
 	appdocuments "github.com/theDenuvo/LifeOS/internal/application/documents"
 	appevents "github.com/theDenuvo/LifeOS/internal/application/events"
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
@@ -142,7 +143,39 @@ func main() {
 		planning.WithTimezone(cfg.Timezone),
 		planning.WithPublisher(broker),
 	)
-	recurrenceService := recurrence.NewService(taskService, clock, recurrence.WithTimezone(cfg.Timezone))
+	// The recurrence queue is derived from the tasks themselves, so a completion
+	// whose next occurrence failed to appear is found again after a restart and
+	// retried instead of being lost.
+	recurrenceService := recurrence.NewService(
+		taskService,
+		clock,
+		recurrence.WithTimezone(cfg.Timezone),
+		recurrence.WithStore(sqlite.NewRecurrenceStore(db)),
+	)
+
+	// Completion is checked against the sources LifeOS really owns: uploaded
+	// documents, the user's files on this machine and the calendar. GitHub and
+	// messengers have no integration, so they are reported as unavailable instead
+	// of being silently treated as "nothing found".
+	completionRoot := cfg.ToolsRoot
+	if completionRoot == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			completionRoot = home
+		}
+	}
+	completionService := completion.NewService(
+		taskService,
+		[]completion.Source{
+			&completion.DocumentSource{Docs: sqlite.NewDocumentSearcher(db)},
+			&completion.FilesSource{Root: completionRoot},
+			&completion.CalendarSource{Events: eventService},
+			completion.NewGitHubSource(),
+			completion.NewMessengerSource(),
+		},
+		completion.WithStore(sqlite.NewCompletionStore(db)),
+		completion.WithSettings(settingsService),
+		completion.WithClock(clock),
+	)
 
 	// The dashboard shows the day's load and the ideas that are due to resurface.
 	summaryService.WithRevisit(inboxService).WithPlanner(planningService)
@@ -198,6 +231,7 @@ func main() {
 		tools.WithMachineAccess(cfg.ToolsRoot, cfg.ToolsShell, cfg.DatabasePath()),
 		tools.WithPlanning(planningService),
 		tools.WithRecurrence(recurrenceService),
+		tools.WithCompletion(completionService),
 		tools.WithTimezone(cfg.Timezone),
 	)
 	contextProvider := assistant.NewLifeOSContext(summaryService, proactiveService, cfg.Timezone, clock, assistant.WithEvents(eventService))
@@ -216,22 +250,24 @@ func main() {
 
 	// Create HTTP handler with all routes
 	handler := httptransport.NewHandler(db, cfg, dist.FS, httptransport.Services{
-		Tasks:     taskService,
-		Inbox:     inboxService,
-		Summary:   summaryService,
-		Assistant: assistantService,
-		Proactive: proactiveService,
-		Search:    searchService,
-		Settings:  settingsService,
-		Profile:   profileService,
-		Events:    eventService,
-		Calendar:  calendarService,
-		Documents: documentService,
-		Planning:  planningService,
-		Models:    modelCatalog,
-		Tools:     registry,
-		Broker:    broker,
-		Version:   version,
+		Tasks:      taskService,
+		Inbox:      inboxService,
+		Summary:    summaryService,
+		Assistant:  assistantService,
+		Proactive:  proactiveService,
+		Search:     searchService,
+		Settings:   settingsService,
+		Profile:    profileService,
+		Events:     eventService,
+		Calendar:   calendarService,
+		Documents:  documentService,
+		Planning:   planningService,
+		Recurrence: recurrenceService,
+		Completion: completionService,
+		Models:     modelCatalog,
+		Tools:      registry,
+		Broker:     broker,
+		Version:    version,
 	}).Routes()
 
 	// HTTP Server
@@ -261,6 +297,7 @@ func main() {
 	// Reminder delivery: reminders are planned when a task changes and published
 	// here when their moment comes, so the browser shows them without polling.
 	go planning.NewDispatcher(planningService, broker, clock, 30*time.Second).Run(ctx)
+	go recurrence.NewWorker(recurrenceService, time.Minute).Run(ctx)
 
 	<-ctx.Done()
 	slog.Info("Shutting down...")

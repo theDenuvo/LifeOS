@@ -588,6 +588,211 @@ paths:
                       $ref: '#/components/schemas/TaskReminder'
         '404':
           $ref: '#/components/responses/NotFoundError'
+  /api/v1/reminders:
+    get:
+      summary: Reminders that fired and were not acknowledged yet
+      description: Durable delivery path. Unlike the live event it works after a restart and after a closed tab, so a reminder is not lost when nobody is connected.
+      operationId: listDueReminders
+      tags:
+      - Reminders
+      responses:
+        '200':
+          description: Due reminders
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DueReminder'
+                  server_time:
+                    type: string
+                    format: date-time
+  /api/v1/reminders/resync:
+    post:
+      summary: Rebuild the reminder schedule
+      description: Re-derives reminders for open tasks that lost theirs after a failed recalculation.
+      operationId: resyncReminders
+      tags:
+      - Reminders
+      responses:
+        '200':
+          description: Repair result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  repaired:
+                    type: integer
+                  checked_at:
+                    type: string
+                    format: date-time
+  /api/v1/reminders/{id}/ack:
+    post:
+      summary: Acknowledge that a reminder was shown
+      description: Turns "we announced it" into "the user saw it". Idempotent.
+      operationId: ackReminder
+      tags:
+      - Reminders
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '204':
+          description: Acknowledged
+  /api/v1/recurrence/pending:
+    get:
+      summary: Recurring tasks whose next occurrence is missing
+      description: These are the interruptions a user can see, instead of a continuation quietly disappearing after a failure.
+      operationId: listPendingRecurrences
+      tags:
+      - Recurrence
+      parameters:
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+      responses:
+        '200':
+          description: Pending recurrences
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        task_id:
+                          type: integer
+                        title:
+                          type: string
+                        reason:
+                          type: string
+  /api/v1/recurrence/reconcile:
+    post:
+      summary: Create the missing next occurrences now
+      description: Idempotent recovery pass; an existing occurrence is never duplicated.
+      operationId: reconcileRecurrences
+      tags:
+      - Recurrence
+      responses:
+        '200':
+          description: Reconcile result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  checked:
+                    type: integer
+                  created:
+                    type: integer
+                  pending:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        task_id:
+                          type: integer
+                        title:
+                          type: string
+                        reason:
+                          type: string
+  /api/v1/tasks/{id}/verify:
+    post:
+      summary: Check the expected result against the available sources
+      description: Reports a verdict with the evidence and the sources that were consulted, including the ones that are unavailable. It does not change the task status by itself.
+      operationId: verifyTaskCompletion
+      tags:
+      - Tasks
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Completion report
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompletionReport'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+  /api/v1/tasks/{id}/verify/decision:
+    post:
+      summary: Accept or decline a completion conclusion
+      description: Accepting completes the task; declining keeps it open and is remembered so the next check does not insist.
+      operationId: decideTaskCompletion
+      tags:
+      - Tasks
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - decision
+              properties:
+                decision:
+                  type: string
+                  enum:
+                  - accepted
+                  - declined
+      responses:
+        '200':
+          description: Updated completion report
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompletionReport'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/tasks/{id}/verification:
+    get:
+      summary: Latest recorded completion check
+      operationId: getTaskVerification
+      tags:
+      - Tasks
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Stored check
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompletionReport'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
   /api/v1/summary/today:
     get:
       summary: Get today's summary (main screen data)
@@ -1344,6 +1549,112 @@ paths:
           $ref: '#/components/responses/NotFoundError'
 components:
   schemas:
+    DueReminder:
+      type: object
+      properties:
+        reminder_id:
+          type: integer
+        task_id:
+          type: integer
+        title:
+          type: string
+        kind:
+          type: string
+          enum:
+          - lead
+          - due
+          - overdue
+        priority:
+          type: string
+          enum:
+          - low
+          - medium
+          - high
+        fire_at:
+          type: string
+          format: date-time
+        due_at:
+          type: string
+          format: date-time
+        due_date:
+          type: string
+          format: date
+        estimate_minutes:
+          type: integer
+        note:
+          type: string
+        repeat:
+          type: string
+        overdue:
+          type: boolean
+        notified:
+          type: boolean
+        delivered:
+          type: boolean
+    CompletionReport:
+      type: object
+      properties:
+        id:
+          type: integer
+        task_id:
+          type: integer
+        title:
+          type: string
+        expected_result:
+          type: string
+        verdict:
+          type: string
+          enum:
+          - confirmed
+          - insufficient
+          - contradictory
+          - already_completed
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+        reason:
+          type: string
+        decision:
+          type: string
+          enum:
+          - none
+          - accepted
+          - declined
+        checked_at:
+          type: string
+          format: date-time
+        completed:
+          type: boolean
+        evidence:
+          type: array
+          items:
+            type: object
+            properties:
+              source:
+                type: string
+              reference:
+                type: string
+              snippet:
+                type: string
+              at:
+                type: string
+                format: date-time
+              confidence:
+                type: number
+              against:
+                type: boolean
+        sources:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              available:
+                type: boolean
+              reason:
+                type: string
     DayPlanResponse:
       type: object
       properties:
@@ -1351,6 +1662,8 @@ components:
           type: string
           format: date
         working:
+          type: boolean
+        past:
           type: boolean
         workday_start:
           type: string
@@ -1432,6 +1745,12 @@ components:
           - skipped
         estimate_minutes:
           type: integer
+        estimate_source:
+          type: string
+          enum:
+          - explicit
+          - history
+          - default
         recurring:
           type: boolean
     UnplacedItem:
@@ -1443,6 +1762,12 @@ components:
           type: string
         estimate_minutes:
           type: integer
+        estimate_source:
+          type: string
+          enum:
+          - explicit
+          - history
+          - default
         reason:
           type: string
     PlanProposalResponse:
@@ -1494,6 +1819,30 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/UnplacedItem'
+        already_placed:
+          type: array
+          description: Work that already has its time and is therefore not proposed again.
+          items:
+            type: object
+            properties:
+              task_id:
+                type: integer
+              title:
+                type: string
+              reason:
+                type: string
+              start:
+                type: string
+                format: date-time
+              end:
+                type: string
+                format: date-time
+              source:
+                type: string
+                enum:
+                - auto
+                - manual
+                - assistant
         days:
           type: array
           items:

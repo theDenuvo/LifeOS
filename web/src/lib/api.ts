@@ -142,6 +142,7 @@ export interface PlanItem {
 	source?: 'auto' | 'manual' | 'assistant';
 	status?: 'planned' | 'active' | 'done' | 'skipped';
 	estimate_minutes?: number;
+	estimate_source?: 'explicit' | 'history' | 'default';
 	recurring?: boolean;
 	due_at?: string;
 	due_date?: string;
@@ -165,6 +166,8 @@ export interface PlanUnplaced {
 export interface DayPlan {
 	date: string;
 	working: boolean;
+	/** A day that is already over is reported as such, not planned again. */
+	past: boolean;
 	workday_start: string;
 	workday_end: string;
 	free_minutes: number;
@@ -201,7 +204,35 @@ export interface PlanProposal {
 	moves: PlanMove[];
 	placements: { task_id: number; date: string; start: string; end: string }[];
 	unplaced: PlanUnplaced[];
+	/** Work that already has its time and is therefore not proposed again. */
+	already_placed: PlanKept[];
 	days: { date: string; working: boolean; free_minutes: number; planned_minutes: number }[];
+}
+
+export interface PlanKept {
+	task_id: number;
+	title: string;
+	reason: string;
+	start: string;
+	end: string;
+	source: 'auto' | 'manual' | 'assistant';
+}
+
+/** A reminder that is due and has not been acknowledged by this browser yet. */
+export interface DueReminder {
+	reminder_id: number;
+	task_id: number;
+	title: string;
+	kind: 'lead' | 'due' | 'overdue';
+	priority: Priority;
+	fire_at: string;
+	due_at?: string;
+	due_date?: string;
+	estimate_minutes?: number;
+	note?: string;
+	repeat?: string;
+	overdue: boolean;
+	notified: boolean;
 }
 
 export interface Reminder {
@@ -224,6 +255,20 @@ export function applyPlan(
 		method: 'POST',
 		body: JSON.stringify({ replace_dates: replaceDates, items })
 	});
+}
+
+/**
+ * getDueReminders returns every reminder that fired and was not acknowledged yet.
+ * This is the durable path: it works after a restart and after a closed tab,
+ * unlike a live event that only reaches connected clients.
+ */
+export function getDueReminders(): Promise<{ data: DueReminder[]; server_time: string }> {
+	return request(`/api/v1/reminders`);
+}
+
+/** ackReminder records that the reminder was actually shown to the user. */
+export function ackReminder(id: number): Promise<void> {
+	return request(`/api/v1/reminders/${id}/ack`, { method: 'POST' });
 }
 
 export function getPlanProposal(days = 7): Promise<PlanProposal> {

@@ -49,8 +49,11 @@ func (d *Dispatcher) Run(ctx context.Context) {
 
 // Tick delivers every reminder that is due now.
 //
-// A reminder is marked sent only after it was published, so a failed delivery is
-// retried on the next tick instead of being silently dropped.
+// Publishing is best effort: the event may be missed by a client that is closed,
+// offline or slow, so it only records that the event went out. The reminder stays
+// pending in the database until a client actually shows it and acknowledges it,
+// which is also what tells the difference between "we announced it" and "the user
+// saw it".
 func (d *Dispatcher) Tick(ctx context.Context) error {
 	now := d.clock.Now()
 	due, err := d.planner.DueReminders(ctx, now)
@@ -64,9 +67,14 @@ func (d *Dispatcher) Tick(ctx context.Context) error {
 		if d.publisher != nil {
 			d.publisher.Publish("reminder", reminderPayload(item, now))
 		}
-		if err := d.planner.MarkReminderSent(ctx, item.Reminder.ID, now); err != nil {
+		if err := d.planner.MarkReminderNotified(ctx, item.Reminder.ID, now); err != nil {
 			return err
 		}
+	}
+	// A task whose reminder regeneration failed once would otherwise stay silent
+	// forever; repairing is cheap and idempotent.
+	if _, err := d.planner.ReconcileReminders(ctx); err != nil {
+		return err
 	}
 	return nil
 }

@@ -38,12 +38,12 @@ type EventRepository interface {
 
 // BlockRepository persists planned work blocks.
 //
-// DeleteAutoRange removes only automatically planned blocks: the user's own
-// blocks are never touched by the planner.
+// There is deliberately no way to delete every automatic block of a day: a plan is
+// applied by validating the whole request and then removing only the blocks it
+// actually supersedes, so accepting one proposal cannot wipe another.
 type BlockRepository interface {
 	ListRange(ctx context.Context, from, to time.Time) ([]planning.Block, error)
 	Insert(ctx context.Context, value planning.Block) (planning.Block, error)
-	DeleteAutoRange(ctx context.Context, from, to time.Time) (int, error)
 	Delete(ctx context.Context, id int64) error
 }
 
@@ -51,13 +51,21 @@ type BlockRepository interface {
 //
 // ReplaceForTask is idempotent: it drops the pending reminders of the task and
 // stores the freshly derived ones, keeping already delivered ones for the audit
-// trail.
+// trail. ListActionable returns everything that is due but not yet acknowledged,
+// which is what makes a reminder survive a disconnected client and a restart.
 type ReminderRepository interface {
 	ReplaceForTask(ctx context.Context, taskID int64, values []planning.Reminder) error
 	DismissForTask(ctx context.Context, taskID int64) error
 	ListForTask(ctx context.Context, taskID int64) ([]planning.Reminder, error)
+	// ListPending returns due reminders that were not published yet.
 	ListPending(ctx context.Context, until time.Time) ([]planning.Reminder, error)
-	MarkSent(ctx context.Context, id int64, at time.Time) error
+	// ListActionable returns due reminders that the client was not told about,
+	// whether or not the live event was published.
+	ListActionable(ctx context.Context, until time.Time) ([]planning.Reminder, error)
+	// MarkNotified records that the live event was published once.
+	MarkNotified(ctx context.Context, id int64, at time.Time) error
+	// MarkDelivered records that the user was actually shown the reminder.
+	MarkDelivered(ctx context.Context, id int64, at time.Time) error
 }
 
 // SettingsReader reads user preferences. Missing keys fall back to defaults, so

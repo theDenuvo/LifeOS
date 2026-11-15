@@ -25,6 +25,10 @@ var (
 	ErrPlacementOutsideWindow = errors.New("placement must be inside the working day")
 	// ErrPlacementConflict is returned when a placement overlaps an appointment or the user's own block.
 	ErrPlacementConflict = errors.New("placement overlaps an existing commitment")
+	// ErrPlacementInPast is returned when a placement would reserve time that has already passed.
+	ErrPlacementInPast = errors.New("placement must not start in the past")
+	// ErrPlacementAfterDue is returned when a placement ends after an exact deadline.
+	ErrPlacementAfterDue = errors.New("placement must end before the task deadline")
 )
 
 const (
@@ -96,18 +100,19 @@ type PlacementInput struct {
 
 // PlanItem is a block shown in the interface.
 type PlanItem struct {
-	BlockID   int64                `json:"block_id,omitempty"`
-	TaskID    int64                `json:"task_id"`
-	Title     string               `json:"title"`
-	Priority  task.Priority        `json:"priority"`
-	Start     time.Time            `json:"start"`
-	End       time.Time            `json:"end"`
-	Source    planning.BlockSource `json:"source,omitempty"`
-	Status    planning.BlockStatus `json:"status,omitempty"`
-	Estimate  int                  `json:"estimate_minutes,omitempty"`
-	Recurring bool                 `json:"recurring,omitempty"`
-	DueAt     *time.Time           `json:"due_at,omitempty"`
-	DueDate   string               `json:"due_date,omitempty"`
+	BlockID        int64                `json:"block_id,omitempty"`
+	TaskID         int64                `json:"task_id"`
+	Title          string               `json:"title"`
+	Priority       task.Priority        `json:"priority"`
+	Start          time.Time            `json:"start"`
+	End            time.Time            `json:"end"`
+	Source         planning.BlockSource `json:"source,omitempty"`
+	Status         planning.BlockStatus `json:"status,omitempty"`
+	Estimate       int                  `json:"estimate_minutes,omitempty"`
+	EstimateSource EstimateSource       `json:"estimate_source,omitempty"`
+	Recurring      bool                 `json:"recurring,omitempty"`
+	DueAt          *time.Time           `json:"due_at,omitempty"`
+	DueDate        string               `json:"due_date,omitempty"`
 }
 
 // BusyView is an occupied range shown next to the plan.
@@ -121,16 +126,18 @@ type BusyView struct {
 
 // UnplacedView explains why a task was not scheduled.
 type UnplacedView struct {
-	TaskID      int64  `json:"task_id"`
-	Title       string `json:"title"`
-	EstimateMin int    `json:"estimate_minutes"`
-	Reason      string `json:"reason"`
+	TaskID      int64          `json:"task_id"`
+	Title       string         `json:"title"`
+	EstimateMin int            `json:"estimate_minutes"`
+	Source      EstimateSource `json:"estimate_source,omitempty"`
+	Reason      string         `json:"reason"`
 }
 
 // DayPlan is the read model of one day.
 type DayPlan struct {
 	Date           string         `json:"date"`
 	Working        bool           `json:"working"`
+	Past           bool           `json:"past"`
 	WorkdayStart   string         `json:"workday_start"`
 	WorkdayEnd     string         `json:"workday_end"`
 	FreeMinutes    int            `json:"free_minutes"`
@@ -143,8 +150,10 @@ type DayPlan struct {
 
 // ApplyInput applies a set of placements.
 //
-// ReplaceDates lists the days whose automatically planned blocks are replaced;
-// the user's own blocks are never touched. An empty list means "only insert".
+// ReplaceDates lists the days the request is allowed to change. It never wipes a
+// day: only blocks of the same task on that day, and automatic blocks that collide
+// with a new placement, are replaced. Everything else stays, so accepting a
+// proposal for one more task cannot destroy an already accepted plan.
 type ApplyInput struct {
 	ReplaceDates []string         `json:"replace_dates"`
 	Items        []PlacementInput `json:"items"`
@@ -189,8 +198,21 @@ type Proposal struct {
 	Moves       []Move              `json:"moves"`
 	Placements  []ProposedPlacement `json:"placements"`
 	Unplaced    []UnplacedView      `json:"unplaced"`
+	Kept        []KeptTaskView      `json:"already_placed"`
 	Days        []DayLoad           `json:"days"`
 	Summary     string              `json:"summary"`
+}
+
+// KeptTaskView reports work that already has its time and is therefore not
+// proposed again. It is shown so the interface can explain the omission instead of
+// silently leaving a task out of the plan.
+type KeptTaskView struct {
+	TaskID int64     `json:"task_id"`
+	Title  string    `json:"title"`
+	Reason string    `json:"reason"`
+	Start  time.Time `json:"start"`
+	End    time.Time `json:"end"`
+	Source string    `json:"source"`
 }
 
 // PlanDay returns the day's commitments, its existing blocks and a proposal for
@@ -298,26 +320,37 @@ func (s *Service) planDayTx(
 			DueDate:   dueDate,
 		})
 		plan.PlannedMinutes += int(block.Duration().Minutes())
-		// Manually placed blocks are commitments of the user and are treated
-		// exactly like appointments: the planner works around them.
-		if !block.Source.Movable() {
-			fixed = append(fixed, Busy{
-				Interval: Interval{Start: block.StartsAt, End: block.EndsAt},
-				Label:    title,
-				Kind:     "block",
-				BlockID:  block.ID,
-				TaskID:   block.TaskID,
-			})
-			plan.Busy = append(plan.Busy, BusyView{Label: title, Kind: "block", Start: block.StartsAt, End: block.EndsAt, TaskID: block.TaskID})
-		}
+		// A block is time the user already spends on the task, whoever placed it:
+		// the plan works around it and the task is not proposed twice.
+		fixed = append(fixed, Busy{
+			Interval: Interval{Start: block.StartsAt, End: block.EndsAt},
+			Label:    title,
+			Kind:     "block",
+			BlockID:  block.ID,
+			TaskID:   block.TaskID,
+		})
+		plan.Busy = append(plan.Busy, BusyView{Label: title, Kind: "block", Start: block.StartsAt, End: block.EndsAt, TaskID: block.TaskID})
 	}
 
 	free := FreeSlots(window, fixed, prefs.Buffer, prefs.MinSlot)
+	// Time that has already passed is not free: a plan for the current day starts
+	// at the current moment, never earlier.
+	if sameLocalDay(now, date, loc) {
+		free = ClipFrom(free, nextMinute(now))
+		free = dropShortSlots(free, prefs.MinSlot)
+	}
 	for _, slot := range free {
 		plan.FreeMinutes += int(slot.Duration().Minutes())
 	}
 
 	if !working {
+		return plan, nil
+	}
+	if dateIsPast(date, now, loc) {
+		// The day is over. Proposing anything for it would be a plan for the past,
+		// and its remaining "free" time is not free any more.
+		plan.Past = true
+		plan.FreeMinutes = 0
 		return plan, nil
 	}
 
@@ -326,24 +359,24 @@ func (s *Service) planDayTx(
 		alreadyPlanned[block.TaskID] = true
 	}
 
-	candidates := s.candidatesFor(ctx, tx, tasksByID, date, now, alreadyPlanned)
+	history, err := s.loadHistory(ctx, tx)
+	if err != nil {
+		return DayPlan{}, err
+	}
+	candidates := s.candidatesFor(ctx, tx, tasksByID, date, now, alreadyPlanned, prefs, history, loc)
 	placements, unplaced := Schedule(free, candidates, prefs.Buffer)
 	for _, placement := range placements {
 		value := tasksByID[placement.TaskID]
 		item := PlanItem{
-			TaskID:   placement.TaskID,
-			Title:    placement.Title,
-			Priority: placement.Priority,
-			Start:    placement.Start,
-			End:      placement.End,
+			TaskID:         placement.TaskID,
+			Title:          placement.Title,
+			Priority:       placement.Priority,
+			Start:          placement.Start,
+			End:            placement.End,
+			Estimate:       int(placement.Estimate.Minutes()),
+			EstimateSource: placement.EstimateSource,
 		}
-		// Report the duration the planner actually used, including the default it
-		// fell back to, so the interface never shows an unexplained gap.
-		item.Estimate = int(DefaultEstimate.Minutes())
 		if value != nil {
-			if value.Task.EstimateMinutes != nil {
-				item.Estimate = *value.Task.EstimateMinutes
-			}
 			item.Recurring = value.Task.Repeat != nil
 			item.DueAt = value.Task.DueAt
 			if value.Task.DueDate != nil && !value.Task.DueDate.IsZero() {
@@ -357,6 +390,7 @@ func (s *Service) planDayTx(
 			TaskID:      item.TaskID,
 			Title:       item.Title,
 			EstimateMin: int(item.Estimate.Minutes()),
+			Source:      item.EstimateSource,
 			Reason:      item.Reason,
 		})
 	}
@@ -376,8 +410,10 @@ func (s *Service) candidatesFor(
 	date task.CalendarDate,
 	now time.Time,
 	alreadyPlanned map[int64]bool,
+	prefs Preferences,
+	history *historyIndex,
+	loc *time.Location,
 ) []Candidate {
-	loc := s.Location()
 	today, err := dateOf(now, loc)
 	if err != nil {
 		today = date
@@ -389,20 +425,25 @@ func (s *Service) candidatesFor(
 			continue
 		}
 		item := value.Task
-		estimate := DefaultEstimate
-		if item.EstimateMinutes != nil {
-			estimate = time.Duration(*item.EstimateMinutes) * time.Minute
-		}
+		resolved := s.resolveEstimate(item, prefs, history)
 
 		candidate := Candidate{
-			TaskID:    item.ID,
-			Title:     item.Title,
-			Priority:  item.Priority,
-			Estimate:  estimate,
-			DueAt:     item.DueAt,
-			CreatedAt: item.CreatedAt,
-			Recurring: item.Repeat != nil,
-			Urgency:   4,
+			TaskID:         item.ID,
+			Title:          item.Title,
+			Priority:       item.Priority,
+			Estimate:       resolved.Value,
+			EstimateSource: resolved.Source,
+			DueAt:          item.DueAt,
+			CreatedAt:      item.CreatedAt,
+			Recurring:      item.Repeat != nil,
+			Urgency:        4,
+		}
+		// An exact deadline limits the block, and a deadline that already passed
+		// is no longer a constraint: the work is simply overdue.
+		if item.DueAt != nil && item.DueAt.After(now) {
+			deadline := item.DueAt.UTC()
+			candidate.HardDeadline = &deadline
+			candidate.DeadlineLabel = "дедлайна " + deadline.In(loc).Format("15:04")
 		}
 		if item.DueDate != nil && !item.DueDate.IsZero() {
 			due := *item.DueDate
@@ -477,106 +518,6 @@ func (s *Service) Apply(ctx context.Context, in ApplyInput) (ApplyResult, error)
 	return result, nil
 }
 
-func (s *Service) applyTx(
-	ctx context.Context,
-	tx Transaction,
-	in ApplyInput,
-	prefs Preferences,
-	loc *time.Location,
-	now time.Time,
-) ([]PlanItem, []string, error) {
-	dates, err := parseDates(in.ReplaceDates)
-	if err != nil {
-		return nil, nil, err
-	}
-	if len(in.Items) > 0 {
-		for _, item := range in.Items {
-			if day, err := dateOf(item.Start, loc); err == nil {
-				dates = append(dates, day)
-			}
-		}
-	}
-	dates = uniqueDates(dates)
-
-	for _, date := range dates {
-		start := date.Time(loc)
-		if _, err := tx.Blocks().DeleteAutoRange(ctx, start.UTC(), start.AddDate(0, 0, 1).UTC()); err != nil {
-			return nil, nil, err
-		}
-	}
-
-	applied := make([]PlanItem, 0, len(in.Items))
-	skipped := make([]string, 0)
-	for _, item := range in.Items {
-		if item.TaskID <= 0 || item.Start.IsZero() || !item.End.After(item.Start) {
-			return nil, nil, ErrPlacementInvalid
-		}
-		date, err := dateOf(item.Start, loc)
-		if err != nil {
-			return nil, nil, err
-		}
-		window, working := prefs.WindowOn(date, loc)
-		if !working {
-			return nil, nil, fmt.Errorf("%w: %s is not a working day", ErrPlacementOutsideWindow, date)
-		}
-		if item.Start.Before(window.Start) || item.End.After(window.End) {
-			return nil, nil, fmt.Errorf("%w: %s is outside %s-%s", ErrPlacementOutsideWindow, date, formatClock(prefs.Start), formatClock(prefs.End))
-		}
-
-		found, err := tx.Tasks().FindByID(ctx, item.TaskID)
-		if err != nil {
-			return nil, nil, ErrNoTask
-		}
-		if found.Task.Status != task.StatusOpen {
-			return nil, nil, ErrTaskNotOpen
-		}
-
-		events, err := tx.Events().ListRange(ctx, item.Start.UTC(), item.End.UTC(), nil)
-		if err != nil {
-			return nil, nil, err
-		}
-		for _, event := range events {
-			if event.Event.StartsAt.Before(item.End.UTC()) && item.Start.UTC().Before(event.Event.EndsAt) {
-				return nil, nil, fmt.Errorf("%w: %s", ErrPlacementConflict, event.Event.Title)
-			}
-		}
-		existing, err := tx.Blocks().ListRange(ctx, item.Start.UTC(), item.End.UTC())
-		if err != nil {
-			return nil, nil, err
-		}
-		for _, block := range existing {
-			if block.StartsAt.Before(item.End.UTC()) && item.Start.UTC().Before(block.EndsAt) {
-				return nil, nil, fmt.Errorf("%w: %s", ErrPlacementConflict, "уже стоит блок на это время")
-			}
-		}
-
-		block, err := planning.NewBlock(item.TaskID, item.Start, item.End, planning.BlockPlanned, planning.SourceAuto, now)
-		if err != nil {
-			return nil, nil, err
-		}
-		stored, err := tx.Blocks().Insert(ctx, block)
-		if err != nil {
-			return nil, nil, err
-		}
-		if err := s.setPlannedDate(ctx, tx, found, date, now); err != nil {
-			return nil, nil, err
-		}
-
-		title := found.Task.Title
-		applied = append(applied, PlanItem{
-			BlockID:  stored.ID,
-			TaskID:   stored.TaskID,
-			Title:    title,
-			Priority: found.Task.Priority,
-			Start:    stored.StartsAt,
-			End:      stored.EndsAt,
-			Source:   stored.Source,
-			Status:   stored.Status,
-		})
-	}
-	return applied, skipped, nil
-}
-
 // setPlannedDate keeps the task's planned date consistent with its block.
 func (s *Service) setPlannedDate(ctx context.Context, tx Transaction, found tasks.TaskWithVersion, date task.CalendarDate, now time.Time) error {
 	if found.Task.PlannedDate != nil && !found.Task.PlannedDate.IsZero() && found.Task.PlannedDate.String() == date.String() {
@@ -618,243 +559,6 @@ func (s *Service) Replan(ctx context.Context, horizonDays int) (Proposal, error)
 		return err
 	})
 	return proposal, err
-}
-
-func (s *Service) replanTx(
-	ctx context.Context,
-	tx Transaction,
-	prefs Preferences,
-	loc *time.Location,
-	now time.Time,
-	horizonDays int,
-) (Proposal, error) {
-	today, err := dateOf(now, loc)
-	if err != nil {
-		return Proposal{}, err
-	}
-	tasksByID, err := s.openTasks(ctx, tx)
-	if err != nil {
-		return Proposal{}, err
-	}
-
-	type dayState struct {
-		date     task.CalendarDate
-		window   Interval
-		working  bool
-		free     []Interval
-		capacity time.Duration
-	}
-	days := make([]dayState, 0, horizonDays)
-	for offset := 0; offset < horizonDays; offset++ {
-		date := addCalendarDays(today, offset)
-		window, working := prefs.WindowOn(date, loc)
-		state := dayState{date: date, window: window, working: working}
-		if working {
-			start := date.Time(loc)
-			events, err := tx.Events().ListRange(ctx, start.UTC(), start.AddDate(0, 0, 1).UTC(), nil)
-			if err != nil {
-				return Proposal{}, err
-			}
-			blocks, err := tx.Blocks().ListRange(ctx, start.UTC(), start.AddDate(0, 0, 1).UTC())
-			if err != nil {
-				return Proposal{}, err
-			}
-			busy := make([]Busy, 0, len(events)+len(blocks))
-			for _, item := range events {
-				interval := Interval{Start: item.Event.StartsAt, End: item.Event.EndsAt}
-				if item.Event.AllDay {
-					interval = Interval{Start: start, End: start.AddDate(0, 0, 1)}
-				}
-				busy = append(busy, Busy{Interval: interval, Kind: "event", Label: item.Event.Title})
-			}
-			for _, block := range blocks {
-				// Automatic blocks are about to be replaced by the new plan, so
-				// only the user's own blocks reduce capacity.
-				if block.Source.Movable() {
-					continue
-				}
-				busy = append(busy, Busy{
-					Interval: Interval{Start: block.StartsAt, End: block.EndsAt},
-					Kind:     "block",
-					BlockID:  block.ID,
-					TaskID:   block.TaskID,
-				})
-			}
-			state.free = FreeSlots(window, busy, prefs.Buffer, prefs.MinSlot)
-			for _, slot := range state.free {
-				state.capacity += slot.Duration()
-			}
-		}
-		days = append(days, state)
-	}
-
-	type pending struct {
-		candidate Candidate
-		deadline  *task.CalendarDate
-	}
-	items := make([]pending, 0, len(tasksByID))
-	for _, value := range tasksByID {
-		item := value.Task
-		estimate := DefaultEstimate
-		if item.EstimateMinutes != nil {
-			estimate = time.Duration(*item.EstimateMinutes) * time.Minute
-		}
-		if item.EstimateMinutes == nil {
-			// Without an estimate the planner would invent one; leave the task
-			// to the assistant, which asks the user.
-			continue
-		}
-		candidate := Candidate{
-			TaskID:    item.ID,
-			Title:     item.Title,
-			Priority:  item.Priority,
-			Estimate:  estimate,
-			DueAt:     item.DueAt,
-			CreatedAt: item.CreatedAt,
-			Recurring: item.Repeat != nil,
-		}
-		var deadline *task.CalendarDate
-		if item.DueDate != nil && !item.DueDate.IsZero() {
-			due := *item.DueDate
-			candidate.DueDate = &due
-			deadline = &due
-		}
-		if item.DueAt != nil {
-			dueDate, err := dateOf(*item.DueAt, loc)
-			if err == nil {
-				deadline = &dueDate
-			}
-		}
-		candidate.Urgency = 2
-		if item.IsOverdue(now) {
-			candidate.Urgency = 0
-		} else if deadline != nil && deadline.String() <= today.String() {
-			candidate.Urgency = 1
-		}
-		items = append(items, pending{candidate: candidate, deadline: deadline})
-	}
-	sort.SliceStable(items, func(a, b int) bool {
-		left, right := items[a].candidate, items[b].candidate
-		if left.Urgency != right.Urgency {
-			return left.Urgency < right.Urgency
-		}
-		if left.Priority != right.Priority {
-			return priorityRank(left.Priority) < priorityRank(right.Priority)
-		}
-		if leftDeadline, rightDeadline := deadlineKey(items[a].deadline), deadlineKey(items[b].deadline); leftDeadline != rightDeadline {
-			return leftDeadline < rightDeadline
-		}
-		return left.CreatedAt.Before(right.CreatedAt)
-	})
-
-	proposal := Proposal{
-		GeneratedAt: now,
-		HorizonDays: horizonDays,
-		Moves:       []Move{},
-		Placements:  []ProposedPlacement{},
-		Unplaced:    []UnplacedView{},
-		Days:        make([]DayLoad, 0, len(days)),
-	}
-
-	placed := 0
-	for _, item := range items {
-		// A deadline that already passed cannot constrain the plan any more: the
-		// task has to be done as early as possible, not "before yesterday".
-		deadline := item.deadline
-		if deadline != nil && deadline.String() < today.String() {
-			deadline = nil
-		}
-		target := -1
-		for i := range days {
-			if !days[i].working {
-				continue
-			}
-			if deadline != nil && days[i].date.String() > deadline.String() {
-				continue
-			}
-			if days[i].capacity < item.candidate.Estimate {
-				continue
-			}
-			target = i
-			break
-		}
-		if target < 0 {
-			reason := "на горизонте не хватает времени"
-			if deadline != nil {
-				reason = "не помещается до " + deadline.String()
-			}
-			proposal.Unplaced = append(proposal.Unplaced, UnplacedView{
-				TaskID:      item.candidate.TaskID,
-				Title:       item.candidate.Title,
-				EstimateMin: int(item.candidate.Estimate.Minutes()),
-				Reason:      reason,
-			})
-			continue
-		}
-		state := &days[target]
-		slot := -1
-		for i, free := range state.free {
-			if free.Duration() >= item.candidate.Estimate {
-				slot = i
-				break
-			}
-		}
-		if slot < 0 {
-			state.capacity -= item.candidate.Estimate
-			proposal.Unplaced = append(proposal.Unplaced, UnplacedView{
-				TaskID:      item.candidate.TaskID,
-				Title:       item.candidate.Title,
-				EstimateMin: int(item.candidate.Estimate.Minutes()),
-				Reason:      "нет непрерывного окна нужной длины",
-			})
-			continue
-		}
-		start := state.free[slot].Start
-		end := start.Add(item.candidate.Estimate)
-		remaining := Interval{Start: end.Add(prefs.Buffer), End: state.free[slot].End}
-		if remaining.Duration() > 0 {
-			state.free[slot] = remaining
-		} else {
-			state.free = append(state.free[:slot], state.free[slot+1:]...)
-		}
-		state.capacity -= item.candidate.Estimate
-
-		proposal.Placements = append(proposal.Placements, ProposedPlacement{
-			TaskID: item.candidate.TaskID,
-			Date:   state.date.String(),
-			Start:  start.UTC(),
-			End:    end.UTC(),
-		})
-		reason := "освободилось время"
-		if item.candidate.Urgency == 0 {
-			reason = "просрочено"
-		} else if item.candidate.Urgency == 1 {
-			reason = "срок сегодня"
-		}
-		proposal.Moves = append(proposal.Moves, Move{
-			TaskID:   item.candidate.TaskID,
-			Title:    item.candidate.Title,
-			To:       state.date.String(),
-			Reason:   reason,
-			Estimate: int(item.candidate.Estimate.Minutes()),
-		})
-		placed++
-	}
-
-	for _, state := range days {
-		proposal.Days = append(proposal.Days, DayLoad{
-			Date:        state.date.String(),
-			Working:     state.working,
-			FreeMinutes: int(state.capacity.Minutes()),
-			PlannedMin:  int(state.window.Duration().Minutes()) - int(state.capacity.Minutes()),
-		})
-	}
-	if placed == 0 {
-		proposal.Summary = "Переносить нечего: всё уже помещается."
-	} else {
-		proposal.Summary = fmt.Sprintf("Предложено мест: %d. Ничего не изменится без вашего согласия.", placed)
-	}
-	return proposal, nil
 }
 
 // openTasks loads open tasks once per transaction.
@@ -909,12 +613,33 @@ func (s *Service) SyncTaskReminders(ctx context.Context, value task.Task) error 
 	})
 }
 
-// DueReminders returns reminders that are due for delivery, with the task they
-// refer to. Finished tasks are skipped: a completed task must not be announced.
+// DueReminders returns reminders that should be published now: due, not yet
+// published, and belonging to work that is still open.
 func (s *Service) DueReminders(ctx context.Context, until time.Time) ([]ReminderView, error) {
+	return s.dueReminders(ctx, until, false)
+}
+
+// ActionableReminders returns everything the client still has to show.
+//
+// Unlike DueReminders it includes reminders whose live event was already
+// published, so a client that was closed, offline or reconnecting still receives
+// them. Delivery is recorded only when the client acknowledges the reminder.
+func (s *Service) ActionableReminders(ctx context.Context, until time.Time) ([]ReminderView, error) {
+	return s.dueReminders(ctx, until, true)
+}
+
+func (s *Service) dueReminders(ctx context.Context, until time.Time, actionable bool) ([]ReminderView, error) {
 	var out []ReminderView
 	err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
-		pending, err := tx.Reminders().ListPending(ctx, until.UTC())
+		var (
+			pending []planning.Reminder
+			err     error
+		)
+		if actionable {
+			pending, err = tx.Reminders().ListActionable(ctx, until.UTC())
+		} else {
+			pending, err = tx.Reminders().ListPending(ctx, until.UTC())
+		}
 		if err != nil {
 			return err
 		}
@@ -924,6 +649,8 @@ func (s *Service) DueReminders(ctx context.Context, until time.Time) ([]Reminder
 				continue
 			}
 			if found.Task.Status != task.StatusOpen {
+				// A finished task must not be announced, and its pending
+				// reminders would otherwise stay forever.
 				if err := tx.Reminders().DismissForTask(ctx, reminder.TaskID); err != nil {
 					return err
 				}
@@ -936,11 +663,67 @@ func (s *Service) DueReminders(ctx context.Context, until time.Time) ([]Reminder
 	return out, err
 }
 
-// MarkReminderSent records delivery.
-func (s *Service) MarkReminderSent(ctx context.Context, id int64, at time.Time) error {
+// MarkReminderNotified records that the live event was published.
+func (s *Service) MarkReminderNotified(ctx context.Context, id int64, at time.Time) error {
 	return s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
-		return tx.Reminders().MarkSent(ctx, id, at.UTC())
+		return tx.Reminders().MarkNotified(ctx, id, at.UTC())
 	})
+}
+
+// MarkReminderDelivered records that the user was shown the reminder.
+func (s *Service) MarkReminderDelivered(ctx context.Context, id int64, at time.Time) error {
+	return s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
+		return tx.Reminders().MarkDelivered(ctx, id, at.UTC())
+	})
+}
+
+// ReconcileReminders re-derives the reminders of open tasks that have a deadline
+// but no pending reminder at all.
+//
+// Reminder regeneration runs after every task change and is not allowed to fail
+// that change, so a failure there could otherwise leave a task silently without
+// notifications. This pass makes that state self-healing instead of permanent.
+func (s *Service) ReconcileReminders(ctx context.Context) (int, error) {
+	now := s.clock.Now()
+	repaired := 0
+	err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
+		result, err := tx.Tasks().List(ctx, tasks.TaskFilter{
+			Statuses: []task.Status{task.StatusOpen},
+			Limit:    tasks.Some(maxPlanCandidates),
+		})
+		if err != nil {
+			return err
+		}
+		for _, item := range result.Tasks {
+			value := item.Task
+			if value.DueAt == nil && (value.DueDate == nil || value.DueDate.IsZero()) {
+				continue
+			}
+			planned := planning.PlanReminders(value, now)
+			if len(planned) == 0 {
+				continue
+			}
+			existing, err := tx.Reminders().ListForTask(ctx, value.ID)
+			if err != nil {
+				return err
+			}
+			pending := 0
+			for _, reminder := range existing {
+				if reminder.Status == planning.ReminderPending {
+					pending++
+				}
+			}
+			if pending > 0 {
+				continue
+			}
+			if err := tx.Reminders().ReplaceForTask(ctx, value.ID, planned); err != nil {
+				return err
+			}
+			repaired++
+		}
+		return nil
+	})
+	return repaired, err
 }
 
 // RemindersOf returns the planned reminders of one task.
@@ -971,58 +754,50 @@ type EstimateSuggestion struct {
 
 // SuggestEstimate estimates how long similar work took before.
 //
-// History beats guessing: tasks that share a tag or most title words provide the
-// sample, and the median is used so a single outlier does not skew the plan. With
-// no history at all the service says so instead of pretending to know, and the
-// assistant asks the user.
+// It follows the same rule as the planner: an estimate the user stated wins, then
+// the median of similar completed work, then the configured default. When only the
+// default is left the answer says so and carries the question to ask, so an
+// invented duration never looks like a known one.
 func (s *Service) SuggestEstimate(ctx context.Context, title string, tags []string) (EstimateSuggestion, error) {
-	const maxSamples = 200
-	filter := tasks.TaskFilter{
-		Statuses: []task.Status{task.StatusCompleted},
-		Limit:    tasks.Some(maxSamples),
-	}
-	if len(tags) > 0 {
-		filter.Tags = tags
+	prefs, err := s.LoadPreferences(ctx)
+	if err != nil {
+		return EstimateSuggestion{}, err
 	}
 
-	var done []tasks.TaskWithVersion
-	err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
-		result, err := tx.Tasks().List(ctx, filter)
-		done = result.Tasks
+	var history *historyIndex
+	err = s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
+		loaded, err := s.loadHistory(ctx, tx)
+		history = loaded
 		return err
 	})
 	if err != nil {
 		return EstimateSuggestion{}, err
 	}
 
-	words := significantWords(title)
-	samples := make([]int, 0, len(done))
-	basedOn := make([]string, 0, 3)
-	for _, item := range done {
-		if item.Task.EstimateMinutes == nil {
-			continue
+	samples := history.samples(title, tags)
+	if len(samples) >= minHistorySamples {
+		basedOn := make([]string, 0, 3)
+		for _, sample := range samples {
+			if len(basedOn) >= 3 {
+				break
+			}
+			basedOn = append(basedOn, sample.Title)
 		}
-		if len(tags) == 0 && !sharesWords(words, item.Task.Title) {
-			continue
-		}
-		samples = append(samples, *item.Task.EstimateMinutes)
-		if len(basedOn) < 3 {
-			basedOn = append(basedOn, item.Task.Title)
-		}
-	}
-	if len(samples) >= 2 {
-		sort.Ints(samples)
 		return EstimateSuggestion{
-			Minutes: samples[len(samples)/2],
-			Source:  "history",
+			Minutes: medianMinutes(samples),
+			Source:  string(EstimateHistory),
 			Samples: len(samples),
 			BasedOn: basedOn,
 		}, nil
 	}
+
+	minutes := int(prefs.DefaultEstimate.Minutes())
 	return EstimateSuggestion{
-		Source:   "unknown",
-		Samples:  len(samples),
-		Question: "Сколько времени это займёт? Похожих задач в истории нет.",
+		Minutes: minutes,
+		Source:  string(EstimateDefault),
+		Samples: len(samples),
+		Question: "Похожих задач в истории нет. Планирую " + formatDuration(prefs.DefaultEstimate) +
+			" по умолчанию — уточните длительность, если она другая.",
 	}, nil
 }
 

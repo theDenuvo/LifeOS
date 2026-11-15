@@ -109,3 +109,67 @@ func TestPreferencesWindowRespectsWorkingDays(t *testing.T) {
 		t.Fatal("Saturday accepted as a working day")
 	}
 }
+
+func TestClipFromDropsPassedTime(t *testing.T) {
+	base := time.Date(2026, 11, 9, 9, 0, 0, 0, time.UTC)
+	slots := []Interval{
+		{Start: base, End: base.Add(time.Hour)},
+		{Start: base.Add(2 * time.Hour), End: base.Add(3 * time.Hour)},
+	}
+	clipped := ClipFrom(slots, base.Add(30*time.Minute))
+	if len(clipped) != 2 {
+		t.Fatalf("clipped = %+v, want two intervals", clipped)
+	}
+	if !clipped[0].Start.Equal(base.Add(30 * time.Minute)) {
+		t.Errorf("first interval starts at %s, want the boundary", clipped[0].Start)
+	}
+	if !clipped[0].End.Equal(base.Add(time.Hour)) {
+		t.Errorf("first interval ends at %s, want it unchanged", clipped[0].End)
+	}
+
+	// Everything that already passed disappears instead of becoming a zero-length
+	// slot the planner could mistake for free time.
+	past := ClipFrom(slots, base.Add(4*time.Hour))
+	if len(past) != 0 {
+		t.Fatalf("clipped = %+v, want nothing left", past)
+	}
+}
+
+func TestScheduleStopsAtAnExactDeadline(t *testing.T) {
+	base := time.Date(2026, 11, 9, 9, 0, 0, 0, time.UTC)
+	slot := []Interval{{Start: base, End: base.Add(8 * time.Hour)}}
+	deadline := base.Add(2 * time.Hour) // 11:00
+
+	// Three hours of work cannot end by 11:00, so nothing may be placed.
+	placements, unplaced := Schedule(slot, []Candidate{{
+		TaskID:        1,
+		Title:         "Долгая работа",
+		Estimate:      3 * time.Hour,
+		HardDeadline:  &deadline,
+		DeadlineLabel: "дедлайна 11:00",
+	}}, 10*time.Minute)
+	if len(placements) != 0 {
+		t.Fatalf("placed %+v, want nothing before the deadline", placements)
+	}
+	if len(unplaced) != 1 {
+		t.Fatalf("unplaced = %+v, want an explanation", unplaced)
+	}
+	if unplaced[0].Reason == "" {
+		t.Error("the reason is empty")
+	}
+
+	// One hour fits: 10:00 is not a candidate (it would end at 11:00 sharp only if
+	// it started at 10:00, which does fit), so the earliest start is used.
+	placements, unplaced = Schedule(slot, []Candidate{{
+		TaskID:       2,
+		Title:        "Короткая работа",
+		Estimate:     time.Hour,
+		HardDeadline: &deadline,
+	}}, 10*time.Minute)
+	if len(placements) != 1 || len(unplaced) != 0 {
+		t.Fatalf("placements = %+v, unplaced = %+v, want one placement", placements, unplaced)
+	}
+	if !placements[0].End.Equal(base.Add(time.Hour)) {
+		t.Errorf("placed %s-%s, want it to end before the deadline", placements[0].Start, placements[0].End)
+	}
+}

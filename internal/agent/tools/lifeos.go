@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/theDenuvo/LifeOS/internal/application/assistant"
+	"github.com/theDenuvo/LifeOS/internal/application/completion"
 	appdocuments "github.com/theDenuvo/LifeOS/internal/application/documents"
 	appevents "github.com/theDenuvo/LifeOS/internal/application/events"
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
@@ -33,6 +34,7 @@ type lifeOSToolConfig struct {
 	workspace  *workspaceConfig
 	planning   *planning.Service
 	recurrence *recurrence.Service
+	completion *completion.Service
 }
 
 // WithSearchService exposes unified search to the assistant.
@@ -67,6 +69,11 @@ func WithRecurrence(service *recurrence.Service) LifeOSToolOption {
 	return func(c *lifeOSToolConfig) { c.recurrence = service }
 }
 
+// WithCompletion attaches the completion checker used by verify_completion.
+func WithCompletion(service *completion.Service) LifeOSToolOption {
+	return func(c *lifeOSToolConfig) { c.completion = service }
+}
+
 // WithTimezone sets the timezone used for date defaults.
 func WithTimezone(timezone string) LifeOSToolOption {
 	return func(config *lifeOSToolConfig) {
@@ -99,6 +106,9 @@ func NewLifeOSTools(taskService *tasks.Service, inboxService *inbox.Service, sum
 	registry := NewRegistry()
 	if config.planning != nil {
 		registerPlanningTools(registry, config.planning, config.recurrence, captureAdapter(inboxService), todayProvider(config.timezone))
+		if config.completion != nil {
+			registerCompletionTools(registry, config.completion)
+		}
 	}
 	if config.events != nil {
 		registerEventTools(registry, config.events, config.timezone)

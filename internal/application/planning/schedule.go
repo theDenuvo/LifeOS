@@ -35,6 +35,41 @@ func (i Interval) Contains(at time.Time) bool {
 	return !at.Before(i.Start) && at.Before(i.End)
 }
 
+// ClipFrom drops the part of every interval that lies before the given instant.
+//
+// Time that has already passed is not free time: planning it would reserve a
+// block in the past and show the user a plan for a day that is already over.
+// Intervals that end before the boundary disappear.
+func ClipFrom(slots []Interval, from time.Time) []Interval {
+	if from.IsZero() {
+		return slots
+	}
+	out := make([]Interval, 0, len(slots))
+	for _, slot := range slots {
+		if !slot.End.After(from) {
+			continue
+		}
+		start := slot.Start
+		if start.Before(from) {
+			start = from
+		}
+		out = append(out, Interval{Start: start, End: slot.End})
+	}
+	return out
+}
+
+// EstimateSource names where a duration came from.
+type EstimateSource string
+
+const (
+	// EstimateExplicit is the duration the user stated on the task.
+	EstimateExplicit EstimateSource = "explicit"
+	// EstimateHistory is the median of similar completed work.
+	EstimateHistory EstimateSource = "history"
+	// EstimateDefault is the user's configured fallback duration.
+	EstimateDefault EstimateSource = "default"
+)
+
 // Busy is an occupied range with a human label, so the interface can explain why
 // a slot is not free.
 type Busy struct {
@@ -60,24 +95,37 @@ type Candidate struct {
 	// Urgency is set by the service: 0 overdue, 1 due today, 2 due soon,
 	// 3 planned for the day, 4 without a deadline.
 	Urgency int
+	// HardDeadline is the exact moment the work must be finished by. It is nil
+	// when the deadline is only a calendar day (that limits the day, not the
+	// hour) and when a deadline has already passed: overdue work has to be
+	// scheduled as early as possible instead of being excluded forever.
+	HardDeadline *time.Time
+	// DeadlineLabel renders HardDeadline for the user, in their timezone.
+	DeadlineLabel string
+	// EstimateSource explains where Estimate came from, so a duration is never
+	// silently invented.
+	EstimateSource EstimateSource
 }
 
 // Placement is one scheduled candidate.
 type Placement struct {
-	TaskID   int64
-	Title    string
-	Priority task.Priority
-	Start    time.Time
-	End      time.Time
+	TaskID         int64
+	Title          string
+	Priority       task.Priority
+	Start          time.Time
+	End            time.Time
+	Estimate       time.Duration
+	EstimateSource EstimateSource
 }
 
 // Unplaced is a candidate that could not be scheduled, with the reason shown to
 // the user instead of a silent omission.
 type Unplaced struct {
-	TaskID   int64
-	Title    string
-	Estimate time.Duration
-	Reason   string
+	TaskID         int64
+	Title          string
+	Estimate       time.Duration
+	EstimateSource EstimateSource
+	Reason         string
 }
 
 // FreeSlots subtracts busy ranges from the window.
@@ -188,17 +236,19 @@ func Schedule(free []Interval, candidates []Candidate, buffer time.Duration) ([]
 	for _, candidate := range ordered {
 		index := -1
 		for i, slot := range slots {
-			if slot.Duration() >= candidate.Estimate {
-				index = i
-				break
+			if !fitsSlot(slot, candidate) {
+				continue
 			}
+			index = i
+			break
 		}
 		if index < 0 {
 			unplaced = append(unplaced, Unplaced{
-				TaskID:   candidate.TaskID,
-				Title:    candidate.Title,
-				Estimate: candidate.Estimate,
-				Reason:   noRoomReason(candidate, slots),
+				TaskID:         candidate.TaskID,
+				Title:          candidate.Title,
+				Estimate:       candidate.Estimate,
+				EstimateSource: candidate.EstimateSource,
+				Reason:         noRoomReason(candidate, slots),
 			})
 			continue
 		}
@@ -206,11 +256,13 @@ func Schedule(free []Interval, candidates []Candidate, buffer time.Duration) ([]
 		start := slot.Start
 		end := start.Add(candidate.Estimate)
 		placements = append(placements, Placement{
-			TaskID:   candidate.TaskID,
-			Title:    candidate.Title,
-			Priority: candidate.Priority,
-			Start:    start,
-			End:      end,
+			TaskID:         candidate.TaskID,
+			Title:          candidate.Title,
+			Priority:       candidate.Priority,
+			Start:          start,
+			End:            end,
+			Estimate:       candidate.Estimate,
+			EstimateSource: candidate.EstimateSource,
 		})
 		remaining := Interval{Start: end.Add(buffer), End: slot.End}
 		if remaining.Duration() > 0 {
@@ -220,6 +272,35 @@ func Schedule(free []Interval, candidates []Candidate, buffer time.Duration) ([]
 		}
 	}
 	return placements, unplaced
+}
+
+// fitsSlot reports whether the candidate can be placed at the start of the slot.
+//
+// The work has to be finished by an exact deadline, not merely started before it:
+// an hour of work started at 09:30 with a 10:00 deadline is late, so that slot is
+// not a candidate at all.
+func fitsSlot(slot Interval, candidate Candidate) bool {
+	if candidate.Estimate <= 0 || slot.Duration() < candidate.Estimate {
+		return false
+	}
+	if candidate.HardDeadline == nil {
+		return true
+	}
+	if !slot.Start.Before(*candidate.HardDeadline) {
+		return false
+	}
+	return !slot.Start.Add(candidate.Estimate).After(*candidate.HardDeadline)
+}
+
+// fitSlot returns the index of the first free interval the candidate fits in, or
+// -1 when no interval can hold it.
+func fitSlot(slots []Interval, candidate Candidate) int {
+	for i, slot := range slots {
+		if fitsSlot(slot, candidate) {
+			return i
+		}
+	}
+	return -1
 }
 
 func priorityRank(priority task.Priority) int {
@@ -250,6 +331,19 @@ func noRoomReason(candidate Candidate, slots []Interval) string {
 	}
 	if total == 0 {
 		return "в этот день больше нет свободного времени"
+	}
+	if candidate.HardDeadline != nil {
+		// There is still free time, just not before the deadline. Saying that is
+		// more useful than complaining about fragmented slots.
+		for _, slot := range slots {
+			if slot.Start.Before(*candidate.HardDeadline) {
+				label := candidate.DeadlineLabel
+				if label == "" {
+					label = "указанному сроку"
+				}
+				return "не хватает времени до " + label
+			}
+		}
 	}
 	if total >= candidate.Estimate {
 		return "нужно непрерывное окно " + formatDuration(candidate.Estimate) + ", а свободное время разбито на части"

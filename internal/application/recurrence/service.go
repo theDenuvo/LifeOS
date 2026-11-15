@@ -19,10 +19,18 @@ type Service struct {
 	tasks    *tasks.Service
 	clock    tasks.Clock
 	timezone string
+	store    Store
 }
 
 // ServiceOption customises the service.
 type ServiceOption func(*Service)
+
+// WithStore attaches the queue of recurring work that still needs its next
+// occurrence. Without it the service still works, but a failed creation cannot be
+// found and retried later.
+func WithStore(store Store) ServiceOption {
+	return func(s *Service) { s.store = store }
+}
 
 // WithTimezone sets the timezone used for date arithmetic when a task has none.
 func WithTimezone(timezone string) ServiceOption {
@@ -56,6 +64,17 @@ func (s *Service) Next(ctx context.Context, completed tasks.TaskWithVersion) err
 	repeat := *completed.Task.Repeat
 	if err := repeat.Validate(); err != nil {
 		return err
+	}
+	// Processing the same completion twice must not create two occurrences: the
+	// existing child is the proof that the work was already done.
+	if s.store != nil {
+		exists, err := s.store.ChildExists(ctx, completed.Task.ID)
+		if err != nil {
+			return fmt.Errorf("check next occurrence: %w", err)
+		}
+		if exists {
+			return nil
+		}
 	}
 
 	anchor, err := s.anchorDate(completed.Task)

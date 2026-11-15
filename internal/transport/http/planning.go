@@ -13,37 +13,39 @@ import (
 )
 
 type planItemBody struct {
-	BlockID    int64  `json:"block_id,omitempty"`
-	TaskID     int64  `json:"task_id"`
-	Title      string `json:"title"`
-	Priority   string `json:"priority"`
-	Start      string `json:"start"`
-	End        string `json:"end"`
-	StartLocal string `json:"start_local"`
-	EndLocal   string `json:"end_local"`
-	Source     string `json:"source,omitempty"`
-	Status     string `json:"status,omitempty"`
-	Estimate   int    `json:"estimate_minutes,omitempty"`
-	Recurring  bool   `json:"recurring,omitempty"`
-	DueAt      string `json:"due_at,omitempty"`
-	DueDate    string `json:"due_date,omitempty"`
+	BlockID        int64  `json:"block_id,omitempty"`
+	TaskID         int64  `json:"task_id"`
+	Title          string `json:"title"`
+	Priority       string `json:"priority"`
+	Start          string `json:"start"`
+	End            string `json:"end"`
+	StartLocal     string `json:"start_local"`
+	EndLocal       string `json:"end_local"`
+	Source         string `json:"source,omitempty"`
+	Status         string `json:"status,omitempty"`
+	Estimate       int    `json:"estimate_minutes,omitempty"`
+	EstimateSource string `json:"estimate_source,omitempty"`
+	Recurring      bool   `json:"recurring,omitempty"`
+	DueAt          string `json:"due_at,omitempty"`
+	DueDate        string `json:"due_date,omitempty"`
 }
 
 func newPlanItemBody(item planning.PlanItem, loc *time.Location) planItemBody {
 	body := planItemBody{
-		BlockID:    item.BlockID,
-		TaskID:     item.TaskID,
-		Title:      item.Title,
-		Priority:   string(item.Priority),
-		Start:      formatTime(item.Start),
-		End:        formatTime(item.End),
-		StartLocal: item.Start.In(loc).Format("15:04"),
-		EndLocal:   item.End.In(loc).Format("15:04"),
-		Source:     string(item.Source),
-		Status:     string(item.Status),
-		Estimate:   item.Estimate,
-		Recurring:  item.Recurring,
-		DueDate:    item.DueDate,
+		BlockID:        item.BlockID,
+		TaskID:         item.TaskID,
+		Title:          item.Title,
+		Priority:       string(item.Priority),
+		Start:          formatTime(item.Start),
+		End:            formatTime(item.End),
+		StartLocal:     item.Start.In(loc).Format("15:04"),
+		EndLocal:       item.End.In(loc).Format("15:04"),
+		Source:         string(item.Source),
+		Status:         string(item.Status),
+		Estimate:       item.Estimate,
+		EstimateSource: string(item.EstimateSource),
+		Recurring:      item.Recurring,
+		DueDate:        item.DueDate,
 	}
 	if item.DueAt != nil {
 		body.DueAt = formatTime(*item.DueAt)
@@ -96,6 +98,7 @@ func (h *Handler) getDayPlan(w http.ResponseWriter, r *http.Request) {
 			"task_id":          item.TaskID,
 			"title":            item.Title,
 			"estimate_minutes": item.EstimateMin,
+			"estimate_source":  string(item.Source),
 			"reason":           item.Reason,
 		})
 	}
@@ -103,6 +106,7 @@ func (h *Handler) getDayPlan(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, http.StatusOK, map[string]any{
 		"date":            plan.Date,
 		"working":         plan.Working,
+		"past":            plan.Past,
 		"workday_start":   plan.WorkdayStart,
 		"workday_end":     plan.WorkdayEnd,
 		"free_minutes":    plan.FreeMinutes,
@@ -161,7 +165,20 @@ func (h *Handler) getPlanProposal(w http.ResponseWriter, r *http.Request) {
 			"task_id":          item.TaskID,
 			"title":            item.Title,
 			"estimate_minutes": item.EstimateMin,
+			"estimate_source":  string(item.Source),
 			"reason":           item.Reason,
+		})
+	}
+	// Work that already has its time is reported, not silently omitted.
+	kept := make([]map[string]any, 0, len(proposal.Kept))
+	for _, item := range proposal.Kept {
+		kept = append(kept, map[string]any{
+			"task_id": item.TaskID,
+			"title":   item.Title,
+			"reason":  item.Reason,
+			"start":   formatTime(item.Start),
+			"end":     formatTime(item.End),
+			"source":  item.Source,
 		})
 	}
 	days = len(proposal.Days)
@@ -176,13 +193,14 @@ func (h *Handler) getPlanProposal(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeJSON(w, http.StatusOK, map[string]any{
-		"generated_at": formatTime(proposal.GeneratedAt),
-		"horizon_days": proposal.HorizonDays,
-		"summary":      proposal.Summary,
-		"moves":        moves,
-		"placements":   placements,
-		"unplaced":     unplaced,
-		"days":         load,
+		"generated_at":   formatTime(proposal.GeneratedAt),
+		"horizon_days":   proposal.HorizonDays,
+		"summary":        proposal.Summary,
+		"moves":          moves,
+		"placements":     placements,
+		"unplaced":       unplaced,
+		"already_placed": kept,
+		"days":           load,
 	})
 }
 
@@ -322,6 +340,8 @@ func (h *Handler) writePlanningError(w http.ResponseWriter, r *http.Request, err
 		h.writeProblem(w, r, http.StatusNotFound, "not-found", "Not Found", err.Error())
 	case errors.Is(err, planning.ErrTaskNotOpen),
 		errors.Is(err, planning.ErrPlacementInvalid),
+		errors.Is(err, planning.ErrPlacementInPast),
+		errors.Is(err, planning.ErrPlacementAfterDue),
 		errors.Is(err, planning.ErrPlacementOutsideWindow):
 		h.writeProblem(w, r, http.StatusBadRequest, "validation-failed", "Validation Failed", err.Error())
 	case errors.Is(err, planning.ErrPlacementConflict):

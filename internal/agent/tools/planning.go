@@ -174,14 +174,27 @@ func registerPlanningTools(
 					"task_id":          item.TaskID,
 					"title":            item.Title,
 					"estimate_minutes": item.EstimateMin,
+					"estimate_source":  string(item.Source),
 					"reason":           item.Reason,
 				})
 			}
+			kept := make([]map[string]any, 0, len(proposal.Kept))
+			for _, item := range proposal.Kept {
+				kept = append(kept, map[string]any{
+					"task_id": item.TaskID,
+					"title":   item.Title,
+					"reason":  item.Reason,
+					"start":   item.Start.Format(time.RFC3339),
+					"end":     item.End.Format(time.RFC3339),
+					"source":  item.Source,
+				})
+			}
 			return map[string]any{
-				"summary":    proposal.Summary,
-				"moves":      moves,
-				"placements": placements,
-				"unplaced":   unplaced,
+				"summary":        proposal.Summary,
+				"moves":          moves,
+				"placements":     placements,
+				"unplaced":       unplaced,
+				"already_placed": kept,
 			}, nil
 		},
 	})
@@ -345,6 +358,7 @@ func planView(plan planning.DayPlan) map[string]any {
 			"start":            item.Start.Format(time.RFC3339),
 			"end":              item.End.Format(time.RFC3339),
 			"estimate_minutes": item.Estimate,
+			"estimate_source":  string(item.EstimateSource),
 			"recurring":        item.Recurring,
 		})
 	}
@@ -354,12 +368,14 @@ func planView(plan planning.DayPlan) map[string]any {
 			"task_id":          item.TaskID,
 			"title":            item.Title,
 			"estimate_minutes": item.EstimateMin,
+			"estimate_source":  string(item.Source),
 			"reason":           item.Reason,
 		})
 	}
 	return map[string]any{
 		"date":            plan.Date,
 		"working":         plan.Working,
+		"past":            plan.Past,
 		"workday":         plan.WorkdayStart + "-" + plan.WorkdayEnd,
 		"free_minutes":    plan.FreeMinutes,
 		"planned_minutes": plan.PlannedMinutes,

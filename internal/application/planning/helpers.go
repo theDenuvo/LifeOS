@@ -68,6 +68,42 @@ func sameLocalDay(at time.Time, date task.CalendarDate, loc *time.Location) bool
 	return built.String() == date.String()
 }
 
+// dateIsPast reports whether the calendar date lies before the local today.
+func dateIsPast(date task.CalendarDate, now time.Time, loc *time.Location) bool {
+	today, err := dateOf(now, loc)
+	if err != nil {
+		return false
+	}
+	return date.String() < today.String()
+}
+
+// nextMinute rounds an instant up to the next whole minute.
+//
+// Planning from a moment in the middle of a minute would produce blocks like
+// 09:13:37-09:43:37, which is precise and unreadable. The cost is at most a minute
+// of otherwise unusable time.
+func nextMinute(at time.Time) time.Time {
+	truncated := at.Truncate(time.Minute)
+	if truncated.Before(at) {
+		return truncated.Add(time.Minute)
+	}
+	return truncated
+}
+
+// dropShortSlots removes fragments that are too short to be worth placing, which
+// can appear after the free time was clipped to the current moment.
+func dropShortSlots(slots []Interval, minSlot time.Duration) []Interval {
+	out := make([]Interval, 0, len(slots))
+	for _, slot := range slots {
+		if slot.Duration() < minSlot {
+			continue
+		}
+		out = append(out, slot)
+	}
+	return out
+}
+
+// sameCalendarDate reports whether the pointer holds the given date.
 func sameCalendarDate(value *task.CalendarDate, date task.CalendarDate) bool {
 	if value == nil || value.IsZero() {
 		return false

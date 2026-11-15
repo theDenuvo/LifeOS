@@ -38,8 +38,8 @@ func TestMigrationsApply(t *testing.T) {
 	if err != nil {
 		t.Fatalf("goose.GetDBVersion failed: %v", err)
 	}
-	if version != 16 {
-		t.Errorf("Expected version 16, got %d", version)
+	if version != 17 {
+		t.Errorf("Expected version 17, got %d", version)
 	}
 }
 
@@ -53,8 +53,8 @@ func TestMigrationsIdempotent(t *testing.T) {
 	}
 
 	version, _ := goose.GetDBVersion(db)
-	if version != 16 {
-		t.Errorf("Expected version 16 after re-apply, got %d", version)
+	if version != 17 {
+		t.Errorf("Expected version 17 after re-apply, got %d", version)
 	}
 }
 
@@ -64,7 +64,7 @@ func TestSchemaTablesExist(t *testing.T) {
 
 	expectedTables := []string{
 		"tasks", "inbox_items", "task_events", "conversations",
-		"messages", "pending_actions", "app_settings", "calendar_events", "documents", "document_tasks", "goose_db_version",
+		"messages", "pending_actions", "app_settings", "calendar_events", "documents", "document_tasks", "task_blocks", "task_reminders", "completion_checks", "goose_db_version",
 	}
 
 	for _, table := range expectedTables {
@@ -342,8 +342,8 @@ func TestProductionMigrationPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("goose.GetDBVersion failed: %v", err)
 	}
-	if version != 16 {
-		t.Errorf("Expected version 16, got %d", version)
+	if version != 17 {
+		t.Errorf("Expected version 17, got %d", version)
 	}
 }
 

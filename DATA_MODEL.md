@@ -138,12 +138,36 @@
 | `task_id` | INTEGER | NOT NULL, FK → tasks(id) ON DELETE CASCADE | |
 | `fire_at` | TIMESTAMP | NOT NULL | UTC момент отправки |
 | `kind` | TEXT | NOT NULL, CHECK IN ('lead','due','overdue') | Предупреждение, срок, после срока |
-| `status` | TEXT | NOT NULL, CHECK IN ('pending','sent','dismissed'), DEFAULT 'pending' | |
-| `sent_at` | TIMESTAMP | NULLABLE | Когда доставлено |
+| `status` | TEXT | NOT NULL, CHECK IN ('pending','sent','dismissed'), DEFAULT 'pending' | `pending` — момент наступил и пользователь ещё не подтвердил; `sent` — показано и подтверждено |
+| `sent_at` | TIMESTAMP | NULLABLE | Когда пользователь подтвердил показ |
+| `notified_at` | TIMESTAMP | NULLABLE | Когда живое событие было опубликовано (ровно один раз) |
 
 **Индекс:** `idx_task_reminders_unique` (task_id, fire_at, kind) — дубликаты невозможны; `idx_task_reminders_pending` (status, fire_at).
 
-**Правило:** напоминания пересчитываются при каждом изменении задачи, отправленные сохраняются как история, ожидающие заменяются. Не более трёх на задачу, только будущие моменты, у завершённой задачи — ничего.
+**Правило:** напоминания пересчитываются при каждом изменении задачи, подтверждённые сохраняются как история, ожидающие заменяются. Не более трёх на задачу, только будущие моменты, у завершённой задачи — ничего.
+
+**Доставка:** публикация в SSE — вспомогательный канал; факт доставки фиксирует только подтверждение клиента (`sent_at`). Поэтому напоминание переживает перезапуск приложения и закрытую вкладку: клиент получает его из `GET /api/v1/reminders` при следующем подключении. Сбой пересчёта лечится проходом `ReconcileReminders`, который возвращает расписание задачам, оставшимся без напоминаний.
+
+---
+
+### 2.3 CompletionCheck (Проверка выполнения)
+
+| Поле | Тип | Ограничения | Описание |
+|------|-----|-------------|----------|
+| `id` | INTEGER | PK, AUTOINCREMENT | |
+| `task_id` | INTEGER | NOT NULL, FK → tasks(id) ON DELETE CASCADE | |
+| `verdict` | TEXT | NOT NULL, CHECK IN ('confirmed','insufficient','contradictory','already_completed') | Заключение проверки |
+| `confidence` | REAL | NOT NULL, 0–1 | Уверенность |
+| `reason` | TEXT | NOT NULL | Объяснение для пользователя |
+| `evidence` | TEXT | NULLABLE, JSON | Найденные основания: источник, ссылка, фрагмент |
+| `sources` | TEXT | NULLABLE, JSON | Какие источники проверялись и какие были недоступны |
+| `decision` | TEXT | NOT NULL, CHECK IN ('none','accepted','declined'), DEFAULT 'none' | Решение пользователя |
+| `decided_at` | TIMESTAMP | NULLABLE | Когда решение принято |
+| `created_at` | TIMESTAMP | NOT NULL | UTC |
+
+**Индекс:** `idx_completion_checks_task` (task_id, created_at DESC).
+
+**Правило:** проверка никогда не меняет статус задачи сама. Основание хранится вместе с заключением, чтобы вывод можно было пересмотреть. `declined` запоминается и блокирует автоматическое завершение этой задачи.
 
 ---
 

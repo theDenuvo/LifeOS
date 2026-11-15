@@ -51,13 +51,22 @@ func (s ReminderStatus) IsValid() bool {
 
 // Reminder is one planned notification about a task.
 type Reminder struct {
-	ID        int64
-	TaskID    int64
-	FireAt    time.Time
-	Kind      ReminderKind
-	Status    ReminderStatus
-	SentAt    *time.Time
-	CreatedAt time.Time
+	ID     int64
+	TaskID int64
+	FireAt time.Time
+	Kind   ReminderKind
+	Status ReminderStatus
+	SentAt *time.Time
+	// NotifiedAt records that the live event was published once. Publishing is
+	// best effort: it does not mark the reminder as delivered, because nobody may
+	// be listening. The reminder stays available for a client that reconnects.
+	NotifiedAt *time.Time
+	CreatedAt  time.Time
+}
+
+// Delivered reports whether the user has actually been shown this reminder.
+func (r Reminder) Delivered() bool {
+	return r.Status == ReminderSent && r.SentAt != nil
 }
 
 // MaxRemindersPerTask bounds how many notifications a single task may produce.

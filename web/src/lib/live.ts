@@ -1,4 +1,5 @@
 import { writable } from 'svelte/store';
+import { ackReminder, getDueReminders } from './api';
 
 // liveRevision increments on every server-sent change. Pages subscribe and
 // reload their data, so a change made in one tab (or by the assistant later)
@@ -13,12 +14,70 @@ export const conversationsRevision = writable(0);
 // store rather than a page subscription because a reminder must reach the user
 // wherever they are in the interface.
 export interface ReminderNotice {
+	/** Present for anything that came from the durable endpoint. */
+	reminder_id?: number;
 	task_id: number;
 	title: string;
 	kind: 'lead' | 'due' | 'overdue';
 	due_at?: string;
 	due_date?: string;
 	fire_at: string;
+}
+
+// shownReminders remembers which reminders this tab already displayed, so a
+// re-render, a second live event or a repeated poll cannot produce a duplicate
+// toast. The server is still the source of truth: an acknowledged reminder is not
+// offered again after a reload.
+const shownReminders = new Set<number>();
+
+/**
+ * deliverReminder shows a reminder once and remembers that it was shown.
+ *
+ * The reminder is acknowledged on the server only after it is on screen, which is
+ * what makes "delivered" mean "the user saw it" instead of "we published an
+ * event".
+ */
+function deliverReminder(notice: ReminderNotice): void {
+	const id = notice.reminder_id;
+	if (id !== undefined) {
+		if (shownReminders.has(id)) return;
+		shownReminders.add(id);
+	}
+	reminderNotice.set(notice);
+	notifyDesktop(notice);
+	if (id !== undefined) {
+		void ackReminder(id).catch(() => {
+			// A failed acknowledgement is not a lost reminder: it stays pending on
+			// the server and comes back on the next load.
+			shownReminders.delete(id);
+		});
+	}
+}
+
+/**
+ * catchUpReminders fetches the reminders that fired while this tab was closed.
+ *
+ * Live events are best effort — nobody may be connected when the moment comes —
+ * so the durable list is what actually guarantees that a reminder is not lost.
+ */
+async function catchUpReminders(): Promise<void> {
+	if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+	try {
+		const payload = await getDueReminders();
+		for (const reminder of payload.data) {
+			deliverReminder({
+				reminder_id: reminder.reminder_id,
+				task_id: reminder.task_id,
+				title: reminder.title,
+				kind: reminder.kind,
+				due_at: reminder.due_at,
+				due_date: reminder.due_date,
+				fire_at: reminder.fire_at
+			});
+		}
+	} catch {
+		// Offline or the server is restarting: the next load tries again.
+	}
 }
 
 export const reminderNotice = writable<ReminderNotice | null>(null);
@@ -71,8 +130,7 @@ export function startLive(): void {
 	source.addEventListener('reminder', (event) => {
 		try {
 			const payload = JSON.parse((event as MessageEvent).data) as ReminderNotice;
-			reminderNotice.set(payload);
-			notifyDesktop(payload);
+			deliverReminder(payload);
 		} catch {
 			// A malformed reminder is not worth breaking the stream for.
 		}
@@ -81,6 +139,20 @@ export function startLive(): void {
 	// EventSource reconnects on its own and sends Last-Event-ID, so the server
 	// replays anything missed while the connection was down.
 	source.onerror = () => {};
+
+	// The live stream is best effort; the stored list is what makes delivery
+	// reliable. Ask for it on start, on every reconnect and when the tab comes
+	// back to the foreground.
+	void catchUpReminders();
+	source.addEventListener('open', () => {
+		void catchUpReminders();
+	});
+	document.addEventListener('visibilitychange', () => {
+		if (document.visibilityState === 'visible') void catchUpReminders();
+	});
+	window.addEventListener('focus', () => {
+		void catchUpReminders();
+	});
 }
 
 // notifyDesktop shows a system notification when the tab is in the background and

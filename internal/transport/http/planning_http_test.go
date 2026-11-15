@@ -2,14 +2,17 @@ package httptransport
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
 	appcalendar "github.com/theDenuvo/LifeOS/internal/application/calendar"
+	"github.com/theDenuvo/LifeOS/internal/application/completion"
 	appevents "github.com/theDenuvo/LifeOS/internal/application/events"
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
 	"github.com/theDenuvo/LifeOS/internal/application/planning"
 	"github.com/theDenuvo/LifeOS/internal/application/recurrence"
+	"github.com/theDenuvo/LifeOS/internal/application/settings"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	"github.com/theDenuvo/LifeOS/internal/config"
 	"github.com/theDenuvo/LifeOS/internal/domain/task"
@@ -17,14 +20,44 @@ import (
 	"github.com/theDenuvo/LifeOS/internal/infrastructure/sqlite"
 )
 
-// newPlanningAPI builds a handler with the planner wired in, over a real
-// temporary SQLite database: the planning rules, the repositories and the HTTP
-// contract are all exercised together.
-func newPlanningAPI(t *testing.T, now time.Time) (*Handler, func()) {
+// reviewClock is an advanceable clock: reminder and planning behaviour depend on
+// the current instant, and a test has to be able to move it forward.
+type reviewClock struct {
+	now time.Time
+}
+
+// Now implements the clock interface.
+func (c *reviewClock) Now() time.Time { return c.now }
+
+// Advance moves the clock forward.
+func (c *reviewClock) Advance(d time.Duration) { c.now = c.now.Add(d) }
+
+// planningStack is a fully wired LifeOS stack over a real temporary database,
+// so planning, reminders, recurrence and completion are exercised together.
+type planningStack struct {
+	handler    *Handler
+	db         *sql.DB
+	tasks      *tasks.Service
+	planner    *planning.Service
+	recurrence *recurrence.Service
+	completion *completion.Service
+	clock      *reviewClock
+	path       string
+	cleanup    func()
+}
+
+// newPlanningStack builds the stack on a fresh database.
+func newPlanningStack(t *testing.T, now time.Time) *planningStack {
+	t.Helper()
+	return newPlanningStackAt(t, now, t.TempDir()+"/planning.db")
+}
+
+// newPlanningStackAt builds the stack on a specific database file, which makes it
+// possible to reopen the same data and check what survived a restart.
+func newPlanningStackAt(t *testing.T, now time.Time, path string) *planningStack {
 	t.Helper()
 
-	tmpDir := t.TempDir()
-	db, err := sqlite.Open(tmpDir + "/planning.db")
+	db, err := sqlite.Open(path)
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
@@ -33,8 +66,8 @@ func newPlanningAPI(t *testing.T, now time.Time) (*Handler, func()) {
 		t.Fatalf("migrate: %v", err)
 	}
 
-	cfg := &config.Config{DataDir: tmpDir, Timezone: "Europe/Moscow"}
-	clock := apiClock{now: now}
+	cfg := &config.Config{DataDir: t.TempDir(), Timezone: "Europe/Moscow"}
+	clock := &reviewClock{now: now}
 	broker := events.NewBroker()
 
 	var planner *planning.Service
@@ -53,11 +86,17 @@ func newPlanningAPI(t *testing.T, now time.Time) (*Handler, func()) {
 		planning.WithTimezone("Europe/Moscow"),
 		planning.WithPublisher(broker),
 	)
-	recurrenceService := recurrence.NewService(taskService, clock, recurrence.WithTimezone("Europe/Moscow"))
+	recurrenceService := recurrence.NewService(
+		taskService,
+		clock,
+		recurrence.WithTimezone("Europe/Moscow"),
+		recurrence.WithStore(sqlite.NewRecurrenceStore(db)),
+	)
 	taskService.SetRecurrenceHook(func(ctx context.Context, completed tasks.TaskWithVersion) error {
 		return recurrenceService.Next(ctx, completed)
 	})
 
+	settingsService := settings.NewService(sqlite.NewSettingsUnitOfWork(db), clock)
 	inboxService := inbox.NewService(sqlite.NewInboxUnitOfWork(db), clock, "Europe/Moscow", inbox.WithPublisher(broker))
 	eventService := appevents.NewService(
 		sqlite.NewEventUnitOfWork(db),
@@ -67,16 +106,50 @@ func newPlanningAPI(t *testing.T, now time.Time) (*Handler, func()) {
 	)
 	calendarService := appcalendar.NewService(eventService, taskService, "Europe/Moscow")
 
+	completionService := completion.NewService(
+		taskService,
+		[]completion.Source{
+			&completion.DocumentSource{Docs: sqlite.NewDocumentSearcher(db)},
+			completion.NewGitHubSource(),
+		},
+		completion.WithStore(sqlite.NewCompletionStore(db)),
+		completion.WithSettings(settingsService),
+		completion.WithClock(clock),
+	)
+
 	handler := NewHandler(db, cfg, testEmbedFS, Services{
-		Tasks:    taskService,
-		Inbox:    inboxService,
-		Planning: planner,
-		Events:   eventService,
-		Calendar: calendarService,
-		Broker:   broker,
+		Tasks:      taskService,
+		Inbox:      inboxService,
+		Planning:   planner,
+		Recurrence: recurrenceService,
+		Completion: completionService,
+		Events:     eventService,
+		Calendar:   calendarService,
+		Settings:   settingsService,
+		Broker:     broker,
 	})
-	handler.now = func() time.Time { return now }
-	return handler, func() { _ = db.Close() }
+	handler.now = func() time.Time { return clock.Now() }
+
+	stack := &planningStack{
+		handler:    handler,
+		db:         db,
+		tasks:      taskService,
+		planner:    planner,
+		recurrence: recurrenceService,
+		completion: completionService,
+		clock:      clock,
+		path:       path,
+	}
+	stack.cleanup = func() { _ = db.Close() }
+	return stack
+}
+
+// newPlanningAPI keeps the older tests readable: it returns the handler and a
+// cleanup function.
+func newPlanningAPI(t *testing.T, now time.Time) (*Handler, func()) {
+	t.Helper()
+	stack := newPlanningStack(t, now)
+	return stack.handler, stack.cleanup
 }
 
 // moscow builds an instant from a Moscow wall-clock time.

@@ -65,6 +65,16 @@
 		}
 	}
 
+	/**
+	 * Explains where a duration came from, so the plan never shows an unexplained
+	 * number: the user's own estimate, a median of similar work, or the default.
+	 */
+	function estimateSourceHint(source?: string): string {
+		if (source === 'history') return ' · по истории';
+		if (source === 'default') return ' · по умолчанию';
+		return '';
+	}
+
 	/** Accepts the planner's suggestion: only the proposed blocks are written. */
 	async function acceptPlan() {
 		if (!plan || plan.proposed.length === 0 || planApplying) return;
@@ -276,7 +286,9 @@
 			<div>
 				<h2 class="section-title">План дня</h2>
 				<p class="plan-summary">
-					{#if plan.working}
+					{#if plan.past}
+						Этот день уже прошёл — свободного времени в нём не осталось
+					{:else if plan.working}
 						Рабочее время {plan.workday_start}–{plan.workday_end} · свободно {Math.floor(plan.free_minutes / 60)} ч {plan.free_minutes % 60} мин
 						{#if plan.planned_minutes > 0}
 							· занято под задачи {Math.floor(plan.planned_minutes / 60)} ч {plan.planned_minutes % 60} мин
@@ -327,12 +339,18 @@
 							<span class="time">{item.start_local}–{item.end_local}</span>
 							<span class="slot-title">{item.title}</span>
 							{#if item.estimate_minutes}
-								<span class="slot-kind">{item.estimate_minutes} мин</span>
+								<span class="slot-kind">
+									{item.estimate_minutes} мин{estimateSourceHint(item.estimate_source)}
+								</span>
 							{/if}
 						</li>
 					{/each}
 				</ul>
 			</div>
+		{/if}
+
+		{#if plan.blocks.some((item) => item.source !== 'auto')}
+			<p class="plan-hint">Блоки, поставленные вручную, планировщик не двигает.</p>
 		{/if}
 
 		{#if plan.unplaced.length > 0}
@@ -367,6 +385,19 @@
 
 		{#if proposal}
 			<p class="plan-summary">{proposal.summary}</p>
+			{#if proposal.already_placed.length > 0}
+				<div class="unplaced">
+					<span class="proposal-title">Уже стоит в расписании</span>
+					<ul>
+						{#each proposal.already_placed as item}
+							<li>
+								<span class="slot-title">{item.title}</span>
+								<span class="slot-kind">{item.reason}</span>
+							</li>
+						{/each}
+					</ul>
+				</div>
+			{/if}
 			{#if proposal.moves.length > 0}
 				<ul class="moves">
 					{#each proposal.moves as move}
@@ -584,6 +615,12 @@
 		border-color: var(--success-surface);
 		background: var(--success-surface);
 		color: var(--success);
+	}
+
+	.plan-hint {
+		margin: var(--space-2) 0 0;
+		color: var(--text-muted);
+		font-size: var(--text-sm);
 	}
 
 	.plan,

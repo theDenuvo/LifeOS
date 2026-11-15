@@ -15,12 +15,14 @@ import (
 	"github.com/theDenuvo/LifeOS/internal/agent/tools"
 	"github.com/theDenuvo/LifeOS/internal/application/assistant"
 	appcalendar "github.com/theDenuvo/LifeOS/internal/application/calendar"
+	"github.com/theDenuvo/LifeOS/internal/application/completion"
 	appdocuments "github.com/theDenuvo/LifeOS/internal/application/documents"
 	appevents "github.com/theDenuvo/LifeOS/internal/application/events"
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
 	"github.com/theDenuvo/LifeOS/internal/application/planning"
 	"github.com/theDenuvo/LifeOS/internal/application/proactive"
 	"github.com/theDenuvo/LifeOS/internal/application/profile"
+	"github.com/theDenuvo/LifeOS/internal/application/recurrence"
 	"github.com/theDenuvo/LifeOS/internal/application/search"
 	"github.com/theDenuvo/LifeOS/internal/application/settings"
 	"github.com/theDenuvo/LifeOS/internal/application/summary"
@@ -32,22 +34,24 @@ import (
 
 // Services groups the application services the HTTP transport exposes.
 type Services struct {
-	Tasks     *tasks.Service
-	Inbox     *inbox.Service
-	Summary   *summary.Service
-	Assistant *assistant.Service
-	Proactive *proactive.Service
-	Search    *search.Service
-	Settings  *settings.Service
-	Profile   *profile.Service
-	Events    *appevents.Service
-	Calendar  *appcalendar.Service
-	Documents *appdocuments.Service
-	Planning  *planning.Service
-	Models    *agent.ModelCatalog
-	Tools     *tools.Registry
-	Broker    *events.Broker
-	Version   string
+	Tasks      *tasks.Service
+	Inbox      *inbox.Service
+	Summary    *summary.Service
+	Assistant  *assistant.Service
+	Proactive  *proactive.Service
+	Search     *search.Service
+	Settings   *settings.Service
+	Profile    *profile.Service
+	Events     *appevents.Service
+	Calendar   *appcalendar.Service
+	Documents  *appdocuments.Service
+	Planning   *planning.Service
+	Recurrence *recurrence.Service
+	Completion *completion.Service
+	Models     *agent.ModelCatalog
+	Tools      *tools.Registry
+	Broker     *events.Broker
+	Version    string
 }
 
 type Handler struct {
@@ -106,6 +110,14 @@ func (h *Handler) apiRoutes() http.Handler {
 	mux.HandleFunc("GET /plan/replan", h.getPlanProposal)
 	mux.HandleFunc("POST /plan/apply", h.applyPlan)
 	mux.HandleFunc("DELETE /plan/blocks/{id}", h.deletePlanBlock)
+	mux.HandleFunc("GET /reminders", h.getDueReminders)
+	mux.HandleFunc("POST /reminders/resync", h.resyncReminders)
+	mux.HandleFunc("POST /reminders/{id}/ack", h.ackReminder)
+	mux.HandleFunc("GET /recurrence/pending", h.listPendingRecurrences)
+	mux.HandleFunc("POST /recurrence/reconcile", h.reconcileRecurrences)
+	mux.HandleFunc("POST /tasks/{id}/verify", h.verifyTaskCompletion)
+	mux.HandleFunc("POST /tasks/{id}/verify/decision", h.decideTaskCompletion)
+	mux.HandleFunc("GET /tasks/{id}/verification", h.getTaskVerification)
 	mux.HandleFunc("GET /summary/today", h.todaySummary)
 	mux.HandleFunc("GET /calendar", h.getCalendar)
 	mux.HandleFunc("GET /calendar/events", h.listEvents)

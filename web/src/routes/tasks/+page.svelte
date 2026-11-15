@@ -93,9 +93,17 @@
 	const complete = (task: Task) => run(task.id, () => completeTask(task.id, task.version));
 	const restore = (task: Task) => run(task.id, () => restoreTask(task.id, task.version));
 	const cancel = (task: Task) => run(task.id, () => cancelTask(task.id, task.version));
-	// An empty date clears the deadline: the API accepts an explicit null.
+	// An empty date clears the whole deadline — both nullable fields, so a
+	// task that only has an exact due_at loses it as well. A date-only move
+	// sends just due_date and lets the backend drop the old exact time.
 	const reschedule = (task: Task, date: string) =>
-		run(task.id, () => rescheduleTask(task.id, task.version, { due_date: date || null }));
+		run(task.id, () =>
+			rescheduleTask(
+				task.id,
+				task.version,
+				date ? { due_date: date } : { due_date: null, due_at: null }
+			)
+		);
 
 	async function create() {
 		const title = newTitle.trim();

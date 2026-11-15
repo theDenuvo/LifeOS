@@ -253,7 +253,11 @@ func (r *taskRepository) List(ctx context.Context, filter tasks.TaskFilter) (tas
 			where = " WHERE "
 		}
 		where += predicate
-		args = append(args, filter.AsOf.Or(time.Time{}).Unix())
+		// Sub-second precision matters: the domain compares full time.Time
+		// values, so truncating to whole seconds would disagree with
+		// Task.IsOverdue during the first second after an exact deadline.
+		now := filter.AsOf.Or(time.Time{})
+		args = append(args, float64(now.UnixNano())/1e9)
 	}
 
 	limit := filter.Limit.Or(tasks.DefaultPageLimit)

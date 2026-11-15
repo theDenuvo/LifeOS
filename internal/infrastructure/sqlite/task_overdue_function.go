@@ -43,12 +43,17 @@ func overdueFunction(_ *gosqlite.FunctionContext, args []driver.Value) (driver.V
 		return int64(0), nil
 	}
 
-	nowValue, _ := args[4].(int64)
-	now := time.Unix(nowValue, 0).UTC()
+	nowSeconds, ok := realSeconds(args[4])
+	if !ok {
+		return nil, nil
+	}
 
 	if dueAtValue, ok := nullableInt64(args[2]); ok {
 		// IsOverdue: now.After(*t.DueAt) — the boundary instant is on time.
-		return boolValue(now.After(time.Unix(dueAtValue, 0).UTC())), nil
+		// now keeps its sub-second precision: the domain compares full
+		// time.Time values, and truncating here would disagree for the first
+		// second after an exact deadline.
+		return boolValue(nowSeconds > float64(dueAtValue)), nil
 	}
 
 	year, month, day, hasDate := calendarDateValue(args[1])
@@ -69,7 +74,9 @@ func overdueFunction(_ *gosqlite.FunctionContext, args []driver.Value) (driver.V
 		boundary = time.Date(year, month, day+1, 0, 0, 0, 0, loc)
 	}
 	// IsOverdue: !now.Before(boundary) — the boundary itself is overdue.
-	return boolValue(!now.Before(boundary)), nil
+	// The boundary is whole-second, so the float comparison with the
+	// sub-second now matches the domain's time.Time comparison.
+	return boolValue(nowSeconds >= float64(boundary.Unix())), nil
 }
 
 // calendarDateValue decodes a due_date cell. The column is declared DATE, so
@@ -119,6 +126,21 @@ func nullableInt64(value driver.Value) (int64, bool) {
 		return int64(v), true
 	case float64:
 		return int64(v), true
+	default:
+		return 0, false
+	}
+}
+
+// realSeconds decodes the reference instant passed as REAL seconds with
+// sub-second precision.
+func realSeconds(value driver.Value) (float64, bool) {
+	switch v := value.(type) {
+	case nil:
+		return 0, false
+	case int64:
+		return float64(v), true
+	case float64:
+		return v, true
 	default:
 		return 0, false
 	}

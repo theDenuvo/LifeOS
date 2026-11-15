@@ -326,6 +326,57 @@ func TestTaskRepositoryListFilteringAndPagination(t *testing.T) {
 	}
 }
 
+// The SQL overdue filter must agree with Task.IsOverdue on sub-second
+// precision: the domain compares full time.Time values, so a task becomes
+// overdue half a second after its exact deadline even though truncating the
+// reference instant to whole seconds would say otherwise.
+func TestOverdueFilterSubSecondPrecision(t *testing.T) {
+	deadline := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+	now := deadline.Add(500 * time.Millisecond)
+	service, _ := newTaskTestService(t, now)
+
+	created := mustCreateTask(t, service, tasks.CreateTaskInput{Title: "Точный дедлайн", DueAt: tasks.Some(deadline)})
+
+	check := func(wantOverdue bool) {
+		t.Helper()
+		result, err := service.ListTasks(context.Background(), tasks.TaskFilter{Overdue: tasks.Some(wantOverdue)})
+		if err != nil {
+			t.Fatalf("list overdue=%v: %v", wantOverdue, err)
+		}
+		found := false
+		for _, item := range result.Tasks {
+			if item.Task.ID == created.Task.ID {
+				found = true
+			}
+		}
+		if found != wantOverdue {
+			t.Fatalf("task overdue=%v in overdue=%v list", found, wantOverdue)
+		}
+		// The domain is the reference.
+		if created.Task.IsOverdue(now) != wantOverdue {
+			t.Fatalf("domain disagrees: IsOverdue = %v", created.Task.IsOverdue(now))
+		}
+	}
+
+	check(true)
+
+	// Exactly at the boundary the task is still on time.
+	onBoundary, _ := newTaskTestService(t, deadline)
+	createdAtBoundary := mustCreateTask(t, onBoundary, tasks.CreateTaskInput{Title: "Граница", DueAt: tasks.Some(deadline)})
+	result, err := onBoundary.ListTasks(context.Background(), tasks.TaskFilter{Overdue: tasks.Some(true)})
+	if err != nil {
+		t.Fatalf("boundary list: %v", err)
+	}
+	for _, item := range result.Tasks {
+		if item.Task.ID == createdAtBoundary.Task.ID {
+			t.Fatal("task at the exact boundary must not be overdue")
+		}
+	}
+	if createdAtBoundary.Task.IsOverdue(deadline) {
+		t.Fatal("domain: task at the exact boundary must not be overdue")
+	}
+}
+
 func TestTaskRepositoryClearsFields(t *testing.T) {
 	now := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
 	service, uow := newTaskTestService(t, now)

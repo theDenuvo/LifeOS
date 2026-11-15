@@ -1,6 +1,6 @@
 <script lang="ts">
 	import type { Task } from '$lib/api';
-	import { formatDate, formatTime, priorityLabel, statusLabel } from '$lib/format';
+	import { calendarDateInZone, formatDate, formatTime, priorityLabel, statusLabel } from '$lib/format';
 
 	export let task: Task;
 	export let busy = false;
@@ -9,8 +9,17 @@
 	export let oncancel: (task: Task) => void = () => {};
 	export let onreschedule: (task: Task, date: string) => void = () => {};
 
-	let date = task.due_date ?? '';
-	$: date = task.due_date ?? '';
+	// A task may carry only an exact deadline (due_at) with no calendar date;
+	// the input then shows that deadline's local day instead of pretending
+	// there is none.
+	let date = deadlineDate(task);
+	$: date = deadlineDate(task);
+
+	function deadlineDate(value: Task): string {
+		if (value.due_date) return value.due_date;
+		if (value.due_at) return calendarDateInZone(value.due_at, value.timezone);
+		return '';
+	}
 </script>
 
 <article class="row" class:done={task.status === 'completed'} class:cancelled={task.status === 'cancelled'}>
@@ -75,8 +84,9 @@
 				<span class="sr-only">Новая дата</span>
 				<input type="date" bind:value={date} disabled={busy} />
 			</label>
-			<!-- An empty date clears an existing deadline; it is only a no-op when
-			     the task has no deadline to clear. -->
+			<!-- An empty date clears the whole deadline; the page sends due_at:
+			     null alongside due_date, so a task that only has an exact
+			     deadline loses it too. -->
 			<button
 				class="ghost"
 				disabled={busy || (!date && !task.due_date && !task.due_at)}

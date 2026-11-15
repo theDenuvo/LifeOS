@@ -73,6 +73,30 @@ func TestRescheduleTaskDateOnlyReplacesDueAt(t *testing.T) {
 	}
 }
 
+// Clearing both nullable fields at once removes the deadline even when the
+// task never had a calendar date — only an exact due_at.
+func TestRescheduleTaskClearsBothFields(t *testing.T) {
+	svc, _ := newTestService(t)
+	created, err := svc.CreateTask(context.Background(), CreateTaskInput{
+		Title: "x",
+		DueAt: Some(testNow.Add(48 * time.Hour)),
+	}, task.ActorUser)
+	if err != nil {
+		t.Fatalf("CreateTask failed: %v", err)
+	}
+
+	cleared, err := svc.RescheduleTask(context.Background(), created.Task.ID, created.Version, RescheduleTaskInput{
+		DueDate: Some(task.CalendarDate{}),
+		DueAt:   Some(time.Time{}),
+	}, task.ActorUser)
+	if err != nil {
+		t.Fatalf("RescheduleTask failed: %v", err)
+	}
+	if cleared.Task.DueDate != nil || cleared.Task.DueAt != nil {
+		t.Fatalf("deadline survived: due_date = %v, due_at = %v", cleared.Task.DueDate, cleared.Task.DueAt)
+	}
+}
+
 // An explicit due_at in the same request wins: only a date-only reschedule
 // drops the exact time.
 func TestRescheduleTaskWithExplicitDueAtKeepsBoth(t *testing.T) {

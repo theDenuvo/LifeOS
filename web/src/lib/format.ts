@@ -50,6 +50,33 @@ export function todayISO(): string {
 	return local.toISOString().slice(0, 10);
 }
 
+/**
+ * calendarDateInZone renders an instant as YYYY-MM-DD in the given IANA zone.
+ *
+ * A task with an exact deadline (due_at) has no stored calendar date, so the
+ * date input needs the deadline's local day — computed in the task's own
+ * timezone, not in the browser's.
+ */
+export function calendarDateInZone(value: string, timeZone: string): string {
+	const date = new Date(value);
+	if (Number.isNaN(date.getTime())) return '';
+	try {
+		const parts = new Intl.DateTimeFormat('en-CA', {
+			timeZone,
+			year: 'numeric',
+			month: '2-digit',
+			day: '2-digit'
+		}).formatToParts(date);
+		const get = (type: string) => parts.find((part) => part.type === type)?.value ?? '';
+		const formatted = `${get('year')}-${get('month')}-${get('day')}`;
+		return /^\d{4}-\d{2}-\d{2}$/.test(formatted) ? formatted : '';
+	} catch {
+		// An unknown zone falls back to the browser's local date.
+		const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+		return local.toISOString().slice(0, 10);
+	}
+}
+
 export function errorMessage(error: unknown): string {
 	if (error instanceof TypeError) {
 		return 'Нет связи с сервером. Проверьте соединение и повторите.';

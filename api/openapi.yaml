@@ -2466,13 +2466,15 @@ components:
         status:
           $ref: '#/components/schemas/GoalMilestoneStatus'
         due_date:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date
-          nullable: true
         completed_at:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
         version:
           type: integer
     GoalLink:
@@ -2519,9 +2521,10 @@ components:
           type: string
           format: date-time
         decided_at:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
     GoalProgressEvent:
       type: object
       properties:
@@ -2541,12 +2544,14 @@ components:
         summary:
           type: string
         source_type:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         source_id:
-          type: integer
+          type:
+          - integer
+          - 'null'
           format: int64
-          nullable: true
         recorded_at:
           type: string
           format: date-time
@@ -2557,17 +2562,21 @@ components:
           type: integer
         milestones_done:
           type: integer
+        milestones_completed:
+          type: integer
         linked_tasks:
           type: integer
         linked_tasks_done:
           type: integer
         percent:
-          type: integer
-          nullable: true
+          type:
+          - integer
+          - 'null'
         last_activity_at:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
     GoalSignals:
       type: object
       properties:
@@ -2594,13 +2603,15 @@ components:
         status:
           $ref: '#/components/schemas/GoalStatus'
         target_date:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date
-          nullable: true
         approved_at:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
         created_at:
           type: string
           format: date-time

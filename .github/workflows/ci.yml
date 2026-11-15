@@ -2,7 +2,19 @@ name: CI
 
 on:
   push:
-    branches: [main, design/phase-0-concepts, architecture/*]
+    # Branch pushes are checked too: a phase branch that never opens a PR still
+    # needs its build and tests verified, and "no check runs" must not be the
+    # normal state of a pushed branch.
+    branches:
+      - main
+      - 'design/*'
+      - 'architecture/*'
+      - 'domain/*'
+      - 'application/*'
+      - 'infrastructure/*'
+      - 'goals/*'
+      - 'ui/*'
+      - 'feature/*'
   pull_request:
     branches: [main, design/phase-0-concepts]
 

@@ -75,7 +75,9 @@ func (s *memoryAssistantStore) ListConversations(ctx context.Context, limit, off
 	return result, total, nil
 }
 
-func (s *memoryAssistantStore) TouchConversation(ctx context.Context, id int64, at time.Time) error { return nil }
+func (s *memoryAssistantStore) TouchConversation(ctx context.Context, id int64, at time.Time) error {
+	return nil
+}
 
 func (s *memoryAssistantStore) InsertMessage(ctx context.Context, message *domainassistant.Message) (int64, error) {
 	s.messages[message.ConversationID] = append(s.messages[message.ConversationID], message)

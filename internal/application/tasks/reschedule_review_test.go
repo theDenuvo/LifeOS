@@ -52,8 +52,8 @@ func TestRescheduleTaskEmptyRequestChecksVersion(t *testing.T) {
 func TestRescheduleTaskDateOnlyReplacesDueAt(t *testing.T) {
 	svc, _ := newTestService(t)
 	created, err := svc.CreateTask(context.Background(), CreateTaskInput{
-		Title:  "x",
-		DueAt:  Some(testNow.Add(48 * time.Hour)),
+		Title: "x",
+		DueAt: Some(testNow.Add(48 * time.Hour)),
 	}, task.ActorUser)
 	if err != nil {
 		t.Fatalf("CreateTask failed: %v", err)

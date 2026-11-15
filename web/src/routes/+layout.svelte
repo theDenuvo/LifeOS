@@ -23,12 +23,14 @@
 		Plus,
 		Sparkles,
 		BookOpen,
-		Layers
+		Layers,
+		Target
 	} from 'lucide-svelte';
 
 	const nav = [
 		{ href: '/', label: 'Чат', icon: MessageSquare, chat: true },
 		{ href: '/tasks', label: 'Задачи', icon: ListTodo, chat: false },
+		{ href: '/goals', label: 'Цели', icon: Target, chat: false },
 		{ href: '/calendar', label: 'Календарь', icon: CalendarDays, chat: false },
 		{ href: '/memory', label: 'Память', icon: BookOpen, chat: false }
 	];
@@ -38,6 +40,7 @@
 		{ href: '/today', label: 'Сегодня', icon: Clock, chat: false },
 		{ href: '/inbox', label: 'Входящие', icon: Inbox, chat: false },
 		{ href: '/tasks', label: 'Задачи', icon: ListTodo, chat: false },
+		{ href: '/goals', label: 'Цели', icon: Target, chat: false },
 		{ href: '/calendar', label: 'Календарь', icon: CalendarDays, chat: false },
 		{ href: '/memory', label: 'Память', icon: BookOpen, chat: false }
 	];

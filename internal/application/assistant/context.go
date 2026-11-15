@@ -32,6 +32,12 @@ type MemoryProvider interface {
 	ContextSnapshot(ctx context.Context) (string, error)
 }
 
+// GoalsProvider renders the durable goal picture: what the user is moving
+// toward, what progress is factual and which goals stopped moving.
+type GoalsProvider interface {
+	ContextSnapshot(ctx context.Context) (string, error)
+}
+
 // ContextProvider renders a compact snapshot of the user's current LifeOS state.
 //
 // The snapshot is injected into the system prompt on every turn. It is a hint,
@@ -47,6 +53,7 @@ type LifeOSContext struct {
 	insights InsightProvider
 	events   EventProvider
 	memory   MemoryProvider
+	goals    GoalsProvider
 	timezone string
 	clock    Clock
 }
@@ -63,6 +70,13 @@ func WithEvents(provider EventProvider) ContextOption {
 // assistant would only know the current day, which is what stage 2 fixes.
 func WithMemory(provider MemoryProvider) ContextOption {
 	return func(c *LifeOSContext) { c.memory = provider }
+}
+
+// WithGoals adds the long-term goal picture to the snapshot. Without it the
+// assistant would not know where the user is headed, which is what stage 4
+// fixes.
+func WithGoals(provider GoalsProvider) ContextOption {
+	return func(c *LifeOSContext) { c.goals = provider }
 }
 
 // NewLifeOSContext builds a context provider.
@@ -139,6 +153,14 @@ func (c *LifeOSContext) Snapshot(ctx context.Context) (string, error) {
 	if c.memory != nil {
 		if value, err := c.memory.ContextSnapshot(ctx); err == nil && strings.TrimSpace(value) != "" {
 			b.WriteString("\n")
+			b.WriteString(value)
+		}
+	}
+	// Goals come after memory: both are durable context. A goal failure must
+	// not hide the rest of the snapshot either.
+	if c.goals != nil {
+		if value, err := c.goals.ContextSnapshot(ctx); err == nil && strings.TrimSpace(value) != "" {
+			b.WriteString("\n\n")
 			b.WriteString(value)
 		}
 	}

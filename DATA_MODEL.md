@@ -496,6 +496,45 @@
 
 Таблицы `documents`, `document_tasks` (миграция 014). Исходные файлы хранятся вне БД; удаление документа удаляет файл и предложения, но не созданные задачи.
 
+### 11. Goal (Долгосрочная цель)
+
+| Поле | Тип | Правила |
+|---|---|---|
+| `id` | int64 | PK |
+| `title` | string | 1–200 символов |
+| `description` | string | ≤ 5000 символов |
+| `status` | string | `proposed`, `active`, `paused`, `achieved`, `abandoned` |
+| `target_date` | date? | желаемый срок |
+| `approved_at` | timestamp? | момент перехода `proposed` → `active` |
+| `created_at`, `updated_at`, `version` | | как у задач, optimistic locking |
+
+Таблица `goals` (миграция 020).
+
+### 11.1 GoalMilestone (Этап плана)
+
+| Поле | Тип | Правила |
+|---|---|---|
+| `id` | int64 | PK |
+| `goal_id` | int64 | FK → goals, cascade |
+| `position` | int | порядок в плане |
+| `title` | string | 1–200 символов |
+| `criteria` | string | чем измеряется выполнение |
+| `status` | string | `pending`, `in_progress`, `done`, `skipped` |
+| `due_date` | date? | срок этапа |
+| `completed_at` | timestamp? | фиксируется при `done`/`skipped` |
+
+### 11.2 GoalLink (Связь цели)
+
+`goal_links`: `goal_id` + `target_type` (`conversation`, `task`, `event`, `document`, `memory`, `inbox`) + `target_id` + `relation`; уникальность четверки; цель проверяется в той же транзакции.
+
+### 11.3 GoalProgress (Журнал прогресса)
+
+`goal_progress`: append-only записи `kind` (`goal_created`, `approved`, `milestone`, `task_done`, `note`, `status`, `proposal`) с кратким summary, ссылкой на источник и временем; по ним считаются прогресс и сигнал «цель стоит» (нет записей > 14 дней).
+
+### 11.4 GoalProposal (Предложение по плану)
+
+`goal_proposals`: `summary` (объяснение от ассистента), `payload` (JSON: title, description, target_date, add/complete/skip/reopen/remove milestones), `status` (`pending`, `applied`, `rejected`), `created_at`, `decided_at`. Применение выполняется атомарно одной транзакцией; одновременно может быть только одно `pending`-предложение на цель.
+
 ## Работа с датами и часовыми поясами
 
 ### Правила (критично)
@@ -565,7 +604,7 @@ type Task struct {
 
 ```
 MemoryEntry 1 ──< MemorySource
-MemoryEntry 1 ──< MemoryLink >── Task / Event / Conversation / Document / Memory
+MemoryEntry 1 ──< MemoryLink >── Task / Event / Conversation / Document / Memory / Goal
 MemoryEntry 1 ──< MemoryConflict
 Task 1 ──< TaskEvent
 Task 1 ──< Task (parent_task_id, для будущих подзадач)
@@ -573,6 +612,10 @@ InboxItem 1 ──> Task (при конвертации, через TaskEvent.pa
 Conversation 1 ──< Message
 Conversation 1 ──< PendingAction
 Message 1 ──< PendingAction
+Goal 1 ──< GoalMilestone
+Goal 1 ──< GoalLink >── Conversation / Task / Event / Document / Memory / InboxItem
+Goal 1 ──< GoalProgress
+Goal 1 ──< GoalProposal
 ```
 
 ---
@@ -593,6 +636,7 @@ Message 1 ──< PendingAction
 | 010 | `tasks.version` для optimistic locking; удаление триггера `tasks_updated_at` (времена пишет Application) |
 | 018 | Память и база знаний: `memory_entries`, `memory_sources`, `memory_links`, `memory_conflicts`, `memory_fts` с триггерами |
 | 019 | Рабочие пространства: `conversations.kind`, `purpose`, `source_conversation_id`, индекс `idx_conversations_kind` |
+| 020 | Долгосрочные цели: `goals`, `goal_milestones`, `goal_links`, `goal_progress`, `goal_proposals` с CHECK-ограничениями статусов и каскадным удалением |
 
 > Детальные SQL миграции в `internal/infrastructure/sqlite/migrations/`.
 

@@ -18,6 +18,7 @@ import (
 	"github.com/theDenuvo/LifeOS/internal/application/completion"
 	appdocuments "github.com/theDenuvo/LifeOS/internal/application/documents"
 	appevents "github.com/theDenuvo/LifeOS/internal/application/events"
+	"github.com/theDenuvo/LifeOS/internal/application/goals"
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
 	appmemory "github.com/theDenuvo/LifeOS/internal/application/memory"
 	"github.com/theDenuvo/LifeOS/internal/application/planning"
@@ -50,6 +51,7 @@ type Services struct {
 	Recurrence *recurrence.Service
 	Completion *completion.Service
 	Memory     *appmemory.Service
+	Goals      *goals.Service
 	Models     *agent.ModelCatalog
 	Tools      *tools.Registry
 	Broker     *events.Broker
@@ -160,6 +162,22 @@ func (h *Handler) apiRoutes() http.Handler {
 	mux.HandleFunc("DELETE /memory/{id}", h.deleteMemory)
 	mux.HandleFunc("POST /memory/{id}/links", h.linkMemory)
 	mux.HandleFunc("DELETE /memory/{id}/links/{linkID}", h.unlinkMemory)
+	mux.HandleFunc("GET /goals", h.listGoals)
+	mux.HandleFunc("POST /goals", h.createGoal)
+	mux.HandleFunc("GET /goals/{id}", h.getGoal)
+	mux.HandleFunc("PATCH /goals/{id}", h.patchGoal)
+	mux.HandleFunc("DELETE /goals/{id}", h.deleteGoal)
+	mux.HandleFunc("POST /goals/{id}/approve", h.approveGoal)
+	mux.HandleFunc("POST /goals/{id}/status", h.changeGoalStatus)
+	mux.HandleFunc("POST /goals/{id}/milestones", h.createGoalMilestone)
+	mux.HandleFunc("PATCH /goals/{id}/milestones/{milestoneId}", h.patchGoalMilestone)
+	mux.HandleFunc("DELETE /goals/{id}/milestones/{milestoneId}", h.deleteGoalMilestone)
+	mux.HandleFunc("POST /goals/{id}/proposals", h.createGoalProposal)
+	mux.HandleFunc("POST /goals/{id}/proposals/{proposalId}/apply", h.decideGoalProposal)
+	mux.HandleFunc("POST /goals/{id}/proposals/{proposalId}/reject", h.decideGoalProposal)
+	mux.HandleFunc("POST /goals/{id}/links", h.linkGoal)
+	mux.HandleFunc("DELETE /goals/{id}/links/{linkId}", h.unlinkGoal)
+	mux.HandleFunc("POST /goals/{id}/progress", h.recordGoalProgress)
 	mux.HandleFunc("GET /settings", h.listSettings)
 	mux.HandleFunc("GET /settings/{key}", h.getSetting)
 	mux.HandleFunc("PUT /settings/{key}", h.putSetting)

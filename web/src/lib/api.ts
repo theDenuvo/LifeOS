@@ -921,3 +921,206 @@ export function resolveMemoryConflict(
 		body: JSON.stringify(input)
 	});
 }
+
+// ─── Цели (долгосрочные цели и инициативы) ───────────────────────────────────
+
+export type GoalStatus = 'proposed' | 'active' | 'paused' | 'achieved' | 'abandoned';
+export type GoalMilestoneStatus = 'pending' | 'in_progress' | 'done' | 'skipped';
+export type GoalTargetType = 'conversation' | 'task' | 'event' | 'document' | 'memory' | 'inbox';
+
+export interface GoalMilestone {
+	id: number;
+	position: number;
+	title: string;
+	criteria: string;
+	status: GoalMilestoneStatus;
+	due_date: string | null;
+	completed_at: string | null;
+	version: number;
+}
+
+export interface GoalLink {
+	id: number;
+	target_type: GoalTargetType;
+	target_id: number;
+	relation: string;
+	created_at: string;
+}
+
+export interface GoalProgressEvent {
+	id: number;
+	kind: 'goal_created' | 'approved' | 'milestone' | 'task_done' | 'note' | 'status' | 'proposal';
+	summary: string;
+	source_type?: GoalTargetType;
+	source_id?: number;
+	recorded_at: string;
+}
+
+export interface GoalProposal {
+	id: number;
+	summary: string;
+	status: 'pending' | 'applied' | 'rejected';
+	changes?: Record<string, unknown>;
+	created_at: string;
+	decided_at?: string | null;
+}
+
+export interface GoalProgress {
+	milestones_total: number;
+	milestones_done: number;
+	linked_tasks: number;
+	linked_tasks_done: number;
+	percent: number | null;
+	last_activity_at: string | null;
+}
+
+export interface GoalSignals {
+	stalled: boolean;
+	stall_reason?: string;
+	overdue: boolean;
+	no_open_work: boolean;
+	pending_proposal: boolean;
+}
+
+export interface Goal {
+	id: number;
+	title: string;
+	description: string;
+	status: GoalStatus;
+	target_date: string | null;
+	approved_at: string | null;
+	created_at: string;
+	updated_at: string;
+	version: number;
+	milestones: GoalMilestone[];
+	links: GoalLink[];
+	proposals: GoalProposal[];
+	progress_log: GoalProgressEvent[];
+	progress?: GoalProgress;
+	signals?: GoalSignals;
+}
+
+export interface GoalList {
+	data: Goal[];
+	meta: { limit: number; offset: number; total: number };
+}
+
+export interface GoalCreateInput {
+	title: string;
+	description?: string;
+	target_date?: string;
+	milestones?: { title: string; criteria?: string; due_date?: string }[];
+}
+
+export interface GoalProposalInput {
+	summary: string;
+	title?: string;
+	description?: string;
+	target_date?: string;
+	clear_target_date?: boolean;
+	add_milestones?: { title: string; criteria?: string; due_date?: string }[];
+	complete_milestone_ids?: number[];
+	skip_milestone_ids?: number[];
+	reopen_milestone_ids?: number[];
+	remove_milestone_ids?: number[];
+}
+
+export function listGoals(query: { status?: GoalStatus; q?: string; limit?: number; offset?: number } = {}): Promise<GoalList> {
+	const params = new URLSearchParams();
+	if (query.status) params.set('status', query.status);
+	if (query.q) params.set('q', query.q);
+	if (query.limit !== undefined) params.set('limit', String(query.limit));
+	if (query.offset !== undefined) params.set('offset', String(query.offset));
+	const suffix = params.toString();
+	return request<GoalList>(`/api/v1/goals${suffix ? `?${suffix}` : ''}`);
+}
+
+export function getGoal(id: number): Promise<Goal> {
+	return request<Goal>(`/api/v1/goals/${id}`);
+}
+
+export function createGoal(input: GoalCreateInput): Promise<Goal> {
+	return request<Goal>('/api/v1/goals', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export function updateGoal(
+	id: number,
+	version: number,
+	input: Partial<{ title: string; description: string; target_date: string; clear_target_date: boolean }>
+): Promise<Goal> {
+	return request<Goal>(`/api/v1/goals/${id}`, {
+		method: 'PATCH',
+		body: JSON.stringify({ ...input, expected_version: version })
+	});
+}
+
+export function deleteGoal(id: number): Promise<void> {
+	return request<void>(`/api/v1/goals/${id}`, { method: 'DELETE' });
+}
+
+export function approveGoal(id: number): Promise<Goal> {
+	return request<Goal>(`/api/v1/goals/${id}/approve`, { method: 'POST' });
+}
+
+export function changeGoalStatus(id: number, status: Exclude<GoalStatus, 'proposed'>): Promise<Goal> {
+	return request<Goal>(`/api/v1/goals/${id}/status`, {
+		method: 'POST',
+		body: JSON.stringify({ status })
+	});
+}
+
+export function createGoalMilestone(
+	id: number,
+	input: { title: string; criteria?: string; due_date?: string }
+): Promise<Goal> {
+	return request<Goal>(`/api/v1/goals/${id}/milestones`, { method: 'POST', body: JSON.stringify(input) });
+}
+
+export function updateGoalMilestone(
+	goalId: number,
+	milestoneId: number,
+	version: number,
+	input: Partial<{ title: string; criteria: string; status: GoalMilestoneStatus; due_date: string; clear_due_date: boolean }>
+): Promise<Goal> {
+	return request<Goal>(`/api/v1/goals/${goalId}/milestones/${milestoneId}`, {
+		method: 'PATCH',
+		body: JSON.stringify({ ...input, expected_version: version })
+	});
+}
+
+export function deleteGoalMilestone(goalId: number, milestoneId: number): Promise<Goal> {
+	return request<Goal>(`/api/v1/goals/${goalId}/milestones/${milestoneId}`, { method: 'DELETE' });
+}
+
+export function createGoalProposal(goalId: number, input: GoalProposalInput): Promise<{ proposal: GoalProposal }> {
+	return request<{ proposal: GoalProposal }>(`/api/v1/goals/${goalId}/proposals`, {
+		method: 'POST',
+		body: JSON.stringify(input)
+	});
+}
+
+export function applyGoalProposal(goalId: number, proposalId: number): Promise<Goal> {
+	return request<Goal>(`/api/v1/goals/${goalId}/proposals/${proposalId}/apply`, { method: 'POST' });
+}
+
+export function rejectGoalProposal(goalId: number, proposalId: number): Promise<Goal> {
+	return request<Goal>(`/api/v1/goals/${goalId}/proposals/${proposalId}/reject`, { method: 'POST' });
+}
+
+export function linkGoal(
+	goalId: number,
+	input: { target_type: GoalTargetType; target_id: number; relation: string }
+): Promise<Goal> {
+	return request<Goal>(`/api/v1/goals/${goalId}/links`, { method: 'POST', body: JSON.stringify(input) });
+}
+
+export function unlinkGoal(goalId: number, linkId: number): Promise<Goal> {
+	return request<Goal>(`/api/v1/goals/${goalId}/links/${linkId}`, { method: 'DELETE' });
+}
+
+export function recordGoalProgress(
+	goalId: number,
+	input: { summary: string; source_type?: GoalTargetType; source_id?: number }
+): Promise<Goal> {
+	return request<Goal>(`/api/v1/goals/${goalId}/progress`, { method: 'POST', body: JSON.stringify(input) });
+}

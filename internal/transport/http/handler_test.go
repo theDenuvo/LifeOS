@@ -13,6 +13,7 @@ import (
 	appcalendar "github.com/theDenuvo/LifeOS/internal/application/calendar"
 	appevents "github.com/theDenuvo/LifeOS/internal/application/events"
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
+	appgoals "github.com/theDenuvo/LifeOS/internal/application/goals"
 	appmemory "github.com/theDenuvo/LifeOS/internal/application/memory"
 	"github.com/theDenuvo/LifeOS/internal/application/profile"
 	"github.com/theDenuvo/LifeOS/internal/application/settings"
@@ -76,7 +77,8 @@ func setupTestHandlerWithProvider(t *testing.T, provider assistant.Provider) (*H
 	settingsService := settings.NewService(sqlite.NewSettingsUnitOfWork(db), clock)
 	profileService := profile.NewService(settingsService)
 	memoryService := appmemory.NewService(sqlite.NewMemoryUnitOfWork(db), clock)
-	registry := tools.NewLifeOSTools(taskService, inboxService, summaryService, tools.WithMemoryService(memoryService))
+	goalsService := appgoals.NewService(sqlite.NewGoalUnitOfWork(db), clock)
+	registry := tools.NewLifeOSTools(taskService, inboxService, summaryService, tools.WithMemoryService(memoryService), tools.WithGoalsService(goalsService))
 	assistantService := assistant.NewService(sqlite.NewAssistantUnitOfWork(db), provider, registry, clock)
 	handler := NewHandler(db, cfg, testEmbedFS, Services{
 		Tasks:     taskService,
@@ -88,6 +90,7 @@ func setupTestHandlerWithProvider(t *testing.T, provider assistant.Provider) (*H
 		Events:    eventService,
 		Calendar:  calendarService,
 		Memory:    memoryService,
+		Goals:     goalsService,
 		Broker:    broker,
 		Version:   "test",
 	})
@@ -407,7 +410,8 @@ func TestHandlerServeFrontendWithRealEmbedFS(t *testing.T) {
 	inboxService := inbox.NewService(sqlite.NewInboxUnitOfWork(db), clock, cfg.Timezone, inbox.WithPublisher(broker))
 	summaryService := summary.NewService(taskService, inboxService, clock, cfg.Timezone)
 	memoryService := appmemory.NewService(sqlite.NewMemoryUnitOfWork(db), clock)
-	registry := tools.NewLifeOSTools(taskService, inboxService, summaryService, tools.WithMemoryService(memoryService))
+	goalsService := appgoals.NewService(sqlite.NewGoalUnitOfWork(db), clock)
+	registry := tools.NewLifeOSTools(taskService, inboxService, summaryService, tools.WithMemoryService(memoryService), tools.WithGoalsService(goalsService))
 	assistantService := assistant.NewService(sqlite.NewAssistantUnitOfWork(db), nil, registry, clock)
 	handler := NewHandler(db, cfg, dist.FS, Services{
 		Tasks:     taskService,

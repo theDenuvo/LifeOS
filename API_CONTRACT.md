@@ -836,6 +836,78 @@ GET /api/v1/memory/stats
 `memory.conflict.resolved` приходят через `GET /api/v1/events` вместе с
 остальными.
 
+### 8.2 Долгосрочные цели
+
+Жизненный цикл: `proposed` → (утверждение) `active` ⇄ `paused`, `active` →
+`achieved`/`abandoned`. Недопустимый переход → `412`.
+
+#### Схема Goal
+
+```json
+{
+  "id": 12,
+  "title": "Выучить английский до C1",
+  "description": "Свободно говорить и читать",
+  "status": "active",
+  "target_date": "2027-12-01",
+  "approved_at": "2026-11-15T10:00:00Z",
+  "created_at": "2026-11-10T10:00:00Z",
+  "updated_at": "2026-11-15T12:00:00Z",
+  "version": 4,
+  "milestones": [
+    {"id": 30, "position": 0, "title": "Грамматика", "criteria": "120 карточек",
+     "status": "done", "due_date": "2027-01-15", "completed_at": "2027-01-10T10:00:00Z", "version": 2}
+  ],
+  "links": [{"id": 5, "target_type": "conversation", "target_id": 3,
+             "relation": "обсуждение", "created_at": "2026-11-15T10:05:00Z"}],
+  "proposals": [{"id": 2, "summary": "Перестроить план", "status": "pending",
+                 "changes": {"add_milestones": [{"title": "Клуб практики"}]},
+                 "created_at": "2026-11-15T12:00:00Z"}],
+  "progress_log": [{"id": 40, "kind": "milestone", "summary": "Этап «Грамматика» → done",
+                    "recorded_at": "2027-01-10T10:00:00Z"}],
+  "progress": {"milestones_total": 3, "milestones_done": 1, "linked_tasks": 2,
+               "linked_tasks_done": 1, "percent": 33, "last_activity_at": "2027-01-10T10:00:00Z"},
+  "signals": {"stalled": false, "stall_reason": "", "overdue": false,
+              "no_open_work": false, "pending_proposal": true}
+}
+```
+
+`progress.percent` — по этапам, а без этапов — по связанным задачам; без того и
+другого — `null`. `signals` вычисляется: `stalled` — нет записей о прогрессе
+больше 14 дней (с причиной в `stall_reason`), `overdue` — истёк `target_date` у
+активной цели, `no_open_work` — всё сделано, но цель не завершена,
+`pending_proposal` — ждёт решение по плану.
+
+#### Endpoints
+
+```
+GET    /api/v1/goals?status=active&q=&limit=30&offset=0
+POST   /api/v1/goals                        # создание; статус всегда proposed
+GET    /api/v1/goals/{id}                   # полная карточка с планом, связями, журналами
+PATCH  /api/v1/goals/{id}                   # title/description/target_date + expected_version → 409 при устаревшей
+DELETE /api/v1/goals/{id}                   # каскадно удаляет план, связи, журнал и предложения
+POST   /api/v1/goals/{id}/approve           # proposed → active
+POST   /api/v1/goals/{id}/status            # {"status": "paused"|"active"|"achieved"|"abandoned"}
+POST   /api/v1/goals/{id}/milestones        # добавление этапа (только пока план не утверждён или через предложение)
+PATCH  /api/v1/goals/{id}/milestones/{mid}  # title/criteria/status/due_date + expected_version
+DELETE /api/v1/goals/{id}/milestones/{mid}  # только пока план не утверждён
+POST   /api/v1/goals/{id}/proposals         # предложение по изменению утверждённого плана
+POST   /api/v1/goals/{id}/proposals/{pid}/apply   # применить (решение пользователя)
+POST   /api/v1/goals/{id}/proposals/{pid}/reject  # отклонить
+POST   /api/v1/goals/{id}/links             # связать с объектом (тип как у памяти; цель → 422)
+DELETE /api/v1/goals/{id}/links/{lid}       # разорвать связь
+POST   /api/v1/goals/{id}/progress          # заметка о ходе работы в журнал
+```
+
+Ошибки: неизвестный статус/тип/дата → `400`; цели, этапа или предложения нет →
+`404`; устаревшая версия → `409`; недопустимый переход, правка утверждённого
+плана напрямую, повторное `pending`-предложение, применение уже решённого
+предложения → `412`.
+
+#### События
+
+`goal.created`, `goal.updated`, `goal.deleted` приходят через `GET /api/v1/events`.
+
 ### 9. Настройки
 
 #### Список настроек

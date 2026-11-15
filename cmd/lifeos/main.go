@@ -22,6 +22,7 @@ import (
 	"github.com/theDenuvo/LifeOS/internal/application/completion"
 	appdocuments "github.com/theDenuvo/LifeOS/internal/application/documents"
 	appevents "github.com/theDenuvo/LifeOS/internal/application/events"
+	"github.com/theDenuvo/LifeOS/internal/application/goals"
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
 	appmemory "github.com/theDenuvo/LifeOS/internal/application/memory"
 	"github.com/theDenuvo/LifeOS/internal/application/planning"
@@ -192,6 +193,19 @@ func main() {
 		appmemory.WithPublisher(broker),
 	)
 
+	// Roadmap stage 4: long-term goals and initiative management.
+	//
+	// A drafted goal waits for user approval, approved plans change only
+	// through proposals, and progress is derived from milestones and the tasks
+	// actually linked to the goal. Completed linked tasks reach the journal
+	// through the event pump below, so progress stays factual.
+	goalsService := goals.NewService(
+		sqlite.NewGoalUnitOfWork(db),
+		clock,
+		goals.WithTaskProvider(taskGoalAdapter{service: taskService}),
+		goals.WithPublisher(broker),
+	)
+
 	// The dashboard shows the day's load and the ideas that are due to resurface.
 	summaryService.WithRevisit(inboxService).WithPlanner(planningService)
 
@@ -253,6 +267,7 @@ func main() {
 		tools.WithRecurrence(recurrenceService),
 		tools.WithCompletion(completionService),
 		tools.WithMemoryService(memoryService),
+		tools.WithGoalsService(goalsService),
 		tools.WithWorkspaceHub(workspaceHub),
 		tools.WithTimezone(cfg.Timezone),
 	)
@@ -263,6 +278,7 @@ func main() {
 		clock,
 		assistant.WithEvents(eventService),
 		assistant.WithMemory(memoryService),
+		assistant.WithGoals(goalsService),
 	)
 	assistantService := assistant.NewService(
 		sqlite.NewAssistantUnitOfWork(db),
@@ -296,6 +312,7 @@ func main() {
 		Recurrence: recurrenceService,
 		Completion: completionService,
 		Memory:     memoryService,
+		Goals:      goalsService,
 		Models:     modelCatalog,
 		Tools:      registry,
 		Broker:     broker,
@@ -331,6 +348,11 @@ func main() {
 	go planning.NewDispatcher(planningService, broker, clock, 30*time.Second).Run(ctx)
 	go recurrence.NewWorker(recurrenceService, time.Minute).Run(ctx)
 
+	// Goal progress pump: completed linked tasks become factual progress in the
+	// goal journal. The pump reads only the event payload, so it never blocks
+	// the task engine and a goal failure never fails a completion.
+	go runGoalProgressPump(ctx, broker, goalsService)
+
 	<-ctx.Done()
 	slog.Info("Shutting down...")
 
@@ -341,6 +363,48 @@ func main() {
 		slog.Error("Graceful shutdown failed", "error", err)
 	} else {
 		slog.Info("Server stopped gracefully")
+	}
+}
+
+// workingDirectory is the base for relative paths in the file tools.
+func workingDirectory() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return dir
+}
+
+// taskGoalAdapter narrows the task engine to what goal progress needs.
+type taskGoalAdapter struct{ service *tasks.Service }
+
+func (a taskGoalAdapter) GetTask(ctx context.Context, id int64) (goals.TaskView, error) {
+	item, err := a.service.GetTask(ctx, id)
+	if err != nil {
+		return goals.TaskView{}, err
+	}
+	return goals.TaskView{
+		ID: item.Task.ID, Title: item.Task.Title, Status: string(item.Task.Status),
+		CompletedAt: item.Task.CompletedAt,
+	}, nil
+}
+
+// runGoalProgressPump records completed linked tasks into goal journals.
+func runGoalProgressPump(ctx context.Context, broker *events.Broker, goalsService *goals.Service) {
+	subscription := broker.Subscribe(ctx)
+	for event := range subscription {
+		if event.Type != "task.completed" {
+			continue
+		}
+		payload, ok := event.Data.(map[string]any)
+		if !ok {
+			continue
+		}
+		id, _ := payload["id"].(int64)
+		if id <= 0 {
+			continue
+		}
+		goalsService.OnTaskCompleted(ctx, id)
 	}
 }
 
@@ -366,13 +430,6 @@ func (p documentTextProvider) DocumentText(ctx context.Context, id int64) (assis
 }
 
 // workingDirectory is the base for relative paths in the file tools.
-func workingDirectory() string {
-	dir, err := os.Getwd()
-	if err != nil {
-		return ""
-	}
-	return dir
-}
 
 func setupLogging(level string) {
 	var lvl slog.Level

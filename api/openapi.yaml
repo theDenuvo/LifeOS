@@ -1807,6 +1807,567 @@ paths:
           description: Link removed
         '404':
           $ref: '#/components/responses/NotFoundError'
+  /api/v1/goals:
+    get:
+      summary: List long-term goals with computed progress and signals
+      operationId: listGoals
+      tags:
+      - Goals
+      parameters:
+      - name: status
+        in: query
+        schema:
+          $ref: '#/components/schemas/GoalStatus'
+      - name: q
+        in: query
+        schema:
+          type: string
+        description: Substring search over the title
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+      - name: offset
+        in: query
+        schema:
+          type: integer
+          minimum: 0
+      responses:
+        '200':
+          description: Goals with milestones, links, proposals, journal and review
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GoalListResponse'
+    post:
+      summary: Create a goal; it always starts in the proposed status
+      operationId: createGoal
+      tags:
+      - Goals
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GoalCreateRequest'
+      responses:
+        '201':
+          description: Goal created as proposed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Goal'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/goals/{id}:
+    get:
+      summary: Get one goal with its full aggregate
+      operationId: getGoal
+      tags:
+      - Goals
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: The goal
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Goal'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+    patch:
+      summary: Edit title, description or target date (optimistic lock)
+      operationId: updateGoal
+      tags:
+      - Goals
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                description:
+                  type: string
+                target_date:
+                  type: string
+                  format: date
+                clear_target_date:
+                  type: boolean
+                expected_version:
+                  type: integer
+      responses:
+        '200':
+          description: Updated goal
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Goal'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+    delete:
+      summary: Delete the goal with plan, links, journal and proposals
+      operationId: deleteGoal
+      tags:
+      - Goals
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Deleted
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+  /api/v1/goals/{id}/approve:
+    post:
+      summary: Approve a proposed goal and start organized work
+      operationId: approveGoal
+      tags:
+      - Goals
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Goal is now active
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Goal'
+        '412':
+          $ref: '#/components/responses/PreconditionFailedError'
+  /api/v1/goals/{id}/status:
+    post:
+      summary: Pause, resume, achieve or abandon a goal
+      operationId: changeGoalStatus
+      tags:
+      - Goals
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - status
+              properties:
+                status:
+                  type: string
+                  enum:
+                  - active
+                  - paused
+                  - achieved
+                  - abandoned
+      responses:
+        '200':
+          description: Status changed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Goal'
+        '412':
+          $ref: '#/components/responses/PreconditionFailedError'
+  /api/v1/goals/{id}/milestones:
+    post:
+      summary: Append a milestone to a not-yet-approved plan
+      operationId: createGoalMilestone
+      tags:
+      - Goals
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - title
+              properties:
+                title:
+                  type: string
+                criteria:
+                  type: string
+                due_date:
+                  type: string
+                  format: date
+      responses:
+        '200':
+          description: Goal with the extended plan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Goal'
+        '412':
+          $ref: '#/components/responses/PreconditionFailedError'
+  /api/v1/goals/{id}/milestones/{milestoneId}:
+    patch:
+      summary: Update a milestone; status moves are recorded as progress
+      operationId: updateGoalMilestone
+      tags:
+      - Goals
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: milestoneId
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                criteria:
+                  type: string
+                status:
+                  $ref: '#/components/schemas/GoalMilestoneStatus'
+                due_date:
+                  type: string
+                  format: date
+                clear_due_date:
+                  type: boolean
+                expected_version:
+                  type: integer
+      responses:
+        '200':
+          description: Goal with the updated milestone
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Goal'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+    delete:
+      summary: Remove a milestone from a not-yet-approved plan
+      operationId: deleteGoalMilestone
+      tags:
+      - Goals
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: milestoneId
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Goal without the milestone
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Goal'
+        '412':
+          $ref: '#/components/responses/PreconditionFailedError'
+  /api/v1/goals/{id}/proposals:
+    post:
+      summary: Propose a significant change to an approved plan
+      operationId: createGoalProposal
+      tags:
+      - Goals
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - summary
+              properties:
+                summary:
+                  type: string
+                title:
+                  type: string
+                description:
+                  type: string
+                target_date:
+                  type: string
+                  format: date
+                clear_target_date:
+                  type: boolean
+                add_milestones:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                    - title
+                    properties:
+                      title:
+                        type: string
+                      criteria:
+                        type: string
+                      due_date:
+                        type: string
+                        format: date
+                complete_milestone_ids:
+                  type: array
+                  items:
+                    type: integer
+                    format: int64
+                skip_milestone_ids:
+                  type: array
+                  items:
+                    type: integer
+                    format: int64
+                reopen_milestone_ids:
+                  type: array
+                  items:
+                    type: integer
+                    format: int64
+                remove_milestone_ids:
+                  type: array
+                  items:
+                    type: integer
+                    format: int64
+      responses:
+        '201':
+          description: Pending proposal stored
+        '412':
+          $ref: '#/components/responses/PreconditionFailedError'
+  /api/v1/goals/{id}/proposals/{proposalId}/apply:
+    post:
+      summary: Apply a pending plan proposal (the user's decision)
+      operationId: applyGoalProposal
+      tags:
+      - Goals
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: proposalId
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Proposal applied atomically
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Goal'
+        '412':
+          $ref: '#/components/responses/PreconditionFailedError'
+  /api/v1/goals/{id}/proposals/{proposalId}/reject:
+    post:
+      summary: Reject a pending plan proposal
+      operationId: rejectGoalProposal
+      tags:
+      - Goals
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: proposalId
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Proposal rejected; the goal is unchanged
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Goal'
+        '412':
+          $ref: '#/components/responses/PreconditionFailedError'
+  /api/v1/goals/{id}/links:
+    post:
+      summary: Link the goal to another LifeOS object
+      operationId: linkGoal
+      tags:
+      - Goals
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - target_type
+              - target_id
+              - relation
+              properties:
+                target_type:
+                  type: string
+                  enum:
+                  - conversation
+                  - task
+                  - event
+                  - document
+                  - memory
+                  - inbox
+                target_id:
+                  type: integer
+                  format: int64
+                relation:
+                  type: string
+      responses:
+        '200':
+          description: Goal with the new link
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Goal'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/goals/{id}/links/{linkId}:
+    delete:
+      summary: Remove a goal link
+      operationId: unlinkGoal
+      tags:
+      - Goals
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: linkId
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Goal without the link
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Goal'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+  /api/v1/goals/{id}/progress:
+    post:
+      summary: Append a factual progress note to the goal journal
+      operationId: recordGoalProgress
+      tags:
+      - Goals
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - summary
+              properties:
+                summary:
+                  type: string
+                source_type:
+                  type: string
+                  enum:
+                  - conversation
+                  - task
+                  - event
+                  - document
+                  - memory
+                  - inbox
+                source_id:
+                  type: integer
+                  format: int64
+      responses:
+        '200':
+          description: Goal with the new journal entry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Goal'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
   /api/v1/settings:
     get:
       summary: List all settings
@@ -1875,6 +2436,245 @@ paths:
           $ref: '#/components/responses/NotFoundError'
 components:
   schemas:
+    GoalStatus:
+      type: string
+      enum:
+      - proposed
+      - active
+      - paused
+      - achieved
+      - abandoned
+    GoalMilestoneStatus:
+      type: string
+      enum:
+      - pending
+      - in_progress
+      - done
+      - skipped
+    GoalMilestone:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        position:
+          type: integer
+        title:
+          type: string
+        criteria:
+          type: string
+        status:
+          $ref: '#/components/schemas/GoalMilestoneStatus'
+        due_date:
+          type: string
+          format: date
+          nullable: true
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        version:
+          type: integer
+    GoalLink:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        target_type:
+          type: string
+          enum:
+          - conversation
+          - task
+          - event
+          - document
+          - memory
+          - inbox
+        target_id:
+          type: integer
+          format: int64
+        relation:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    GoalProposal:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        summary:
+          type: string
+        status:
+          type: string
+          enum:
+          - pending
+          - applied
+          - rejected
+        changes:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+        decided_at:
+          type: string
+          format: date-time
+          nullable: true
+    GoalProgressEvent:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        kind:
+          type: string
+          enum:
+          - goal_created
+          - approved
+          - milestone
+          - task_done
+          - note
+          - status
+          - proposal
+        summary:
+          type: string
+        source_type:
+          type: string
+          nullable: true
+        source_id:
+          type: integer
+          format: int64
+          nullable: true
+        recorded_at:
+          type: string
+          format: date-time
+    GoalProgress:
+      type: object
+      properties:
+        milestones_total:
+          type: integer
+        milestones_done:
+          type: integer
+        linked_tasks:
+          type: integer
+        linked_tasks_done:
+          type: integer
+        percent:
+          type: integer
+          nullable: true
+        last_activity_at:
+          type: string
+          format: date-time
+          nullable: true
+    GoalSignals:
+      type: object
+      properties:
+        stalled:
+          type: boolean
+        stall_reason:
+          type: string
+        overdue:
+          type: boolean
+        no_open_work:
+          type: boolean
+        pending_proposal:
+          type: boolean
+    Goal:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        title:
+          type: string
+        description:
+          type: string
+        status:
+          $ref: '#/components/schemas/GoalStatus'
+        target_date:
+          type: string
+          format: date
+          nullable: true
+        approved_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        version:
+          type: integer
+        milestones:
+          type: array
+          items:
+            $ref: '#/components/schemas/GoalMilestone'
+        links:
+          type: array
+          items:
+            $ref: '#/components/schemas/GoalLink'
+        proposals:
+          type: array
+          items:
+            $ref: '#/components/schemas/GoalProposal'
+        progress_log:
+          type: array
+          items:
+            $ref: '#/components/schemas/GoalProgressEvent'
+        progress:
+          $ref: '#/components/schemas/GoalProgress'
+        signals:
+          $ref: '#/components/schemas/GoalSignals'
+    GoalListResponse:
+      type: object
+      required:
+      - data
+      - meta
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Goal'
+        meta:
+          type: object
+          properties:
+            limit:
+              type: integer
+            offset:
+              type: integer
+            total:
+              type: integer
+    GoalCreateRequest:
+      type: object
+      required:
+      - title
+      properties:
+        title:
+          type: string
+          maxLength: 200
+        description:
+          type: string
+        target_date:
+          type: string
+          format: date
+        milestones:
+          type: array
+          items:
+            type: object
+            required:
+            - title
+            properties:
+              title:
+                type: string
+              criteria:
+                type: string
+              due_date:
+                type: string
+                format: date
     DueReminder:
       type: object
       properties:

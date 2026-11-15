@@ -186,7 +186,7 @@ Transport (HTTP, MCP) ──► Application ──► Domain
 - Календарные события меняются и удаляются прямо в интерфейсе календаря: `PATCH /api/v1/calendar/events/{id}` и `DELETE ...` под `If-Match` с версией. Удаление аппаратное (строка `calendar_events` удаляется), поэтому событие исчезает из календаря, сводок и выдачи ассистента сразу; архивной копии нет.
 - Файловые инструменты отказывают в доступе к собственной базе `lifeos.db` (и её `-wal`/`-shm`): данные меняются только через сервисы LifeOS
 - `RetryProvider` (`internal/agent/resilience.go`) — ретраи с экспоненциальной задержкой (`429`, `5xx`, обрывы сети, пустой ответ) и фоллбек на следующую модель; стрим, уже отдавший текст, не перезапускается. Ретраи/фоллбеки приходят в UI событием `retry`
-- `internal/agent/tools` — реестр инструментов LifeOS: чтение (`list_tasks`, `get_today_summary`, `list_inbox`, `plan_day`, `replan`, `estimate_duration`, `review_habit`, `search_memory`, `list_memory`, `memory_conflicts`) и мутации (`create_task`, `update_task`, `complete_task`, `cancel_task`, `restore_task`, `reschedule_task`, `capture_inbox`, `convert_inbox`, `dismiss_inbox`, `apply_plan`, `capture`, `remember`, `save_knowledge`, `update_memory`, `forget_memory`, `link_memory`)
+- `internal/agent/tools` — реестр инструментов LifeOS: чтение (`list_tasks`, `get_today_summary`, `list_inbox`, `plan_day`, `replan`, `estimate_duration`, `review_habit`, `search_memory`, `list_memory`, `memory_conflicts`, `list_goals`, `get_goal`) и мутации (`create_task`, `update_task`, `complete_task`, `cancel_task`, `restore_task`, `reschedule_task`, `capture_inbox`, `convert_inbox`, `dismiss_inbox`, `apply_plan`, `capture`, `remember`, `save_knowledge`, `update_memory`, `forget_memory`, `link_memory`, `create_goal`, `update_goal_plan`, `update_goal_milestones`, `propose_goal_change`, `approve_goal`, `apply_goal_proposal`, `reject_goal_proposal`, `change_goal_status`, `link_goal`, `unlink_goal`, `record_goal_progress`)
 
 ### `internal/application/planning`
 - `PlanDay` — читает события и блоки дня, считает свободные интервалы с буфером и предлагает расстановку задач по срочности; ничего не пишет. Свободное время отсчитывается от текущего момента (`ClipFrom`), прошедший день помечается как `past` и не планируется
@@ -273,9 +273,20 @@ Transport (HTTP, MCP) ──► Application ──► Domain
 - Возврат структурированных результатов
 
 ### `internal/application/proactive`
-- Детекторы: просрочки, дедлайны сегодня, перегрузка, backlog входящих, задачи без срока, совпадающие точные дедлайны
+- Детекторы: просрочки, дедлайны сегодня, перегрузка, backlog входящих, задачи без срока, совпадающие точные дедлайны, остановившиеся цели (этап 4)
 - Наблюдения вычисляются из живых данных; в БД хранятся только dismiss/snooze (`insight_states`)
 - `Runner` периодически пересчитывает и публикует `insight.detected` только для новых ключей — без потока повторных уведомлений
+
+### `internal/application/goals` и `internal/domain/goal`
+
+Долгосрочные цели и управление инициативами (этап 4). Модуль не зависит от
+ассистента и транспорта: сервис работает с целями, этапами, связями, журналом
+прогресса и предложениями, а задачи подключаются узким портом `TaskProvider`.
+
+- Жизненный цикл задаётся в домене (`CanTransition`): цель ассистента создаётся в `proposed` и начинает работу только после `Approve`; терминальные статусы остаются в истории
+- Прямой доступ к утверждённому плану закрыт (`ErrGoalNotProposed`): существенные изменения проходят через `ProposeChange` → ожидание → `ApplyProposal`/`RejectProposal`, всё атомарно одной транзакцией, одновременно не более одного `pending`-предложения
+- Прогресс вычисляется по фактическим данным: выполненные этапы, связанные задачи (завершение задачи попадает в журнал через поток событий, `OnTaskCompleted`), заметки пользователя и ассистента
+- Отклонения называются с причиной: «нет записей о прогрессе N дней» (> 14), истёк срок, вся работа сделана без отметки о достижении; остановившиеся цели отдаёт `Stalled`, и они попадают в наблюдения и в контекст ассистента
 
 ### `internal/events`
 - In-process broker для SSE: подписки, буфер последних 256 событий, `Last-Event-ID` replay
@@ -293,7 +304,7 @@ Transport (HTTP, MCP) ──► Application ──► Domain
 
 ### `web` (SvelteKit 2 + Svelte 5)
 - SPA (`ssr = false`), статический adapter, встраивается в Go-бинарник
-- Экраны: `/` (ассистент), `/today` (Сегодня), `/inbox` (Входящие), `/tasks` (Все задачи), `/calendar` (Календарь), `/memory` (Память и база знаний)
+- Экраны: `/` (ассистент), `/today` (Сегодня), `/inbox` (Входящие), `/tasks` (Все задачи), `/goals` (Цели), `/calendar` (Календарь), `/memory` (Память и база знаний)
 - `web/src/lib/api.ts` — типизированный клиент REST API; мутации отправляют `If-Match` с версией задачи
 - `web/src/lib/components/TaskRow.svelte` — общая карточка задачи (завершение, отмена, восстановление, перенос)
 - Визуальное направление — Concept B (тёмная тема, фиолетово-голубые акценты, боковая навигация, mobile bottom nav)

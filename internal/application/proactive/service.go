@@ -11,6 +11,7 @@ import (
 	"sort"
 	"time"
 
+	appgoals "github.com/theDenuvo/LifeOS/internal/application/goals"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	"github.com/theDenuvo/LifeOS/internal/domain/task"
 )
@@ -74,11 +75,19 @@ type Clock interface {
 	Now() time.Time
 }
 
+// GoalsWatcher is the slice of the goal service the stalled-goal detector
+// needs. Roadmap stage 4: a goal that stopped moving is a real deviation, so
+// it surfaces in the same insight stream as overdue work.
+type GoalsWatcher interface {
+	Stalled(ctx context.Context) ([]appgoals.StalledGoal, error)
+}
+
 // Service computes and manages insights.
 type Service struct {
 	uow      UnitOfWork
 	tasks    TaskLister
 	inbox    InboxCounter
+	goals    GoalsWatcher
 	clock    Clock
 	timezone string
 }
@@ -92,6 +101,11 @@ func NewService(uow UnitOfWork, taskLister TaskLister, inboxCounter InboxCounter
 		timezone = tasks.DefaultTimezone
 	}
 	return &Service{uow: uow, tasks: taskLister, inbox: inboxCounter, clock: clock, timezone: timezone}
+}
+
+// WithGoals attaches the goal service used by the stalled-goal detector.
+func WithGoals(watcher GoalsWatcher) func(*Service) {
+	return func(s *Service) { s.goals = watcher }
 }
 
 type systemClock struct{}
@@ -120,6 +134,11 @@ func (s *Service) Compute(ctx context.Context) ([]Insight, error) {
 	}
 
 	insights := s.detect(open, inboxCount, now, dayStart, dayEnd)
+	// A stopped goal is discovered from its own journal, not from the task
+	// list, so the detector runs separately and never fails the day's insights.
+	if s.goals != nil {
+		insights = append(insights, s.stalledGoalInsights(ctx)...)
+	}
 	if len(insights) == 0 {
 		return []Insight{}, nil
 	}
@@ -302,6 +321,31 @@ func (s *Service) detect(open []tasks.TaskWithVersion, inboxCount int, now, dayS
 		})
 	}
 
+	return insights
+}
+
+// stalledGoalInsights turns stopped goals into one insight each; at most three
+// are surfaced so a stalled backlog cannot drown the day's signals.
+func (s *Service) stalledGoalInsights(ctx context.Context) []Insight {
+	stalled, err := s.goals.Stalled(ctx)
+	if err != nil {
+		return nil
+	}
+	insights := make([]Insight, 0, min(len(stalled), 3))
+	for _, item := range stalled {
+		if len(insights) >= 3 {
+			break
+		}
+		reason := item.Review.Signals.StallReason
+		insights = append(insights, Insight{
+			Key:      fmt.Sprintf("goal-stalled-%d", item.Goal.ID),
+			Kind:     "goal-stalled",
+			Severity: SeverityWarning,
+			Title:    fmt.Sprintf("Цель «%s» остановилась", item.Goal.Title),
+			Detail:   fmt.Sprintf("%s — стоит обсудить, продолжать ли работу, и при необходимости скорректировать план", reason),
+			Count:    1,
+		})
+	}
 	return insights
 }
 

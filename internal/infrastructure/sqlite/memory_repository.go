@@ -501,8 +501,9 @@ func (r *memoryRepository) TargetExists(ctx context.Context, target domainmemory
 		table = "documents"
 	case domainmemory.TargetInbox:
 		table = "inbox_items"
+	case domainmemory.TargetGoal:
+		table = "goals"
 	default:
-		// Goals have no module yet, so a link to one cannot be verified.
 		return false, nil
 	}
 	var found int

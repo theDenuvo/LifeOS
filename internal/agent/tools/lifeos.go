@@ -11,6 +11,7 @@ import (
 	"github.com/theDenuvo/LifeOS/internal/application/completion"
 	appdocuments "github.com/theDenuvo/LifeOS/internal/application/documents"
 	appevents "github.com/theDenuvo/LifeOS/internal/application/events"
+	"github.com/theDenuvo/LifeOS/internal/application/goals"
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
 	appmemory "github.com/theDenuvo/LifeOS/internal/application/memory"
 	"github.com/theDenuvo/LifeOS/internal/application/planning"
@@ -37,6 +38,7 @@ type lifeOSToolConfig struct {
 	recurrence   *recurrence.Service
 	completion   *completion.Service
 	memory       *appmemory.Service
+	goals        *goals.Service
 	workspaceHub *WorkspaceHub
 }
 
@@ -75,6 +77,11 @@ func WithRecurrence(service *recurrence.Service) LifeOSToolOption {
 // WithMemoryService exposes durable memory and the knowledge base.
 func WithMemoryService(service *appmemory.Service) LifeOSToolOption {
 	return func(c *lifeOSToolConfig) { c.memory = service }
+}
+
+// WithGoalsService exposes long-term goals and initiative management.
+func WithGoalsService(service *goals.Service) LifeOSToolOption {
+	return func(c *lifeOSToolConfig) { c.goals = service }
 }
 
 // WithCompletion attaches the completion checker used by verify_completion.
@@ -132,6 +139,9 @@ func NewLifeOSTools(taskService *tasks.Service, inboxService *inbox.Service, sum
 	}
 	if config.memory != nil {
 		registerMemoryTools(registry, config.memory)
+	}
+	if config.goals != nil {
+		registerGoalTools(registry, config.goals)
 	}
 	if config.workspaceHub != nil {
 		registerConversationTools(registry, config.workspaceHub)

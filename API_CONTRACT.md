@@ -683,13 +683,141 @@ data: {"id": 5, "tool": "create_task", "preview": {...}}
 GET /api/v1/search?q=молоко&limit=20
 ```
 
-Ищет по названию/заметке задач и по тексту входящих. Ответ:
+Ищет по названию/заметке задач и по тексту входящих. Память и база знаний
+ищутся отдельно через `GET /api/v1/memory?q=…`. Ответ:
 
 ```json
 {"tasks": [Task], "inbox": [InboxItem], "meta": {"total": 2, "limit": 20}}
 ```
 
 Пустой `q` → `400`. Поиск по входящим нечувствителен к регистру, включая кириллицу.
+
+### 8.1 Память и база знаний
+
+Записи памяти — устойчивые сведения о пользователе (`area: personal`) и материалы
+знаний (`area: knowledge`). Каждая запись имеет источник, уверенность, статус и
+версию.
+
+**Схема `MemoryEntry`:**
+
+```json
+{
+  "id": 12,
+  "area": "personal",
+  "category": "preference",
+  "title": "Формат отчётов",
+  "content": "Короткие отчёты с таблицами",
+  "certainty": "fact",
+  "confidence": 1,
+  "status": "active",
+  "superseded_by": null,
+  "entities": ["отчёты"],
+  "sources": [
+    {"kind": "user", "label": "Слова пользователя", "excerpt": "…", "observed_at": "2026-11-15T09:00:00Z"}
+  ],
+  "created_at": "2026-11-15T09:00:00Z",
+  "updated_at": "2026-11-15T09:00:00Z",
+  "version": 1
+}
+```
+
+`certainty` — `fact`, `assumption` или `inference`; `status` — `active`,
+`disputed`, `superseded`. Запись `superseded` в активном списке не появляется, но
+остаётся читаемой по id.
+
+#### Список и поиск
+
+```
+GET /api/v1/memory?q=отчёты&area=personal&category=preference&status=active&limit=30&offset=0
+```
+
+Ответ: `{"data": [MemoryEntry], "meta": {"limit", "offset", "total"}}`. `q`
+использует `FTS5` с префиксным совпадением и не ломается на символах `FTS`.
+Некорректные `area`/`category`/`status` → `400`.
+
+#### Получить запись
+
+```
+GET /api/v1/memory/{id}
+```
+
+Возвращает `MemoryEntry` с полными источниками и `links`.
+
+#### Создать сведение
+
+```
+POST /api/v1/memory
+{"title": "Рабочие часы", "content": "Начинаю в 9:00", "category": "habit", "certainty": "fact", "entities": ["работа"]}
+```
+
+`201` → `{"entry": MemoryEntry, "duplicate": false}`. Если тема уже известна и
+содержание совпадает — `duplicate: true` и новый источник у существующей записи.
+Если содержание противоречит сохранённому — в ответе появляется `conflict_id`, а
+запись создаётся в статусе `disputed`. Некорректные поля → `400`.
+
+#### Изменить запись
+
+```
+PATCH /api/v1/memory/{id}
+If-Match: "1"
+{"content": "Начинаю в 9:30", "certainty": "fact"}
+```
+
+`200` → `MemoryEntry` с версией +1. Без `If-Match` → `428`; устаревшая версия →
+`412`. Правка не удаляет прежнюю формулировку из истории версий.
+
+#### Удалить запись
+
+```
+DELETE /api/v1/memory/{id}
+If-Match: "2"
+```
+
+`204`; без `If-Match` → `428`; устаревшая версия → `412`; неизвестный id → `404`.
+
+#### Связи
+
+```
+POST   /api/v1/memory/{id}/links   {"target_type": "task", "target_id": 5, "relation": "относится к"}
+DELETE /api/v1/memory/{id}/links/{linkID}
+```
+
+`target_type` — `memory`, `task`, `event`, `conversation`, `document`, `inbox`,
+`goal`. Цель проверяется в той же транзакции: несуществующий объект → `422`
+(`invalid-link`). Повторная такая же связь не создаёт дубль. Удаление → `204`,
+неизвестная связь → `404`.
+
+#### Противоречия
+
+```
+GET  /api/v1/memory/conflicts            # только ожидающие решения
+GET  /api/v1/memory/conflicts?all=true   # включая разрешённые
+POST /api/v1/memory/conflicts/{id}/resolve
+{"resolution": "existing" | "candidate" | "both" | "merge",
+ "merged_title": "…", "merged_content": "…"}
+```
+
+Ответ списка: `{"data": [{"id", "reason", "status", "existing": MemoryEntry, "candidate": MemoryEntry, "created_at", "resolved_at"}], "meta": {"total"}}`.
+
+`existing` — оставить прежнюю версию; `candidate` — принять новую; `both` —
+оставить обе активными; `merge` — объединить текст (поля обязательны). Решение
+применяется атомарно, проигравшая версия становится `superseded` со ссылкой на
+замену. Повторное решение → `409`; неизвестный конфликт → `404`; неизвестный
+`resolution` → `400`.
+
+#### Статистика
+
+```
+GET /api/v1/memory/stats
+{"personal": 7, "knowledge": 3, "pending_conflicts": 1}
+```
+
+#### События
+
+`memory.created`, `memory.updated`, `memory.deleted`, `memory.source.added`,
+`memory.linked`, `memory.unlinked`, `memory.conflict.detected`,
+`memory.conflict.resolved` приходят через `GET /api/v1/events` вместе с
+остальными.
 
 ### 9. Настройки
 

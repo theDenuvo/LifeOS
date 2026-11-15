@@ -373,6 +373,92 @@
 
 Хранится в `app_settings` под ключами `profile.name` и `profile.role`; инициалы выводятся из имени. Отдельной таблицы нет — приложение однопользовательское.
 
+### 8.1 MemoryEntry (Запись памяти)
+
+**Назначение:** устойчивое сведение о пользователе или материал знаний. Отдельно
+от истории диалогов и задач.
+
+| Поле | Тип | Правила |
+|---|---|---|
+| `id` | INTEGER | PK |
+| `area` | TEXT | `personal`, `knowledge`; выводится из категории |
+| `category` | TEXT | `preference`, `habit`, `circumstance`, `fact`, `agreement`, `context`, `rule` (личное); `instruction`, `summary`, `reference`, `research`, `idea`, `documentation`, `note` (знания) |
+| `title` | TEXT | 1–200 символов |
+| `normalized_title` | TEXT | тема без регистра и пунктуации, для поиска той же темы |
+| `content` | TEXT | 1–100000 символов |
+| `dedupe_key` | TEXT | SHA-256 от области, категории, темы и содержания |
+| `document_sha` | TEXT? | хеш исходного документа, если запись пришла из файла |
+| `certainty` | TEXT | `fact`, `assumption`, `inference` — факты, предположения и выводы не смешиваются |
+| `confidence` | REAL | 0–1 |
+| `status` | TEXT | `active`, `disputed`, `superseded` |
+| `superseded_by` | INTEGER? | FK → memory_entries; замена в цепочке версий |
+| `entities` | TEXT | JSON-массив имён, проектов, мест |
+| `created_at`, `updated_at` | TIMESTAMP | UTC |
+| `version` | INTEGER | optimistic locking, как у задач |
+
+**Индексы:** список (`area,status,updated_at`), тема (`area,category,normalized_title,status`),
+дубли (`dedupe_key`), замена (`superseded_by`).
+
+**Правила:**
+
+- точный дубль не создаёт запись, а добавляет `memory_sources`;
+- исправление той же темы допускается автоматически только при `certainty = fact`
+  и высокой уверенности; иначе запись становится `disputed` и создаётся
+  `memory_conflicts`;
+- `superseded` не попадает в активный список и в контекст ассистента, но
+  остаётся читаемым как история;
+- удаление — физическое, вместе с источниками, связями и противоречиями.
+
+### 8.2 MemorySource (Происхождение)
+
+| Поле | Тип | Правила |
+|---|---|---|
+| `id` | INTEGER | PK |
+| `entry_id` | INTEGER | FK → memory_entries, cascade |
+| `kind` | TEXT | `user`, `assistant`, `conversation`, `document`, `task`, `event`, `system` |
+| `source_id` | INTEGER | ID объекта-источника, 0 если его нет |
+| `label` | TEXT | человекочитаемое описание источника |
+| `excerpt` | TEXT | фрагмент, на котором основано сведение (≤ 2000) |
+| `observed_at` | TIMESTAMP | когда источник наблюдался |
+
+Запись без источника невозможна: `Entry.Validate` отклоняет её.
+
+### 8.3 MemoryLink (Связь)
+
+| Поле | Тип | Правила |
+|---|---|---|
+| `id` | INTEGER | PK |
+| `entry_id` | INTEGER | FK → memory_entries, cascade |
+| `target_type` | TEXT | `memory`, `task`, `event`, `conversation`, `document`, `inbox`, `goal` |
+| `target_id` | INTEGER | ID объекта |
+| `relation` | TEXT | смысл связи (≤ 50), например «относится к», «источник» |
+| `created_at` | TIMESTAMP | UTC |
+
+Уникальность `(entry_id, target_type, target_id, relation)`. Существование цели
+проверяется в той же транзакции, что и вставка.
+
+### 8.4 MemoryConflict (Противоречие)
+
+| Поле | Тип | Правила |
+|---|---|---|
+| `id` | INTEGER | PK |
+| `existing_id`, `candidate_id` | INTEGER | FK → memory_entries |
+| `reason` | TEXT | почему нужно решение |
+| `status` | TEXT | `pending`, `resolved` |
+| `resolution` | TEXT? | `existing`, `candidate`, `both`, `merge` |
+| `created_at`, `resolved_at` | TIMESTAMP | UTC |
+
+Один незавершённый конфликт на пару записей (`UNIQUE ... WHERE status = 'pending'`).
+Решение применяется атомарно: выбранная версия остаётся активной, проигравшая
+становится `superseded` со ссылкой на замену.
+
+### 8.5 Memory FTS
+
+`memory_fts` — виртуальная таблица `FTS5` (`content='memory_entries'`,
+`unicode61 remove_diacritics 2`) с триггерами на вставку, обновление и удаление.
+Индекс покрывает тему, содержание и сущности; поиск использует префиксное
+совпадение по последнему слову и экранирует пользовательский ввод.
+
 ### 9. Document (Документ)
 
 | Поле | Тип | Правила |
@@ -472,6 +558,9 @@ type Task struct {
 ## Связи
 
 ```
+MemoryEntry 1 ──< MemorySource
+MemoryEntry 1 ──< MemoryLink >── Task / Event / Conversation / Document / Memory
+MemoryEntry 1 ──< MemoryConflict
 Task 1 ──< TaskEvent
 Task 1 ──< Task (parent_task_id, для будущих подзадач)
 InboxItem 1 ──> Task (при конвертации, через TaskEvent.payload)
@@ -496,6 +585,7 @@ Message 1 ──< PendingAction
 | 008 | Триггеры updated_at для tasks, conversations |
 | 009 | Защита append-only task_events, защита от удаления tasks с историей, converted_task_id для inbox_items |
 | 010 | `tasks.version` для optimistic locking; удаление триггера `tasks_updated_at` (времена пишет Application) |
+| 018 | Память и база знаний: `memory_entries`, `memory_sources`, `memory_links`, `memory_conflicts`, `memory_fts` с триггерами |
 
 > Детальные SQL миграции в `internal/infrastructure/sqlite/migrations/`.
 

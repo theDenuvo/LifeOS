@@ -198,6 +198,7 @@ func (s *Service) SendMessageStream(
 				"role":            string(message.Role),
 				"content":         message.Content,
 			})
+			s.learn(conversationID, userID, content)
 			_ = emitEvent(emit, StreamEvent{Type: "done", Data: result})
 			return result, nil
 		}
@@ -264,6 +265,7 @@ func (s *Service) SendMessageStream(
 		return SendResult{}, err
 	}
 	result := SendResult{ConversationID: conversationID, Message: message, PendingActions: pending}
+	s.learn(conversationID, userID, content)
 	_ = emitEvent(emit, StreamEvent{Type: "done", Data: result})
 	return result, nil
 }

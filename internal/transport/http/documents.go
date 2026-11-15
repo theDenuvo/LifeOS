@@ -99,6 +99,26 @@ func (h *Handler) processDocument(id int64) {
 	defer cancel()
 	if err := h.services.Documents.Process(ctx, id); err != nil {
 		slog.Error("document processing failed", "id", id, "error", err)
+		return
+	}
+	// A processed document becomes reusable knowledge. Indexing is a stage-2
+	// capability but must never turn a successful conversion into a failure: the
+	// document stays available even when memory extraction is unavailable.
+	if h.services.Memory == nil {
+		return
+	}
+	view, err := h.services.Documents.Get(ctx, id)
+	if err != nil {
+		slog.Warn("memory import: document is not readable", "id", id, "error", err)
+		return
+	}
+	result, err := h.services.Memory.ImportDocument(ctx, view.Document)
+	if err != nil {
+		slog.Warn("memory import failed", "id", id, "error", err)
+		return
+	}
+	if result.ExtractionError != "" {
+		slog.Info("memory import stored the document without extracted facts", "id", id, "reason", result.ExtractionError)
 	}
 }
 

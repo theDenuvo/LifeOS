@@ -15,6 +15,7 @@ import (
 
 	"github.com/theDenuvo/LifeOS/internal/agent"
 	agentdocuments "github.com/theDenuvo/LifeOS/internal/agent/documents"
+	agentmemory "github.com/theDenuvo/LifeOS/internal/agent/memory"
 	"github.com/theDenuvo/LifeOS/internal/agent/tools"
 	"github.com/theDenuvo/LifeOS/internal/application/assistant"
 	appcalendar "github.com/theDenuvo/LifeOS/internal/application/calendar"
@@ -22,6 +23,7 @@ import (
 	appdocuments "github.com/theDenuvo/LifeOS/internal/application/documents"
 	appevents "github.com/theDenuvo/LifeOS/internal/application/events"
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
+	appmemory "github.com/theDenuvo/LifeOS/internal/application/memory"
 	"github.com/theDenuvo/LifeOS/internal/application/planning"
 	"github.com/theDenuvo/LifeOS/internal/application/proactive"
 	"github.com/theDenuvo/LifeOS/internal/application/profile"
@@ -177,6 +179,19 @@ func main() {
 		completion.WithClock(clock),
 	)
 
+	// Roadmap stage 2: durable memory, provenance and the living knowledge base.
+	//
+	// Learning is autonomous (facts are extracted from conversations and
+	// indexed documents), but every stored claim keeps its source, an explicit
+	// certainty level and a version. Contradictions become a review item instead
+	// of silently overwriting what the user already established.
+	memoryService := appmemory.NewService(
+		sqlite.NewMemoryUnitOfWork(db),
+		clock,
+		appmemory.WithExtractor(agentmemory.NewExtractor(cfg.DocLLMBaseURL, cfg.DocLLMAPIKey, cfg.DocLLMModel)),
+		appmemory.WithPublisher(broker),
+	)
+
 	// The dashboard shows the day's load and the ideas that are due to resurface.
 	summaryService.WithRevisit(inboxService).WithPlanner(planningService)
 
@@ -232,9 +247,17 @@ func main() {
 		tools.WithPlanning(planningService),
 		tools.WithRecurrence(recurrenceService),
 		tools.WithCompletion(completionService),
+		tools.WithMemoryService(memoryService),
 		tools.WithTimezone(cfg.Timezone),
 	)
-	contextProvider := assistant.NewLifeOSContext(summaryService, proactiveService, cfg.Timezone, clock, assistant.WithEvents(eventService))
+	contextProvider := assistant.NewLifeOSContext(
+		summaryService,
+		proactiveService,
+		cfg.Timezone,
+		clock,
+		assistant.WithEvents(eventService),
+		assistant.WithMemory(memoryService),
+	)
 	assistantService := assistant.NewService(
 		sqlite.NewAssistantUnitOfWork(db),
 		provider,
@@ -245,6 +268,7 @@ func main() {
 		assistant.WithPublisher(broker),
 		assistant.WithContextProvider(contextProvider),
 		assistant.WithDocumentTextProvider(documentTextProvider{service: documentService}),
+		assistant.WithMemoryLearner(memoryService),
 		assistant.WithWorkingDirectory(workingDirectory()),
 	)
 
@@ -264,6 +288,7 @@ func main() {
 		Planning:   planningService,
 		Recurrence: recurrenceService,
 		Completion: completionService,
+		Memory:     memoryService,
 		Models:     modelCatalog,
 		Tools:      registry,
 		Broker:     broker,

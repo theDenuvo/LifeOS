@@ -19,6 +19,7 @@ import (
 	appdocuments "github.com/theDenuvo/LifeOS/internal/application/documents"
 	appevents "github.com/theDenuvo/LifeOS/internal/application/events"
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
+	appmemory "github.com/theDenuvo/LifeOS/internal/application/memory"
 	"github.com/theDenuvo/LifeOS/internal/application/planning"
 	"github.com/theDenuvo/LifeOS/internal/application/proactive"
 	"github.com/theDenuvo/LifeOS/internal/application/profile"
@@ -48,6 +49,7 @@ type Services struct {
 	Planning   *planning.Service
 	Recurrence *recurrence.Service
 	Completion *completion.Service
+	Memory     *appmemory.Service
 	Models     *agent.ModelCatalog
 	Tools      *tools.Registry
 	Broker     *events.Broker
@@ -147,6 +149,16 @@ func (h *Handler) apiRoutes() http.Handler {
 	mux.HandleFunc("POST /insights/{key}/dismiss", h.dismissInsight)
 	mux.HandleFunc("POST /insights/{key}/snooze", h.snoozeInsight)
 	mux.HandleFunc("GET /search", h.search)
+	mux.HandleFunc("GET /memory", h.listMemory)
+	mux.HandleFunc("POST /memory", h.createMemory)
+	mux.HandleFunc("GET /memory/stats", h.memoryStats)
+	mux.HandleFunc("GET /memory/conflicts", h.listMemoryConflicts)
+	mux.HandleFunc("POST /memory/conflicts/{id}/resolve", h.resolveMemoryConflict)
+	mux.HandleFunc("GET /memory/{id}", h.getMemory)
+	mux.HandleFunc("PATCH /memory/{id}", h.updateMemory)
+	mux.HandleFunc("DELETE /memory/{id}", h.deleteMemory)
+	mux.HandleFunc("POST /memory/{id}/links", h.linkMemory)
+	mux.HandleFunc("DELETE /memory/{id}/links/{linkID}", h.unlinkMemory)
 	mux.HandleFunc("GET /settings", h.listSettings)
 	mux.HandleFunc("GET /settings/{key}", h.getSetting)
 	mux.HandleFunc("PUT /settings/{key}", h.putSetting)

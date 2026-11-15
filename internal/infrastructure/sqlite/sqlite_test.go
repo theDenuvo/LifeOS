@@ -38,8 +38,8 @@ func TestMigrationsApply(t *testing.T) {
 	if err != nil {
 		t.Fatalf("goose.GetDBVersion failed: %v", err)
 	}
-	if version != 17 {
-		t.Errorf("Expected version 17, got %d", version)
+	if version != 18 {
+		t.Errorf("Expected version 18, got %d", version)
 	}
 }
 
@@ -53,8 +53,8 @@ func TestMigrationsIdempotent(t *testing.T) {
 	}
 
 	version, _ := goose.GetDBVersion(db)
-	if version != 17 {
-		t.Errorf("Expected version 17 after re-apply, got %d", version)
+	if version != 18 {
+		t.Errorf("Expected version 18 after re-apply, got %d", version)
 	}
 }
 
@@ -342,8 +342,8 @@ func TestProductionMigrationPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("goose.GetDBVersion failed: %v", err)
 	}
-	if version != 17 {
-		t.Errorf("Expected version 17, got %d", version)
+	if version != 18 {
+		t.Errorf("Expected version 18, got %d", version)
 	}
 }
 

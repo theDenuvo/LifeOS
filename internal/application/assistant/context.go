@@ -27,6 +27,11 @@ type EventProvider interface {
 	ListRange(ctx context.Context, from, to time.Time, calendars []event.Calendar) ([]appevents.EventWithVersion, error)
 }
 
+// MemoryProvider renders known personal facts and pending contradictions.
+type MemoryProvider interface {
+	ContextSnapshot(ctx context.Context) (string, error)
+}
+
 // ContextProvider renders a compact snapshot of the user's current LifeOS state.
 //
 // The snapshot is injected into the system prompt on every turn. It is a hint,
@@ -41,6 +46,7 @@ type LifeOSContext struct {
 	today    TodayProvider
 	insights InsightProvider
 	events   EventProvider
+	memory   MemoryProvider
 	timezone string
 	clock    Clock
 }
@@ -51,6 +57,12 @@ type ContextOption func(*LifeOSContext)
 // WithEvents adds today's calendar events to the snapshot.
 func WithEvents(provider EventProvider) ContextOption {
 	return func(c *LifeOSContext) { c.events = provider }
+}
+
+// WithMemory adds the durable personal memory to the snapshot. Without it the
+// assistant would only know the current day, which is what stage 2 fixes.
+func WithMemory(provider MemoryProvider) ContextOption {
+	return func(c *LifeOSContext) { c.memory = provider }
 }
 
 // NewLifeOSContext builds a context provider.
@@ -121,6 +133,14 @@ func (c *LifeOSContext) Snapshot(ctx context.Context) (string, error) {
 	}
 	if len(insights) > 0 {
 		fmt.Fprintf(&b, "Наблюдения: %s.\n", joinInsights(insights, 4))
+	}
+	// Memory is appended last: it is durable context, not today's state, and a
+	// failure to render it must not hide the day's snapshot.
+	if c.memory != nil {
+		if value, err := c.memory.ContextSnapshot(ctx); err == nil && strings.TrimSpace(value) != "" {
+			b.WriteString("\n")
+			b.WriteString(value)
+		}
 	}
 	return b.String(), nil
 }

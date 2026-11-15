@@ -9,8 +9,9 @@ Primary navigation:
 3. **Inbox** (`/inbox`) — processing queue for unprocessed captures. Reached from the secondary links and mobile navigation.
 4. **Tasks** (`/tasks`) — full task list, filters, inline actions.
 5. **Calendar** (`/calendar`) — month grid plus the selected day's tasks. Reached from primary navigation.
+6. **Memory** (`/memory`) — what LifeOS knows about the user and the accumulated knowledge base, with provenance. Reached from primary navigation.
 
-Future modules (notes, goals, documents) become assistant capabilities and views, not disconnected mini-apps. They use the same header rhythm, tokens, and assistant integration.
+Future modules (goals, documents) become assistant capabilities and views, not disconnected mini-apps. They use the same header rhythm, tokens, and assistant integration.
 
 ## App shell sidebar
 
@@ -113,6 +114,26 @@ Below: one line explaining that the assistant reads the system and asks before c
 - Day panel: selected date, open/completed counts, daily progress, grouped task rows with completion control, priority, and time; “Добавить задачу на этот день”.
 - Footer: assistant sync line and “показано N из M”.
 - Calendar events (meetings) require a dedicated events model; until it lands the grid renders tasks only.
+
+## Memory
+
+Memory is the screen where the user audits what the assistant knows, not a second notebook.
+
+- **Header:** “Память”, one line explaining that everything is shown with sources, and one primary action “Добавить сведение”.
+- **Tabs:** Личное / База знаний / Противоречия, each with a count. The conflict tab shows a warning count only when action is needed; it is never the default tab.
+- **Search:** one field over title, content and entities (`FTS5` prefix search). Total count sits beside it as metadata, not a card.
+- **Entry:** category label, certainty badge (`факт` / `предположение` / `вывод`), entities, title, content. Disputed entries carry a warning border and a “ждёт решения” badge.
+- **Provenance:** collapsed behind a source control showing the source count. Expanded, each source shows kind, label, date and excerpt. A note explains that edits create a new version and keep the previous wording in history.
+- **Editing:** inline title/content fields with save/cancel. Delete is an icon button with a destructive hover, never a primary action.
+- **Conflicts:** the reason, both claims side by side with their own provenance, then “Оставить прежнее”, “Принять новое”, “Оба верны”. The losing claim stays as a superseded version, so the screen never implies data was erased.
+- **Empty states:** explain the workflow and offer the next step. Empty knowledge explains that processed documents are indexed automatically.
+
+Rules:
+
+- Certainty is always visible for a claim; a fact and an inference must never look the same.
+- Never present memory as complete or certain because it is stored; the source and confidence are part of the entry.
+- A conflict is a decision for the user. The screen never resolves ambiguity silently.
+- Deleting or rewriting memory requires the explicit control in this screen; assistant writes go through confirmation like any other mutation.
 
 ## Today
 

@@ -12,6 +12,7 @@ import (
 	appdocuments "github.com/theDenuvo/LifeOS/internal/application/documents"
 	appevents "github.com/theDenuvo/LifeOS/internal/application/events"
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
+	appmemory "github.com/theDenuvo/LifeOS/internal/application/memory"
 	"github.com/theDenuvo/LifeOS/internal/application/planning"
 	"github.com/theDenuvo/LifeOS/internal/application/proactive"
 	"github.com/theDenuvo/LifeOS/internal/application/recurrence"
@@ -35,6 +36,7 @@ type lifeOSToolConfig struct {
 	planning   *planning.Service
 	recurrence *recurrence.Service
 	completion *completion.Service
+	memory     *appmemory.Service
 }
 
 // WithSearchService exposes unified search to the assistant.
@@ -67,6 +69,11 @@ func WithPlanning(service *planning.Service) LifeOSToolOption {
 // WithRecurrence attaches the habit review used by recurring tasks.
 func WithRecurrence(service *recurrence.Service) LifeOSToolOption {
 	return func(c *lifeOSToolConfig) { c.recurrence = service }
+}
+
+// WithMemoryService exposes durable memory and the knowledge base.
+func WithMemoryService(service *appmemory.Service) LifeOSToolOption {
+	return func(c *lifeOSToolConfig) { c.memory = service }
 }
 
 // WithCompletion attaches the completion checker used by verify_completion.
@@ -115,6 +122,9 @@ func NewLifeOSTools(taskService *tasks.Service, inboxService *inbox.Service, sum
 	}
 	if config.documents != nil {
 		registerDocumentTools(registry, config.documents)
+	}
+	if config.memory != nil {
+		registerMemoryTools(registry, config.memory)
 	}
 	if config.workspace != nil {
 		registerWorkspaceTools(registry, *config.workspace)

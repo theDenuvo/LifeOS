@@ -14,13 +14,15 @@
 		MessageSquare,
 		PanelLeftClose,
 		Plus,
-		Sparkles
+		Sparkles,
+		BookOpen
 	} from 'lucide-svelte';
 
 	const nav = [
 		{ href: '/', label: 'Чат', icon: MessageSquare, chat: true },
 		{ href: '/tasks', label: 'Задачи', icon: ListTodo, chat: false },
-		{ href: '/calendar', label: 'Календарь', icon: CalendarDays, chat: false }
+		{ href: '/calendar', label: 'Календарь', icon: CalendarDays, chat: false },
+		{ href: '/memory', label: 'Память', icon: BookOpen, chat: false }
 	];
 
 	const mobileNav = [
@@ -28,7 +30,8 @@
 		{ href: '/today', label: 'Сегодня', icon: Clock, chat: false },
 		{ href: '/inbox', label: 'Входящие', icon: Inbox, chat: false },
 		{ href: '/tasks', label: 'Задачи', icon: ListTodo, chat: false },
-		{ href: '/calendar', label: 'Календарь', icon: CalendarDays, chat: false }
+		{ href: '/calendar', label: 'Календарь', icon: CalendarDays, chat: false },
+		{ href: '/memory', label: 'Память', icon: BookOpen, chat: false }
 	];
 
 	let conversations: Conversation[] = [];
@@ -665,7 +668,7 @@
 
 		.mobile-nav {
 			display: grid;
-			grid-template-columns: repeat(5, 1fr);
+			grid-template-columns: repeat(6, 1fr);
 			position: fixed;
 			inset: auto 0 0 0;
 			z-index: 30;

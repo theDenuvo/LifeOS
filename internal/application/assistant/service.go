@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"runtime"
 	"strings"
 	"time"
@@ -43,6 +44,7 @@ type Service struct {
 	publisher    events.Publisher
 	documents    DocumentTextProvider
 	workdir      string
+	learner      MemoryLearner
 }
 
 // Clock supplies the current instant.
@@ -98,6 +100,41 @@ func WithDocumentTextProvider(provider DocumentTextProvider) Option {
 	return func(s *Service) {
 		s.documents = provider
 	}
+}
+
+// MemoryLearner extracts durable knowledge from a finished exchange. It runs
+// off the request path so a slow model cannot delay the answer, and a failure
+// never fails the turn.
+type MemoryLearner interface {
+	LearnConversation(ctx context.Context, conversationID, messageID int64, text string) (int, error)
+}
+
+// WithMemoryLearner attaches autonomous memory maintenance.
+func WithMemoryLearner(learner MemoryLearner) Option {
+	return func(s *Service) {
+		s.learner = learner
+	}
+}
+
+// learn schedules extraction of durable facts from the user's turn.
+func (s *Service) learn(conversationID, messageID int64, text string) {
+	if s.learner == nil || strings.TrimSpace(text) == "" {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+		learned, err := s.learner.LearnConversation(ctx, conversationID, messageID, text)
+		if err != nil {
+			// Memory keeps working without a model, so a failed extraction is
+			// reported and dropped rather than surfaced as a broken answer.
+			slog.Warn("memory learning failed", "conversation_id", conversationID, "error", err)
+			return
+		}
+		if learned > 0 {
+			slog.Info("memory learned from conversation", "conversation_id", conversationID, "entries", learned)
+		}
+	}()
 }
 
 // WithWorkingDirectory tells the model where relative paths resolve.
@@ -170,6 +207,7 @@ func (s *Service) SendMessageWithInteraction(ctx context.Context, conversationID
 
 	now := s.clock.Now()
 	var history []*domainassistant.Message
+	var userID int64
 
 	err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
 		repo := tx.Assistant()
@@ -190,9 +228,11 @@ func (s *Service) SendMessageWithInteraction(ctx context.Context, conversationID
 			return err
 		}
 		userMessage.Attachments = documentAttachments(interaction.Documents)
-		if _, err := insertUserMessage(ctx, repo, userMessage); err != nil {
+		id, err := insertUserMessage(ctx, repo, userMessage)
+		if err != nil {
 			return err
 		}
+		userID = id
 		if err := repo.TouchConversation(ctx, conversationID, now); err != nil {
 			return err
 		}
@@ -247,6 +287,7 @@ func (s *Service) SendMessageWithInteraction(ctx context.Context, conversationID
 				"role":            string(message.Role),
 				"content":         message.Content,
 			})
+			s.learn(conversationID, userID, content)
 			return SendResult{ConversationID: conversationID, Message: message, PendingActions: pending}, nil
 		}
 
@@ -290,6 +331,7 @@ func (s *Service) SendMessageWithInteraction(ctx context.Context, conversationID
 	if err != nil {
 		return SendResult{}, err
 	}
+	s.learn(conversationID, userID, content)
 	return SendResult{ConversationID: conversationID, Message: message, PendingActions: pending}, nil
 }
 

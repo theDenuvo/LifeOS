@@ -736,3 +736,171 @@ export interface DocumentList {
 export function listDocuments(limit = 20, offset = 0): Promise<DocumentList> {
 	return request<DocumentList>(`/api/v1/documents?limit=${limit}&offset=${offset}`);
 }
+
+export type MemoryArea = 'personal' | 'knowledge';
+export type MemoryCertainty = 'fact' | 'assumption' | 'inference';
+export type MemoryStatus = 'active' | 'disputed' | 'superseded';
+export type MemoryCategory =
+	| 'preference'
+	| 'habit'
+	| 'circumstance'
+	| 'fact'
+	| 'agreement'
+	| 'context'
+	| 'rule'
+	| 'instruction'
+	| 'summary'
+	| 'reference'
+	| 'research'
+	| 'idea'
+	| 'documentation'
+	| 'note';
+
+export interface MemorySource {
+	kind: 'user' | 'assistant' | 'conversation' | 'document' | 'task' | 'event' | 'system';
+	source_id?: number;
+	label: string;
+	excerpt?: string;
+	observed_at: string;
+}
+
+export interface MemoryLink {
+	id: number;
+	entry_id: number;
+	target_type: 'memory' | 'task' | 'event' | 'conversation' | 'document' | 'inbox' | 'goal';
+	target_id: number;
+	relation: string;
+	created_at: string;
+}
+
+export interface MemoryEntry {
+	id: number;
+	area: MemoryArea;
+	category: MemoryCategory;
+	title: string;
+	content: string;
+	certainty: MemoryCertainty;
+	confidence: number;
+	status: MemoryStatus;
+	superseded_by: number | null;
+	entities: string[];
+	sources: MemorySource[];
+	created_at: string;
+	updated_at: string;
+	version: number;
+	links?: MemoryLink[];
+}
+
+export interface MemoryConflict {
+	id: number;
+	reason: string;
+	status: 'pending' | 'resolved';
+	resolution?: string;
+	created_at: string;
+	resolved_at: string | null;
+	existing: MemoryEntry;
+	candidate: MemoryEntry;
+}
+
+export interface MemoryStats {
+	personal: number;
+	knowledge: number;
+	pending_conflicts: number;
+}
+
+export interface MemoryQuery {
+	query?: string;
+	area?: MemoryArea;
+	category?: MemoryCategory;
+	limit?: number;
+	offset?: number;
+}
+
+export function listMemory(query: MemoryQuery = {}): Promise<{
+	data: MemoryEntry[];
+	meta: { limit: number; offset: number; total: number };
+}> {
+	const params = new URLSearchParams();
+	if (query.query) params.set('q', query.query);
+	if (query.area) params.set('area', query.area);
+	if (query.category) params.set('category', query.category);
+	if (query.limit !== undefined) params.set('limit', String(query.limit));
+	if (query.offset !== undefined) params.set('offset', String(query.offset));
+	const suffix = params.toString();
+	return request(`/api/v1/memory${suffix ? `?${suffix}` : ''}`);
+}
+
+export function getMemory(id: number): Promise<MemoryEntry> {
+	return request<MemoryEntry>(`/api/v1/memory/${id}`);
+}
+
+export function createMemory(input: {
+	title: string;
+	content: string;
+	category: MemoryCategory;
+	certainty?: MemoryCertainty;
+	entities?: string[];
+}): Promise<{ entry: MemoryEntry; duplicate: boolean; conflict_id?: number }> {
+	return request('/api/v1/memory', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export function updateMemory(
+	id: number,
+	version: number,
+	input: Partial<{
+		title: string;
+		content: string;
+		category: MemoryCategory;
+		certainty: MemoryCertainty;
+		confidence: number;
+		entities: string[];
+	}>
+): Promise<MemoryEntry> {
+	return request<MemoryEntry>(`/api/v1/memory/${id}`, {
+		method: 'PATCH',
+		headers: { 'If-Match': `"${version}"` },
+		body: JSON.stringify(input)
+	});
+}
+
+export function deleteMemory(id: number, version: number): Promise<void> {
+	return request<void>(`/api/v1/memory/${id}`, {
+		method: 'DELETE',
+		headers: { 'If-Match': `"${version}"` }
+	});
+}
+
+export function linkMemory(
+	id: number,
+	input: { target_type: MemoryLink['target_type']; target_id: number; relation?: string }
+): Promise<MemoryLink> {
+	return request<MemoryLink>(`/api/v1/memory/${id}/links`, {
+		method: 'POST',
+		body: JSON.stringify(input)
+	});
+}
+
+export function unlinkMemory(id: number, linkId: number): Promise<void> {
+	return request<void>(`/api/v1/memory/${id}/links/${linkId}`, { method: 'DELETE' });
+}
+
+export function getMemoryStats(): Promise<MemoryStats> {
+	return request<MemoryStats>('/api/v1/memory/stats');
+}
+
+export function listMemoryConflicts(all = false): Promise<{
+	data: MemoryConflict[];
+	meta: { total: number };
+}> {
+	return request(`/api/v1/memory/conflicts${all ? '?all=true' : ''}`);
+}
+
+export function resolveMemoryConflict(
+	id: number,
+	input: { resolution: 'existing' | 'candidate' | 'both' | 'merge'; merged_title?: string; merged_content?: string }
+): Promise<{ id: number; resolution: string }> {
+	return request(`/api/v1/memory/conflicts/${id}/resolve`, {
+		method: 'POST',
+		body: JSON.stringify(input)
+	});
+}

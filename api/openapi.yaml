@@ -1481,6 +1481,296 @@ paths:
                 $ref: '#/components/schemas/SearchResponse'
         '400':
           $ref: '#/components/responses/ValidationError'
+  /api/v1/memory:
+    get:
+      summary: List and search durable memory and the knowledge base
+      operationId: listMemory
+      tags:
+      - Memory
+      parameters:
+      - name: q
+        in: query
+        schema:
+          type: string
+        description: FTS5 prefix search over title, content and entities
+      - name: area
+        in: query
+        schema:
+          type: string
+          enum:
+          - personal
+          - knowledge
+      - name: category
+        in: query
+        schema:
+          $ref: '#/components/schemas/MemoryCategory'
+      - name: status
+        in: query
+        schema:
+          type: string
+          enum:
+          - active
+          - disputed
+          - superseded
+      - name: include_disputed
+        in: query
+        schema:
+          type: boolean
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+      - name: offset
+        in: query
+        schema:
+          type: integer
+          minimum: 0
+      responses:
+        '200':
+          description: Memory entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryListResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+    post:
+      summary: Store a reviewed memory entry
+      operationId: createMemory
+      tags:
+      - Memory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemoryCreateRequest'
+      responses:
+        '201':
+          description: Entry stored, merged as a duplicate source, or flagged as a conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryCreateResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/memory/stats:
+    get:
+      summary: Memory counters used by the workspace
+      operationId: memoryStats
+      tags:
+      - Memory
+      responses:
+        '200':
+          description: Counts of personal entries, knowledge entries and pending conflicts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryStats'
+  /api/v1/memory/conflicts:
+    get:
+      summary: List contradictions that need a user decision
+      operationId: listMemoryConflicts
+      tags:
+      - Memory
+      parameters:
+      - name: all
+        in: query
+        schema:
+          type: boolean
+        description: Include already resolved conflicts
+      responses:
+        '200':
+          description: Conflicts with both claims
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryConflictListResponse'
+  /api/v1/memory/conflicts/{id}/resolve:
+    post:
+      summary: Resolve a memory contradiction
+      operationId: resolveMemoryConflict
+      tags:
+      - Memory
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemoryConflictResolveRequest'
+      responses:
+        '200':
+          description: Resolution applied; the losing claim is kept as superseded
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - id
+                - resolution
+                properties:
+                  id:
+                    type: integer
+                  resolution:
+                    type: string
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+  /api/v1/memory/{id}:
+    get:
+      summary: Get one memory entry with sources and links
+      operationId: getMemory
+      tags:
+      - Memory
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Memory entry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryEntry'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+    patch:
+      summary: Edit a memory entry
+      operationId: updateMemory
+      tags:
+      - Memory
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: If-Match
+        in: header
+        required: true
+        schema:
+          type: string
+          pattern: '^"?[1-9][0-9]*"?$'
+        description: Optimistic locking - the entry version from the last read
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemoryUpdateRequest'
+      responses:
+        '200':
+          description: Updated entry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryEntry'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          $ref: '#/components/responses/PreconditionFailedError'
+        '428':
+          $ref: '#/components/responses/PreconditionRequiredError'
+    delete:
+      summary: Delete a memory entry
+      operationId: deleteMemory
+      tags:
+      - Memory
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: If-Match
+        in: header
+        required: true
+        schema:
+          type: string
+          pattern: '^"?[1-9][0-9]*"?$'
+      responses:
+        '204':
+          description: Deleted
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          $ref: '#/components/responses/PreconditionFailedError'
+        '428':
+          $ref: '#/components/responses/PreconditionRequiredError'
+  /api/v1/memory/{id}/links:
+    post:
+      summary: Link a memory entry to another LifeOS object
+      operationId: linkMemory
+      tags:
+      - Memory
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemoryLinkCreateRequest'
+      responses:
+        '201':
+          description: Link stored
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryLink'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '422':
+          description: Linked object does not exist
+  /api/v1/memory/{id}/links/{linkID}:
+    delete:
+      summary: Remove a memory link
+      operationId: unlinkMemory
+      tags:
+      - Memory
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: linkID
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '204':
+          description: Link removed
+        '404':
+          $ref: '#/components/responses/NotFoundError'
   /api/v1/settings:
     get:
       summary: List all settings
@@ -2916,6 +3206,332 @@ components:
       - type: number
       - type: boolean
       - type: 'null'
+    MemoryCategory:
+      type: string
+      enum:
+      - preference
+      - habit
+      - circumstance
+      - fact
+      - agreement
+      - context
+      - rule
+      - instruction
+      - summary
+      - reference
+      - research
+      - idea
+      - documentation
+      - note
+    MemorySource:
+      type: object
+      required:
+      - kind
+      - label
+      properties:
+        kind:
+          type: string
+          enum:
+          - user
+          - assistant
+          - conversation
+          - document
+          - task
+          - event
+          - system
+        source_id:
+          type: integer
+        label:
+          type: string
+        excerpt:
+          type: string
+        observed_at:
+          type: string
+          format: date-time
+    MemoryLink:
+      type: object
+      required:
+      - id
+      - entry_id
+      - target_type
+      - target_id
+      - relation
+      properties:
+        id:
+          type: integer
+        entry_id:
+          type: integer
+        target_type:
+          type: string
+          enum:
+          - memory
+          - task
+          - event
+          - conversation
+          - document
+          - inbox
+          - goal
+        target_id:
+          type: integer
+        relation:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    MemoryEntry:
+      type: object
+      required:
+      - id
+      - area
+      - category
+      - title
+      - content
+      - certainty
+      - confidence
+      - status
+      - sources
+      - version
+      properties:
+        id:
+          type: integer
+        area:
+          type: string
+          enum:
+          - personal
+          - knowledge
+        category:
+          $ref: '#/components/schemas/MemoryCategory'
+        title:
+          type: string
+        content:
+          type: string
+        certainty:
+          type: string
+          enum:
+          - fact
+          - assumption
+          - inference
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+        status:
+          type: string
+          enum:
+          - active
+          - disputed
+          - superseded
+        superseded_by:
+          type:
+          - integer
+          - 'null'
+        entities:
+          type: array
+          items:
+            type: string
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/MemorySource'
+        links:
+          type: array
+          items:
+            $ref: '#/components/schemas/MemoryLink'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        version:
+          type: integer
+    MemoryListResponse:
+      type: object
+      required:
+      - data
+      - meta
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/MemoryEntry'
+        meta:
+          type: object
+          required:
+          - limit
+          - offset
+          - total
+          properties:
+            limit:
+              type: integer
+            offset:
+              type: integer
+            total:
+              type: integer
+    MemoryCreateRequest:
+      type: object
+      required:
+      - title
+      - content
+      - category
+      properties:
+        title:
+          type: string
+          maxLength: 200
+        content:
+          type: string
+          maxLength: 100000
+        category:
+          $ref: '#/components/schemas/MemoryCategory'
+        certainty:
+          type: string
+          enum:
+          - fact
+          - assumption
+          - inference
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+        entities:
+          type: array
+          items:
+            type: string
+    MemoryCreateResponse:
+      type: object
+      required:
+      - entry
+      - duplicate
+      properties:
+        entry:
+          $ref: '#/components/schemas/MemoryEntry'
+        duplicate:
+          type: boolean
+          description: True when the same fact already existed and gained a source
+        conflict_id:
+          type: integer
+          description: Present when the claim contradicts an existing entry
+    MemoryUpdateRequest:
+      type: object
+      properties:
+        title:
+          type: string
+        content:
+          type: string
+        category:
+          $ref: '#/components/schemas/MemoryCategory'
+        certainty:
+          type: string
+          enum:
+          - fact
+          - assumption
+          - inference
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+        entities:
+          type: array
+          items:
+            type: string
+    MemoryStats:
+      type: object
+      required:
+      - personal
+      - knowledge
+      - pending_conflicts
+      properties:
+        personal:
+          type: integer
+        knowledge:
+          type: integer
+        pending_conflicts:
+          type: integer
+    MemoryConflict:
+      type: object
+      required:
+      - id
+      - reason
+      - status
+      - existing
+      - candidate
+      properties:
+        id:
+          type: integer
+        reason:
+          type: string
+        status:
+          type: string
+          enum:
+          - pending
+          - resolved
+        resolution:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        resolved_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        existing:
+          $ref: '#/components/schemas/MemoryEntry'
+        candidate:
+          $ref: '#/components/schemas/MemoryEntry'
+    MemoryConflictListResponse:
+      type: object
+      required:
+      - data
+      - meta
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/MemoryConflict'
+        meta:
+          type: object
+          required:
+          - total
+          properties:
+            total:
+              type: integer
+    MemoryConflictResolveRequest:
+      type: object
+      required:
+      - resolution
+      properties:
+        resolution:
+          type: string
+          enum:
+          - existing
+          - candidate
+          - both
+          - merge
+        merged_title:
+          type: string
+        merged_content:
+          type: string
+    MemoryLinkCreateRequest:
+      type: object
+      required:
+      - target_type
+      - target_id
+      properties:
+        target_type:
+          type: string
+          enum:
+          - memory
+          - task
+          - event
+          - conversation
+          - document
+          - inbox
+          - goal
+        target_id:
+          type: integer
+        relation:
+          type: string
     SearchResponse:
       type: object
       required:

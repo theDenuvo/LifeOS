@@ -13,8 +13,13 @@ import (
 type Tool struct {
 	Spec     assistant.ToolSpec
 	ReadOnly bool
-	Execute  func(ctx context.Context, arguments json.RawMessage) (any, error)
-	Preview  func(arguments json.RawMessage) (string, error)
+	// Direct marks a reversible mutation that applies immediately instead of
+	// waiting for confirmation: creating a workspace, delegating a task to one
+	// or reporting a result back. The product rules treat these as simple,
+	// undoable actions the assistant may perform on its own.
+	Direct  bool
+	Execute func(ctx context.Context, arguments json.RawMessage) (any, error)
+	Preview func(arguments json.RawMessage) (string, error)
 }
 
 // Registry holds the tools available to the model.
@@ -49,6 +54,13 @@ func (r *Registry) Specs() []assistant.ToolSpec {
 func (r *Registry) IsReadOnly(name string) bool {
 	tool, ok := r.tools[name]
 	return ok && tool.ReadOnly
+}
+
+// IsDirect reports whether a tool is a reversible mutation that applies
+// immediately without a confirmation step.
+func (r *Registry) IsDirect(name string) bool {
+	tool, ok := r.tools[name]
+	return ok && tool.Direct
 }
 
 // Execute runs a tool.

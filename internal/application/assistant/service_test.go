@@ -44,6 +44,8 @@ func (f *fakeTools) Specs() []assistant.ToolSpec {
 
 func (f *fakeTools) IsReadOnly(name string) bool { return f.readOnly[name] }
 
+func (f *fakeTools) IsDirect(name string) bool { return false }
+
 func (f *fakeTools) Execute(_ context.Context, name string, _ json.RawMessage) (any, error) {
 	f.executed = append(f.executed, name)
 	if f.result != nil {

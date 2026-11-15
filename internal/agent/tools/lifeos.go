@@ -27,16 +27,17 @@ import (
 type LifeOSToolOption func(*lifeOSToolConfig)
 
 type lifeOSToolConfig struct {
-	search     *search.Service
-	proactive  *proactive.Service
-	events     *appevents.Service
-	documents  *appdocuments.Service
-	timezone   string
-	workspace  *workspaceConfig
-	planning   *planning.Service
-	recurrence *recurrence.Service
-	completion *completion.Service
-	memory     *appmemory.Service
+	search       *search.Service
+	proactive    *proactive.Service
+	events       *appevents.Service
+	documents    *appdocuments.Service
+	timezone     string
+	workspace    *workspaceConfig
+	planning     *planning.Service
+	recurrence   *recurrence.Service
+	completion   *completion.Service
+	memory       *appmemory.Service
+	workspaceHub *WorkspaceHub
 }
 
 // WithSearchService exposes unified search to the assistant.
@@ -79,6 +80,12 @@ func WithMemoryService(service *appmemory.Service) LifeOSToolOption {
 // WithCompletion attaches the completion checker used by verify_completion.
 func WithCompletion(service *completion.Service) LifeOSToolOption {
 	return func(c *lifeOSToolConfig) { c.completion = service }
+}
+
+// WithWorkspaceHub attaches workspace routing: creating project spaces,
+// delegating work to them and reporting their results back to the main chat.
+func WithWorkspaceHub(hub *WorkspaceHub) LifeOSToolOption {
+	return func(c *lifeOSToolConfig) { c.workspaceHub = hub }
 }
 
 // WithTimezone sets the timezone used for date defaults.
@@ -125,6 +132,9 @@ func NewLifeOSTools(taskService *tasks.Service, inboxService *inbox.Service, sum
 	}
 	if config.memory != nil {
 		registerMemoryTools(registry, config.memory)
+	}
+	if config.workspaceHub != nil {
+		registerConversationTools(registry, config.workspaceHub)
 	}
 	if config.workspace != nil {
 		registerWorkspaceTools(registry, *config.workspace)

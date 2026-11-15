@@ -235,6 +235,11 @@ func main() {
 			return base.WithModel(model)
 		}, fallbacks, policy)
 	}
+	// Roadmap stage 3: project workspaces. The hub is created before the
+	// registry (tools reference it) and bound to the assistant runtime after,
+	// which is what lets the main chat route a topic into its own conversation
+	// and lets a workspace report results back without manual copying.
+	workspaceHub := tools.NewWorkspaceHub(sqlite.NewAssistantUnitOfWork(db), broker)
 	registry := tools.NewLifeOSTools(
 		taskService,
 		inboxService,
@@ -248,6 +253,7 @@ func main() {
 		tools.WithRecurrence(recurrenceService),
 		tools.WithCompletion(completionService),
 		tools.WithMemoryService(memoryService),
+		tools.WithWorkspaceHub(workspaceHub),
 		tools.WithTimezone(cfg.Timezone),
 	)
 	contextProvider := assistant.NewLifeOSContext(
@@ -271,6 +277,7 @@ func main() {
 		assistant.WithMemoryLearner(memoryService),
 		assistant.WithWorkingDirectory(workingDirectory()),
 	)
+	workspaceHub.Bind(assistantService)
 
 	// Create HTTP handler with all routes
 	handler := httptransport.NewHandler(db, cfg, dist.FS, httptransport.Services{

@@ -907,6 +907,14 @@ paths:
         schema:
           type: integer
           minimum: 0
+      - name: kind
+        in: query
+        description: Filter by conversation kind; omit to list everything
+        schema:
+          type: string
+          enum:
+          - main
+          - project
       responses:
         '200':
           description: List of conversations
@@ -914,6 +922,34 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ConversationListResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/assistant/workspaces:
+    post:
+      summary: Create a project workspace conversation
+      operationId: createWorkspace
+      tags:
+      - Assistant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - title
+              properties:
+                title:
+                  type: string
+                purpose:
+                  type: string
+      responses:
+        '201':
+          description: Workspace created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversationResponse'
         '400':
           $ref: '#/components/responses/ValidationError'
   /api/v1/assistant/conversations/{id}:
@@ -2641,6 +2677,20 @@ components:
           type:
           - string
           - 'null'
+        kind:
+          type: string
+          enum:
+          - main
+          - project
+        purpose:
+          type:
+          - string
+          - 'null'
+        source_conversation_id:
+          type:
+          - integer
+          - 'null'
+          format: int64
         messages:
           type: array
           items:

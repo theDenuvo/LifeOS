@@ -66,7 +66,7 @@ func TestRetryAfterFailedTurnKeepsOneUserMessage(t *testing.T) {
 	}
 
 	// The user retries the same message in the same conversation.
-	conversations, _, err := service.ListConversations(context.Background(), 1, 0)
+	conversations, _, err := service.ListConversations(context.Background(), 1, 0, nil)
 	if err != nil || len(conversations) != 1 {
 		t.Fatalf("conversation must exist after the user message was stored: %v", err)
 	}

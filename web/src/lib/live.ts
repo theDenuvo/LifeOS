@@ -107,6 +107,7 @@ const eventTypes = [
 	'event.updated',
 	'event.deleted',
 	'assistant.message',
+	'assistant.workspace',
 	'pending_action.created',
 	'pending_action.resolved'
 ];
@@ -126,6 +127,8 @@ export function startLive(): void {
 	for (const type of eventTypes) {
 		source.addEventListener(type, bump);
 	}
+
+	source.addEventListener('assistant.workspace', () => bumpConversations());
 
 	source.addEventListener('reminder', (event) => {
 		try {

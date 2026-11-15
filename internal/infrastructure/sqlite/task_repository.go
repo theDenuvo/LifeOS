@@ -563,6 +563,14 @@ func encodeIntPtr(value *int) any {
 	return *value
 }
 
+// encodeInt64Ptr stores an optional integer as NULL when absent.
+func encodeInt64Ptr(value *int64) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
 // intPtr converts a nullable integer column into an optional value.
 func intPtr(value sql.NullInt64) *int {
 	if !value.Valid {

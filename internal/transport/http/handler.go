@@ -138,6 +138,7 @@ func (h *Handler) apiRoutes() http.Handler {
 	mux.HandleFunc("POST /documents/{id}/reprocess", h.reprocessDocument)
 	mux.HandleFunc("POST /assistant/messages", h.sendAssistantMessage)
 	mux.HandleFunc("POST /assistant/messages/stream", h.streamAssistantMessage)
+	mux.HandleFunc("POST /assistant/workspaces", h.createWorkspace)
 	mux.HandleFunc("GET /assistant/config", h.getAssistantConfig)
 	mux.HandleFunc("PUT /assistant/config", h.putAssistantConfig)
 	mux.HandleFunc("GET /assistant/conversations", h.listAssistantConversations)

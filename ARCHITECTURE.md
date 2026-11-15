@@ -347,7 +347,7 @@ Static files (embed) → Browser → fetch/openapi-fetch → REST API + SSE
 - `tasks` — основная таблица задач
 - `inbox_items` — входящие
 - `task_events` — append-only история
-- `conversations` / `messages` — диалоги
+- `conversations` / `messages` — диалоги; `kind` разделяет главный чат и рабочие пространства (`purpose`, `source_conversation_id`)
 - `pending_actions` — ожидающие подтверждения
 - `app_settings` — key-value настройки
 - `memory_entries`, `memory_sources`, `memory_links`, `memory_conflicts`, `memory_fts` — память, происхождение, связи и очередь противоречий

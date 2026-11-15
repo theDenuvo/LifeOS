@@ -59,21 +59,26 @@ func (s *Service) SendMessageStream(
 
 	now := s.clock.Now()
 	var (
-		history []*domainassistant.Message
-		userID  int64
+		history      []*domainassistant.Message
+		userID       int64
+		conversation *domainassistant.Conversation
 	)
 	err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
 		repo := tx.Assistant()
 		if conversationID == 0 {
 			title := truncateRunes(content, 80)
-			conversation := domainassistant.NewConversation(title, now)
+			conversation = domainassistant.NewConversation(title, now)
 			id, err := repo.CreateConversation(ctx, conversation)
 			if err != nil {
 				return err
 			}
 			conversationID = id
-		} else if _, err := repo.GetConversation(ctx, conversationID); err != nil {
-			return err
+		} else {
+			found, err := repo.GetConversation(ctx, conversationID)
+			if err != nil {
+				return err
+			}
+			conversation = found
 		}
 		userMessage, err := domainassistant.NewMessage(conversationID, domainassistant.RoleUser, content, now)
 		if err != nil {
@@ -114,10 +119,18 @@ func (s *Service) SendMessageStream(
 			snapshot = value
 		}
 	}
-	chat := s.buildChat(ctx, history, now, snapshot, contextUnavailable, sanitizeInteraction(interaction), autoConfirm)
+	chat := s.buildChat(ctx, history, now, snapshot, contextUnavailable, sanitizeInteraction(interaction), autoConfirm, conversation)
 
 	pending := make([]*domainassistant.PendingAction, 0)
 	attachments := make([]domainassistant.Attachment, 0)
+
+	// Tools must know which conversation they run in: workspace tools route
+	// results by it and refuse to nest delegations.
+	toolCtx := WithToolContext(ctx, ToolContext{
+		ConversationID: conversationID,
+		Kind:           conversation.Kind,
+		Depth:          ToolContextFrom(ctx).Depth,
+	})
 
 	for round := 0; round < s.maxRounds; round++ {
 		var roundContent, roundReasoning strings.Builder
@@ -221,7 +234,7 @@ func (s *Service) SendMessageStream(
 			_ = emitEvent(emit, StreamEvent{Type: "tool", Data: map[string]any{
 				"name": call.Name, "status": "running",
 			}})
-			resultText, action, toolAttachments, err := s.runTool(ctx, conversationID, toolMessage.ID, call, s.clock.Now())
+			resultText, action, toolAttachments, err := s.runTool(toolCtx, conversationID, toolMessage.ID, call, s.clock.Now())
 			if err != nil {
 				_ = emitEvent(emit, StreamEvent{Type: "error", Data: map[string]any{"message": err.Error()}})
 				return SendResult{}, err

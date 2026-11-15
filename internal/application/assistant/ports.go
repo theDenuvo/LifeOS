@@ -134,15 +134,50 @@ type Provider interface {
 type ToolRunner interface {
 	Specs() []ToolSpec
 	IsReadOnly(name string) bool
+	IsDirect(name string) bool
 	Execute(ctx context.Context, name string, arguments json.RawMessage) (any, error)
 	Preview(name string, arguments json.RawMessage) (string, error)
+}
+
+// ToolContext tells a tool which conversation is running and how deep the
+// current call sits inside delegated work. A workspace tool needs the
+// conversation identity to route results; the depth stops a delegated turn
+// from spawning another delegation instead of doing its own work.
+type ToolContext struct {
+	ConversationID int64
+	Kind           domainassistant.Kind
+	Depth          int
+}
+
+type toolContextKey struct{}
+
+// WithToolContext binds the running conversation to the tool context.
+func WithToolContext(ctx context.Context, value ToolContext) context.Context {
+	return context.WithValue(ctx, toolContextKey{}, value)
+}
+
+// ToolContextFrom returns the running conversation's tool context. A missing
+// context (direct tool calls outside an assistant turn) is reported as zero,
+// and workspace tools reject it.
+func ToolContextFrom(ctx context.Context) ToolContext {
+	value, _ := ctx.Value(toolContextKey{}).(ToolContext)
+	return value
+}
+
+// WithToolDepth raises the delegation depth for a nested assistant turn.
+func WithToolDepth(ctx context.Context, depth int) context.Context {
+	value := ToolContextFrom(ctx)
+	value.Depth = depth
+	return context.WithValue(ctx, toolContextKey{}, value)
 }
 
 // Repository persists assistant state.
 type Repository interface {
 	CreateConversation(ctx context.Context, conversation *domainassistant.Conversation) (int64, error)
 	GetConversation(ctx context.Context, id int64) (*domainassistant.Conversation, error)
-	ListConversations(ctx context.Context, limit, offset int) ([]*domainassistant.Conversation, int, error)
+	// ListConversations returns a page of conversations plus the total count.
+	// A nil kind lists everything; a set kind filters to main or project.
+	ListConversations(ctx context.Context, limit, offset int, kind *domainassistant.Kind) ([]*domainassistant.Conversation, int, error)
 	TouchConversation(ctx context.Context, id int64, at time.Time) error
 
 	InsertMessage(ctx context.Context, message *domainassistant.Message) (int64, error)

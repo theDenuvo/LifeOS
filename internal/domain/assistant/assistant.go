@@ -8,6 +8,7 @@ package assistant
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 	"unicode/utf8"
 )
@@ -22,6 +23,12 @@ var (
 
 	// ErrInvalidPendingStatus is returned for an unknown pending-action status.
 	ErrInvalidPendingStatus = errors.New("status must be pending, confirmed, rejected or expired")
+
+	// ErrInvalidKind is returned for an unknown conversation kind.
+	ErrInvalidKind = errors.New("kind must be main or project")
+
+	// ErrEmptyWorkspaceTitle is returned when a workspace is created without a name.
+	ErrEmptyWorkspaceTitle = errors.New("workspace title is required")
 )
 
 // Role is the author of a message.
@@ -63,14 +70,39 @@ func (s PendingStatus) IsValid() bool {
 	}
 }
 
+// Conversation kinds.
+//
+// The main chat is the single everyday surface; a project workspace is a
+// separate dialogue for continued work on one topic. Both share the LifeOS
+// memory and tools, but a workspace keeps its own history and purpose.
+type Kind string
+
+const (
+	KindMain    Kind = "main"
+	KindProject Kind = "project"
+)
+
+// IsValid reports whether the kind is known.
+func (k Kind) IsValid() bool {
+	switch k {
+	case KindMain, KindProject:
+		return true
+	default:
+		return false
+	}
+}
+
 // Conversation is one assistant dialogue.
 type Conversation struct {
-	ID            int64
-	Title         *string
-	ContextScreen *string
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
-	EndedAt       *time.Time
+	ID                   int64
+	Title                *string
+	ContextScreen        *string
+	Kind                 Kind
+	Purpose              *string
+	SourceConversationID *int64
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
+	EndedAt              *time.Time
 }
 
 // Attachment kinds persisted with an assistant message.
@@ -80,6 +112,7 @@ const (
 	AttachmentEvent     = "event"
 	AttachmentEventList = "event_list"
 	AttachmentDocument  = "document"
+	AttachmentWorkspace = "workspace"
 )
 
 // Attachment is a structured result rendered by the workspace instead of
@@ -117,10 +150,11 @@ type PendingAction struct {
 	Resolution     *string
 }
 
-// NewConversation builds a conversation with a title derived from the first
-// user message.
+// NewConversation builds a main-chat conversation with a title derived from
+// the first user message.
 func NewConversation(title string, now time.Time) *Conversation {
 	conversation := &Conversation{
+		Kind:      KindMain,
 		CreatedAt: now.UTC(),
 		UpdatedAt: now.UTC(),
 	}
@@ -128,6 +162,28 @@ func NewConversation(title string, now time.Time) *Conversation {
 		conversation.Title = &title
 	}
 	return conversation
+}
+
+// NewWorkspace builds a project conversation. The purpose is what the model
+// and the user see as the workspace's standing context; sourceID records the
+// main chat that routed the topic here, when the workspace was created by the
+// assistant rather than by the user directly.
+func NewWorkspace(title, purpose string, sourceID *int64, now time.Time) (*Conversation, error) {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return nil, ErrEmptyWorkspaceTitle
+	}
+	conversation := &Conversation{
+		Title:                &title,
+		Kind:                 KindProject,
+		SourceConversationID: sourceID,
+		CreatedAt:            now.UTC(),
+		UpdatedAt:            now.UTC(),
+	}
+	if purpose = strings.TrimSpace(purpose); purpose != "" {
+		conversation.Purpose = &purpose
+	}
+	return conversation, nil
 }
 
 // NewMessage validates and builds a message.

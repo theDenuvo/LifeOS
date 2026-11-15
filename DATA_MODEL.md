@@ -266,9 +266,15 @@
 | `id` | INTEGER | PK, AUTOINCREMENT | |
 | `title` | TEXT | NULLABLE | Авто-генерация из первого сообщения |
 | `context_screen` | TEXT | NULLABLE | Экран пользователя на момент старта |
+| `kind` | TEXT | NOT NULL, DEFAULT 'main' | `main` — главный чат; `project` — рабочее пространство |
+| `purpose` | TEXT | NULLABLE | Тема рабочего пространства (для kind=project) |
+| `source_conversation_id` | INTEGER | NULLABLE | Главный чат, из которого тема вынесена в пространство |
 | `created_at` | TIMESTAMP | NOT NULL, DEFAULT (unixepoch()) | |
 | `updated_at` | TIMESTAMP | NOT NULL, DEFAULT (unixepoch()) | |
 | `ended_at` | TIMESTAMP | NULLABLE | |
+
+**Индексы:**
+- `idx_conversations_kind` (kind, updated_at DESC, id DESC)
 
 ---
 
@@ -586,6 +592,7 @@ Message 1 ──< PendingAction
 | 009 | Защита append-only task_events, защита от удаления tasks с историей, converted_task_id для inbox_items |
 | 010 | `tasks.version` для optimistic locking; удаление триггера `tasks_updated_at` (времена пишет Application) |
 | 018 | Память и база знаний: `memory_entries`, `memory_sources`, `memory_links`, `memory_conflicts`, `memory_fts` с триггерами |
+| 019 | Рабочие пространства: `conversations.kind`, `purpose`, `source_conversation_id`, индекс `idx_conversations_kind` |
 
 > Детальные SQL миграции в `internal/infrastructure/sqlite/migrations/`.
 

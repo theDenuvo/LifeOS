@@ -48,6 +48,7 @@
 		ChevronRight,
 		CornerUpRight,
 		Image as ImageIcon,
+		Layers,
 		Mic,
 		Paperclip,
 		RefreshCw,
@@ -67,6 +68,7 @@
 		cards: Task[];
 		actions: PendingAction[];
 		attachments: Attachment[];
+		handoff?: { workspace_id: number; title?: string };
 	}
 
 	type Row =
@@ -81,6 +83,9 @@
 	];
 
 	let conversationID = 0;
+	let conversationKind: 'main' | 'project' = 'main';
+	let conversationTitle = '';
+	let conversationPurpose = '';
 	let messages: AssistantMessage[] = [];
 	let pending: PendingAction[] = [];
 	let input = '';
@@ -154,6 +159,7 @@
 	$: weekDays = buildWeekDays();
 	$: weekRows = [...weekTasks].sort((a, b) => (taskDate(a) ?? '').localeCompare(taskDate(b) ?? '')).slice(0, 5);
 	$: online = !contextError && (status ? status.ok : true);
+	$: isWorkspace = conversationKind === 'project';
 	$: selectedModelLabel =
 		models.find((model) => model.id === selectedModel)?.name ?? (models.length ? 'Модель' : 'По умолчанию');
 	$: screenLabel = origin && origin !== basePath ? screenName(origin) : 'ассистент';
@@ -329,7 +335,8 @@
 				created_at: message.created_at,
 				cards,
 				actions: [],
-				attachments: message.attachments ?? []
+				attachments: message.attachments ?? [],
+				handoff: readHandoff(message.metadata)
 			});
 		}
 
@@ -343,6 +350,39 @@
 			lastAssistant.actions = actions.filter((action) => action.status === 'pending');
 		}
 
+		return result;
+	}
+
+	function readHandoff(metadata: unknown): { workspace_id: number; title?: string } | undefined {
+		if (!metadata || typeof metadata !== 'object') return undefined;
+		const handoff = (metadata as Record<string, unknown>)['handoff'];
+		if (!handoff || typeof handoff !== 'object') return undefined;
+		const raw = handoff as Record<string, unknown>;
+		if (typeof raw.workspace_id !== 'number') return undefined;
+		return {
+			workspace_id: raw.workspace_id,
+			title: typeof raw.title === 'string' ? raw.title : undefined
+		};
+	}
+
+	function workspaceCards(
+		attachments: Attachment[] | undefined
+	): Array<{ id: number; title: string; purpose: string }> {
+		if (!attachments) return [];
+		const result: Array<{ id: number; title: string; purpose: string }> = [];
+		for (const attachment of attachments) {
+			if (attachment.kind !== 'workspace') continue;
+			const data = attachment.data as Record<string, unknown> | null;
+			if (!data || typeof data.workspace_id !== 'number') continue;
+			result.push({
+				id: data.workspace_id,
+				title:
+					typeof data.title === 'string' && data.title
+						? data.title
+						: `Пространство ${data.workspace_id}`,
+				purpose: typeof data.purpose === 'string' ? data.purpose : ''
+			});
+		}
 		return result;
 	}
 
@@ -636,6 +676,10 @@
 		if (name === 'review_habit') return 'Проверяю ритм';
 		if (name === 'capture') return 'Сохраняю мысль';
 		if (name === 'list_ideas') return 'Смотрю идеи';
+		if (name === 'list_workspaces') return 'Смотрю пространства';
+		if (name === 'create_workspace') return 'Создаю пространство';
+		if (name === 'delegate_to_workspace') return 'Передаю работу в пространство';
+		if (name === 'report_result') return 'Передаю результат в главный чат';
 		return 'Выполняю действие';
 	}
 
@@ -649,11 +693,17 @@
 		if (!conversationID) {
 			messages = [];
 			pending = [];
+			conversationKind = 'main';
+			conversationTitle = '';
+			conversationPurpose = '';
 			return;
 		}
 		const view = await getConversation(conversationID);
 		messages = view.messages;
 		pending = view.pending_actions.filter((action) => action.status === 'pending');
+		conversationKind = view.kind ?? 'main';
+		conversationTitle = view.title ?? '';
+		conversationPurpose = view.purpose ?? '';
 	}
 
 	async function loadContext() {
@@ -694,7 +744,9 @@
 					bootstrapped = true;
 					return;
 				}
-				const list = await listConversations();
+				// The main chat is the entry point: a workspace is opened deliberately,
+				// so the default view is the latest main conversation.
+				const list = await listConversations('main');
 				if (skipBootstrap) return;
 				const latest = list.data[0];
 				if (latest) {
@@ -733,6 +785,20 @@
 		await scrollToLatest();
 		await goto(basePath, { replaceState: true, noScroll: true });
 		handledParam = '';
+	}
+
+	/** Returns from a project workspace to the main chat. */
+	async function openMainChat() {
+		try {
+			const list = await listConversations('main');
+			if (list.data[0]) {
+				await openConversation(list.data[0].id);
+				return;
+			}
+		} catch {
+			// fall through to a fresh main chat
+		}
+		newConversation();
 	}
 
 	async function handleQuery(query: string) {
@@ -910,6 +976,9 @@
 		skipBootstrap = true;
 		searchQuery = '';
 		conversationID = 0;
+		conversationKind = 'main';
+		conversationTitle = '';
+		conversationPurpose = '';
 		messages = [];
 		pending = [];
 		input = '';
@@ -1149,13 +1218,24 @@
 	<section class="chat-column" aria-label="Диалог с ассистентом">
 		<header class="chat-header">
 			<div class="chat-title">
-				<h1>Личный ассистент</h1>
+				<h1>{isWorkspace ? conversationTitle || 'Рабочее пространство' : 'Личный ассистент'}</h1>
 				<p class="sync-line" class:is-offline={!online}>
-					<span class="sync-dot" aria-hidden="true"></span>
-					{#if online}
-						Онлайн · синхронизировано с календарём и задачами
+					{#if isWorkspace}
+						<span class="workspace-chip">
+							<Layers size={12} strokeWidth={1.8} aria-hidden="true" />
+							Рабочее пространство{conversationPurpose ? ` · ${conversationPurpose}` : ''}
+						</span>
+						<button type="button" class="back-to-main" on:click={openMainChat}>
+							<CornerUpRight size={12} strokeWidth={1.8} aria-hidden="true" style="transform: scaleX(-1)" />
+							В главный чат
+						</button>
 					{:else}
-						Нет связи с данными · попробуйте обновить
+						<span class="sync-dot" aria-hidden="true"></span>
+						{#if online}
+							Онлайн · синхронизировано с календарём и задачами
+						{:else}
+							Нет связи с данными · попробуйте обновить
+						{/if}
 					{/if}
 				</p>
 			</div>
@@ -1328,6 +1408,20 @@
 											<div class="reasoning-body">{@html renderMessage(row.turn.reasoning)}</div>
 										</details>
 									{/if}
+									{#if row.turn.handoff}
+										<div class="handoff-badge">
+											<Layers size={12} strokeWidth={1.8} aria-hidden="true" />
+											<span>
+												Результат из пространства
+												<strong>{row.turn.handoff.title || `#${row.turn.handoff.workspace_id}`}</strong>
+											</span>
+											<button
+												type="button"
+												class="handoff-open"
+												on:click={() => row.turn.handoff && openConversation(row.turn.handoff.workspace_id)}
+											>Открыть</button>
+										</div>
+									{/if}
 									<div class="turn-text">{@html renderMessage(row.turn.content)}</div>
 
 									{#each row.turn.cards as task (task.id)}
@@ -1342,6 +1436,21 @@
 													{cardBadge(task)?.label}
 												</span>
 											{/if}
+										</div>
+									{/each}
+
+									{#each workspaceCards(row.turn.attachments) as card (card.id)}
+										<div class="workspace-card">
+											<span class="workspace-icon"><Layers size={15} strokeWidth={1.7} /></span>
+											<div class="workspace-copy">
+												<span class="workspace-title">{card.title}</span>
+												{#if card.purpose}<span class="workspace-purpose">{card.purpose}</span>{/if}
+											</div>
+											<button
+												type="button"
+												class="workspace-open"
+												on:click={() => openConversation(card.id)}
+											>Открыть</button>
 										</div>
 									{/each}
 
@@ -2141,6 +2250,145 @@
 		border: 1px solid var(--border);
 		border-radius: 9px;
 		background: var(--ink-800);
+	}
+
+	.workspace-card {
+		display: flex;
+		align-items: center;
+		gap: 11px;
+		width: 100%;
+		margin-top: 12px;
+		padding: 11px 12px;
+		border: 1px solid var(--border);
+		border-radius: 9px;
+		background: var(--ink-800);
+	}
+
+	.workspace-icon {
+		display: grid;
+		place-items: center;
+		width: 32px;
+		height: 32px;
+		border-radius: 8px;
+		background: var(--accent-surface);
+		color: var(--accent-bright);
+		flex-shrink: 0;
+	}
+
+	.workspace-copy {
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+		min-width: 0;
+		flex: 1;
+	}
+
+	.workspace-title {
+		color: var(--fg-primary);
+		font-size: var(--text-sm);
+		font-weight: 550;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.workspace-purpose {
+		color: var(--fg-muted);
+		font-size: var(--text-xs);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.workspace-open,
+	.handoff-open {
+		padding: 6px 11px;
+		border: 1px solid var(--border);
+		border-radius: 7px;
+		background: transparent;
+		color: var(--fg-muted);
+		font: inherit;
+		font-size: var(--text-xs);
+		cursor: pointer;
+		flex-shrink: 0;
+		transition: color var(--duration-fast), border-color var(--duration-fast);
+	}
+
+	.workspace-open:hover,
+	.handoff-open:hover {
+		color: var(--fg-primary);
+		border-color: var(--border-strong, var(--border));
+	}
+
+	.handoff-badge {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		margin-top: 10px;
+		padding: 6px 10px;
+		border-radius: 8px;
+		background: var(--accent-surface);
+		color: var(--accent-bright);
+		font-size: var(--text-xs);
+	}
+
+	.handoff-badge strong {
+		font-weight: 550;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.handoff-badge button {
+		margin-left: auto;
+		padding: 3px 9px;
+		border: none;
+		border-radius: 6px;
+		background: transparent;
+		color: inherit;
+		font: inherit;
+		font-size: var(--text-xs);
+		cursor: pointer;
+	}
+
+	.handoff-badge button:hover {
+		background: rgba(255, 255, 255, 0.08);
+	}
+
+	.workspace-chip {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		padding: 2px 9px;
+		border-radius: 999px;
+		background: var(--accent-surface);
+		color: var(--accent-bright);
+		font-size: var(--text-xs);
+		max-width: 100%;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.back-to-main {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		margin-left: 8px;
+		padding: 3px 10px;
+		border: 1px solid var(--border);
+		border-radius: 999px;
+		background: transparent;
+		color: var(--fg-muted);
+		font: inherit;
+		font-size: var(--text-xs);
+		cursor: pointer;
+		transition: color var(--duration-fast), border-color var(--duration-fast);
+	}
+
+	.back-to-main:hover {
+		color: var(--fg-primary);
+		border-color: var(--border-strong, var(--border));
 	}
 
 	.task-card + .task-card {

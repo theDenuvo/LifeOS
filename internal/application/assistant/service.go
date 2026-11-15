@@ -208,19 +208,24 @@ func (s *Service) SendMessageWithInteraction(ctx context.Context, conversationID
 	now := s.clock.Now()
 	var history []*domainassistant.Message
 	var userID int64
+	var conversation *domainassistant.Conversation
 
 	err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
 		repo := tx.Assistant()
 		if conversationID == 0 {
 			title := truncateRunes(content, 80)
-			conversation := domainassistant.NewConversation(title, now)
+			conversation = domainassistant.NewConversation(title, now)
 			id, err := repo.CreateConversation(ctx, conversation)
 			if err != nil {
 				return err
 			}
 			conversationID = id
-		} else if _, err := repo.GetConversation(ctx, conversationID); err != nil {
-			return err
+		} else {
+			found, err := repo.GetConversation(ctx, conversationID)
+			if err != nil {
+				return err
+			}
+			conversation = found
 		}
 
 		userMessage, err := domainassistant.NewMessage(conversationID, domainassistant.RoleUser, content, now)
@@ -259,9 +264,17 @@ func (s *Service) SendMessageWithInteraction(ctx context.Context, conversationID
 		}
 	}
 
-	chat := s.buildChat(ctx, history, now, snapshot, contextUnavailable, sanitizeInteraction(interaction), false)
+	chat := s.buildChat(ctx, history, now, snapshot, contextUnavailable, sanitizeInteraction(interaction), false, conversation)
 	pending := make([]*domainassistant.PendingAction, 0)
 	attachments := make([]domainassistant.Attachment, 0)
+
+	// Tools must know which conversation they run in: workspace tools route
+	// results by it and refuse to nest delegations.
+	toolCtx := WithToolContext(ctx, ToolContext{
+		ConversationID: conversationID,
+		Kind:           conversation.Kind,
+		Depth:          ToolContextFrom(ctx).Depth,
+	})
 
 	for round := 0; round < s.maxRounds; round++ {
 		completion, err := s.provider.Complete(ctx, chat, s.tools.Specs())
@@ -307,7 +320,7 @@ func (s *Service) SendMessageWithInteraction(ctx context.Context, conversationID
 		})
 
 		for _, call := range completion.ToolCalls {
-			resultText, action, toolAttachments, err := s.runTool(ctx, conversationID, toolMessage.ID, call, now)
+			resultText, action, toolAttachments, err := s.runTool(toolCtx, conversationID, toolMessage.ID, call, now)
 			if err != nil {
 				return SendResult{}, err
 			}
@@ -335,9 +348,10 @@ func (s *Service) SendMessageWithInteraction(ctx context.Context, conversationID
 	return SendResult{ConversationID: conversationID, Message: message, PendingActions: pending}, nil
 }
 
-// runTool executes a read-only tool or records a pending action for a mutation.
+// runTool executes a read-only tool, a direct reversible mutation or records a
+// pending action for a confirmation-gated change.
 func (s *Service) runTool(ctx context.Context, conversationID, messageID int64, call ToolCall, now time.Time) (string, *domainassistant.PendingAction, []domainassistant.Attachment, error) {
-	if s.tools.IsReadOnly(call.Name) {
+	if s.tools.IsReadOnly(call.Name) || s.tools.IsDirect(call.Name) {
 		result, err := s.tools.Execute(ctx, call.Name, call.Arguments)
 		if err != nil {
 			payload, _ := json.Marshal(map[string]any{"error": err.Error()})
@@ -408,6 +422,8 @@ func attachmentsForTool(name string, result any) []domainassistant.Attachment {
 		kind = domainassistant.AttachmentEvent
 	case "list_events":
 		kind = domainassistant.AttachmentEventList
+	case "create_workspace", "delegate_to_workspace":
+		kind = domainassistant.AttachmentWorkspace
 	default:
 		return nil
 	}
@@ -477,9 +493,13 @@ func (s *Service) persistAssistantMessage(ctx context.Context, conversationID in
 //
 // Attached documents are expanded in place, so the model reads the file content
 // exactly where the user mentioned it and keeps seeing it on later turns.
-func (s *Service) buildChat(ctx context.Context, history []*domainassistant.Message, now time.Time, snapshot string, contextUnavailable bool, interaction InteractionContext, autoConfirm bool) []ChatMessage {
+func (s *Service) buildChat(ctx context.Context, history []*domainassistant.Message, now time.Time, snapshot string, contextUnavailable bool, interaction InteractionContext, autoConfirm bool, conversation *domainassistant.Conversation) []ChatMessage {
+	workspaces := ""
+	if conversation.Kind == domainassistant.KindMain {
+		workspaces = s.activeWorkspaces(ctx)
+	}
 	chat := make([]ChatMessage, 0, len(history)+1)
-	chat = append(chat, ChatMessage{Role: "system", Content: s.systemPrompt(now, snapshot, contextUnavailable, interaction, autoConfirm)})
+	chat = append(chat, ChatMessage{Role: "system", Content: s.systemPrompt(now, snapshot, contextUnavailable, interaction, autoConfirm, conversation, workspaces)})
 	budget := MaxDocumentsPromptChars
 	for _, message := range history {
 		if message.Role == domainassistant.RoleTool {
@@ -549,12 +569,31 @@ func (s *Service) documentPrompt(ctx context.Context, attachments []domainassist
 	return b.String()
 }
 
-func (s *Service) systemPrompt(now time.Time, snapshot string, contextUnavailable bool, interaction InteractionContext, autoConfirm bool) string {
+func (s *Service) systemPrompt(now time.Time, snapshot string, contextUnavailable bool, interaction InteractionContext, autoConfirm bool, conversation *domainassistant.Conversation, workspaces string) string {
 	prompt := "Ты — ассистент LifeOS и главный интерфейс пользователя со своей персональной системой.\n" +
 		"Твоя задача — понять намерение и помочь его выполнить, а не заставлять пользователя искать разделы, поля и связи между модулями.\n" +
 		"Сейчас: " + now.Format(time.RFC3339) + " (" + s.timezone + ").\n"
+	if conversation != nil && conversation.Kind == domainassistant.KindProject {
+		prompt += "\nТы работаешь в отдельном рабочем пространстве.\n"
+		if conversation.Title != nil {
+			prompt += "Название пространства: «" + *conversation.Title + "».\n"
+		}
+		if conversation.Purpose != nil && strings.TrimSpace(*conversation.Purpose) != "" {
+			prompt += "Тема пространства: " + *conversation.Purpose + "\n"
+		}
+		prompt += "Это продолжительная работа над одной темой; здесь уместны глубокий разбор, файлы, документы и промежуточные шаги. " +
+			"Когда появляется существенный результат, итог или решение, вызови report_result с кратким итогом — он вернёт результат в главный чат. " +
+			"Не вызывай delegate_to_workspace: внутри пространства это запрещено.\n"
+	}
 	if strings.TrimSpace(snapshot) != "" {
 		prompt += "\nТекущее состояние LifeOS (обновляется автоматически; может быть неполным):\n" + snapshot + "\n"
+	}
+	if strings.TrimSpace(workspaces) != "" {
+		prompt += "\nОткрытые рабочие пространства (проектные чаты):\n" + workspaces + "\n"
+		prompt += "Если пользователь просит вынести тему в отдельное пространство, разбирать её отдельно или продолжить работу над проектом: " +
+			"для новой темы вызови create_workspace с коротким названием и темой, затем delegate_to_workspace с самим поручением; " +
+			"для существующего пространства используй его ID. Когда тема в главном чате разрослась в продолжительную работу, сам предложи вынести её в отдельное пространство. " +
+			"Результаты пространств возвращаются в главный чат сами — вручную копировать их не нужно.\n"
 	}
 	if s.workdir != "" {
 		prompt += "\nРабочий каталог на машине пользователя: " + s.workdir + " (" + osName() + "). Относительные пути в инструментах считаются от него.\n"
@@ -711,8 +750,61 @@ func (s *Service) RejectPendingAction(ctx context.Context, id int64) (*domainass
 	return action, nil
 }
 
-// ListConversations returns a page of conversations.
-func (s *Service) ListConversations(ctx context.Context, limit, offset int) ([]*domainassistant.Conversation, int, error) {
+// activeWorkspaces renders the open project workspaces for the main chat's
+// system prompt, so the model can route a topic to the right one by ID.
+func (s *Service) activeWorkspaces(ctx context.Context) string {
+	project := domainassistant.KindProject
+	workspaces, _, err := s.ListConversations(ctx, 10, 0, &project)
+	if err != nil || len(workspaces) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, workspace := range workspaces {
+		title := fmt.Sprintf("Диалог %d", workspace.ID)
+		if workspace.Title != nil {
+			title = *workspace.Title
+		}
+		purpose := ""
+		if workspace.Purpose != nil {
+			purpose = truncateRunes(*workspace.Purpose, 160)
+		}
+		fmt.Fprintf(&b, "- ID %d: «%s»", workspace.ID, title)
+		if purpose != "" {
+			b.WriteString(" — " + purpose)
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// CreateWorkspace opens a project conversation. The user may create one from
+// the interface directly; the assistant does the same through create_workspace.
+func (s *Service) CreateWorkspace(ctx context.Context, title, purpose string, sourceID *int64) (*domainassistant.Conversation, error) {
+	conversation, err := domainassistant.NewWorkspace(title, purpose, sourceID, s.clock.Now())
+	if err != nil {
+		return nil, err
+	}
+	err = s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
+		id, err := tx.Assistant().CreateConversation(ctx, conversation)
+		if err != nil {
+			return err
+		}
+		conversation.ID = id
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	s.publish("assistant.workspace", map[string]any{
+		"conversation_id": conversation.ID,
+		"title":           title,
+	})
+	return conversation, nil
+}
+
+// ListConversations returns a page of conversations. A nil kind lists main
+// chats and workspaces together; otherwise only that kind is returned.
+func (s *Service) ListConversations(ctx context.Context, limit, offset int, kind *domainassistant.Kind) ([]*domainassistant.Conversation, int, error) {
 	if limit <= 0 {
 		limit = DefaultPageLimit
 	}
@@ -722,11 +814,14 @@ func (s *Service) ListConversations(ctx context.Context, limit, offset int) ([]*
 	if offset < 0 {
 		offset = 0
 	}
+	if kind != nil && !kind.IsValid() {
+		return nil, 0, domainassistant.ErrInvalidKind
+	}
 
 	var conversations []*domainassistant.Conversation
 	var total int
 	err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
-		found, count, err := tx.Assistant().ListConversations(ctx, limit, offset)
+		found, count, err := tx.Assistant().ListConversations(ctx, limit, offset, kind)
 		if err != nil {
 			return err
 		}

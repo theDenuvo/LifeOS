@@ -2,8 +2,15 @@
 	import '../app.css';
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
-	import { startLive, conversationsRevision, reminderNotice, dismissReminder } from '$lib/live';
-	import { listConversations, type Conversation } from '$lib/api';
+	import {
+		startLive,
+		conversationsRevision,
+		reminderNotice,
+		dismissReminder,
+		bumpConversations
+	} from '$lib/live';
+	import { goto } from '$app/navigation';
+	import { listConversations, createWorkspace, type Conversation } from '$lib/api';
 	import { profile, loadProfile, calendarSources } from '$lib/profile';
 	import { selectedCalendars, toggleCalendar } from '$lib/calendarFilter';
 	import {
@@ -15,7 +22,8 @@
 		PanelLeftClose,
 		Plus,
 		Sparkles,
-		BookOpen
+		BookOpen,
+		Layers
 	} from 'lucide-svelte';
 
 	const nav = [
@@ -35,6 +43,12 @@
 	];
 
 	let conversations: Conversation[] = [];
+	let workspaces: Conversation[] = [];
+	let workspaceFormOpen = false;
+	let workspaceTitle = '';
+	let workspacePurpose = '';
+	let workspaceCreating = false;
+	let workspaceError = '';
 	let collapsed = false;
 
 	$: current = $page.url.pathname;
@@ -53,10 +67,34 @@
 
 	async function loadConversations() {
 		try {
-			const result = await listConversations();
-			conversations = result.data;
+			const [dialogs, projects] = await Promise.all([
+				listConversations('main'),
+				listConversations('project')
+			]);
+			conversations = dialogs.data;
+			workspaces = projects.data;
 		} catch {
 			conversations = [];
+			workspaces = [];
+		}
+	}
+
+	async function createProjectWorkspace() {
+		const title = workspaceTitle.trim();
+		if (!title || workspaceCreating) return;
+		workspaceCreating = true;
+		workspaceError = '';
+		try {
+			const workspace = await createWorkspace(title, workspacePurpose.trim());
+			workspaceFormOpen = false;
+			workspaceTitle = '';
+			workspacePurpose = '';
+			bumpConversations();
+			await goto(`/?conversation=${workspace.id}`);
+		} catch (err) {
+			workspaceError = err instanceof Error ? err.message : 'Не удалось создать пространство';
+		} finally {
+			workspaceCreating = false;
 		}
 	}
 
@@ -140,6 +178,68 @@
 				{:else}
 					<p class="recent-empty">Диалогов пока нет</p>
 				{/each}
+			</div>
+
+			<div class="side-section workspaces">
+				<h2>Рабочие пространства</h2>
+				{#each workspaces.slice(0, 5) as workspace (workspace.id)}
+					<a
+						class="recent-item workspace-item"
+						href={`/?conversation=${workspace.id}`}
+						title={workspace.purpose || workspace.title || undefined}
+					>
+						<Layers size={12} strokeWidth={1.8} aria-hidden="true" />
+						<span>{workspace.title || `Пространство ${workspace.id}`}</span>
+					</a>
+				{/each}
+				{#if workspaceFormOpen}
+					<form class="workspace-form" on:submit|preventDefault={createProjectWorkspace}>
+						<input
+							class="workspace-input"
+							type="text"
+							bind:value={workspaceTitle}
+							placeholder="Название темы"
+							aria-label="Название рабочего пространства"
+							maxlength="80"
+							required
+						/>
+						<textarea
+							class="workspace-input"
+							bind:value={workspacePurpose}
+							placeholder="О чём будет работа (необязательно)"
+							aria-label="Тема рабочего пространства"
+							rows="2"
+							maxlength="500"
+						></textarea>
+						{#if workspaceError}<p class="workspace-error" role="alert">{workspaceError}</p>{/if}
+						<div class="workspace-form-actions">
+							<button
+								type="button"
+								class="workspace-cancel"
+								on:click={() => (workspaceFormOpen = false)}>Отмена</button
+							>
+							<button
+								type="submit"
+								class="workspace-submit"
+								disabled={workspaceCreating || !workspaceTitle.trim()}
+							>
+								{workspaceCreating ? 'Создаю…' : 'Создать'}
+							</button>
+						</div>
+					</form>
+				{:else}
+					<button
+						type="button"
+						class="workspace-add"
+						on:click={() => {
+							workspaceFormOpen = true;
+							workspaceError = '';
+						}}
+					>
+						<Plus size={12} strokeWidth={2} aria-hidden="true" />
+						<span>Новое пространство</span>
+					</button>
+				{/if}
 			</div>
 		{/if}
 
@@ -392,6 +492,118 @@
 		padding: 0 9px;
 		color: var(--fg-faint);
 		font-size: var(--text-sm);
+	}
+
+	.workspaces {
+		overflow: hidden;
+	}
+
+	.workspaces .recent-item {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		min-width: 0;
+	}
+
+	.workspaces .recent-item :global(svg) {
+		flex: none;
+		color: var(--accent-bright);
+	}
+
+	.workspaces .recent-item span {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.workspace-add {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		width: 100%;
+		margin-top: 4px;
+		padding: 5px 9px;
+		border: 1px dashed var(--border-soft);
+		border-radius: 6px;
+		background: transparent;
+		color: var(--fg-faint);
+		font-size: var(--text-sm);
+		cursor: pointer;
+		transition:
+			color var(--duration-fast) var(--ease-out),
+			border-color var(--duration-fast) var(--ease-out);
+	}
+
+	.workspace-add:hover {
+		color: var(--fg-primary);
+		border-color: var(--border-strong, var(--border-soft));
+	}
+
+	.workspace-form {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		margin-top: 4px;
+	}
+
+	.workspace-input {
+		width: 100%;
+		padding: 6px 8px;
+		border: 1px solid var(--border-soft);
+		border-radius: 6px;
+		background: var(--bg-raised);
+		color: var(--fg-primary);
+		font: inherit;
+		font-size: var(--text-sm);
+		resize: vertical;
+	}
+
+	.workspace-input:focus-visible {
+		outline: 2px solid var(--accent);
+		outline-offset: 1px;
+		border-color: var(--accent);
+	}
+
+	.workspace-error {
+		margin: 0;
+		color: var(--danger, #e5484d);
+		font-size: var(--text-2xs, var(--text-xs));
+	}
+
+	.workspace-form-actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: 6px;
+	}
+
+	.workspace-cancel,
+	.workspace-submit {
+		padding: 4px 10px;
+		border: none;
+		border-radius: 6px;
+		font: inherit;
+		font-size: var(--text-sm);
+		cursor: pointer;
+	}
+
+	.workspace-cancel {
+		background: transparent;
+		color: var(--fg-muted);
+	}
+
+	.workspace-cancel:hover {
+		color: var(--fg-primary);
+	}
+
+	.workspace-submit {
+		background: var(--accent);
+		color: #fff;
+		font-weight: 550;
+	}
+
+	.workspace-submit:disabled {
+		opacity: 0.55;
+		cursor: default;
 	}
 
 	.calendar-source {

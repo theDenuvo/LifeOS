@@ -91,6 +91,15 @@ Below: one line explaining that the assistant reads the system and asks before c
 - Each conversation keeps its title and last activity.
 - Starting from another screen passes that screen as context; the transcript shows a small “из /tasks” chip.
 
+### Project workspaces
+
+A long topic can live in a project workspace: a separate conversation with its own history and purpose. The main chat remains the only everyday surface — there is no “Проекты” nav item.
+
+- Sidebar: workspaces live in a “Рабочие пространства” section under the recent dialogs, marked with a layers icon; “Новое пространство” opens a two-field inline form (title, topic) and navigates into the created conversation.
+- Workspace header: the conversation title replaces “Личный ассистент”, a chip names the space and its topic, and a “В главный чат” button returns to the latest main conversation.
+- Workspace card: when the assistant creates or routes work into a space, the main-chat transcript shows a compact card (title, purpose, “Открыть”) — the same visual family as task cards.
+- Handoff result: a result reported back from a workspace appears in the main chat as an assistant message with a badge (“Результат из пространства …”), including an “Открыть” action.
+
 ## Global composer
 
 - Visible on every desktop screen in the sidebar and on mobile above the bottom navigation.

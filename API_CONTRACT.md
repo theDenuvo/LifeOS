@@ -532,19 +532,36 @@ GET /api/v1/assistant/conversations/{id}
 {
   "id": 1,
   "title": "Утренний планировщик",
+  "kind": "main",
+  "purpose": null,
+  "source_conversation_id": null,
   "messages": [Message, ...],
   "created_at": "...",
   "updated_at": "..."
 }
 ```
 
+`kind` — `main` (главный чат) или `project` (рабочее пространство). У рабочего пространства `purpose` содержит тему; `source_conversation_id` указывает главный чат, из которого тема вынесена.
+
 #### Список диалогов
 
 ```
-GET /api/v1/assistant/conversations
+GET /api/v1/assistant/conversations?kind=main|project
 ```
 
-**Response 200:** `{ "data": [Conversation, ...] }`
+**Response 200:** `{ "data": [Conversation, ...] }`. Без `kind` возвращаются все диалоги.
+
+#### Создать рабочее пространство
+
+```
+POST /api/v1/assistant/workspaces   {"title": "Диссертация", "purpose": "план глав"}
+```
+
+**Response 201:** Conversation с `kind="project"`. Пространство — проектный чат со своей историей; общая память LifeOS общая для всех диалогов.
+
+#### Передать результат из пространства в главный чат
+
+Ассистент вызывает инструмент `report_result` внутри рабочего пространства; результат появляется в главном чате как сообщение с `metadata.handoff`. Отдельного эндпоинта нет.
 
 #### Подтвердить/Отклонить ожидающее действие
 

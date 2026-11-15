@@ -34,16 +34,23 @@ type assistantRepository struct {
 	tx *sql.Tx
 }
 
-const conversationColumns = `id, title, context_screen, created_at, updated_at, ended_at`
+const conversationColumns = `id, title, context_screen, kind, purpose, source_conversation_id, created_at, updated_at, ended_at`
 const messageColumns = `id, conversation_id, role, content, tool_calls, tool_results, metadata, attachments, reasoning, created_at`
 const pendingColumns = `id, conversation_id, message_id, tool_name, arguments, preview, status, created_at, resolved_at, resolution`
 
 // CreateConversation stores a conversation and returns its ID.
 func (r *assistantRepository) CreateConversation(ctx context.Context, conversation *domainassistant.Conversation) (int64, error) {
+	kind := string(conversation.Kind)
+	if kind == "" {
+		kind = string(domainassistant.KindMain)
+	}
 	result, err := r.tx.ExecContext(ctx,
-		`INSERT INTO conversations (title, context_screen, created_at, updated_at, ended_at) VALUES (?, ?, ?, ?, ?)`,
+		`INSERT INTO conversations (title, context_screen, kind, purpose, source_conversation_id, created_at, updated_at, ended_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		encodeStringPtr(conversation.Title),
 		encodeStringPtr(conversation.ContextScreen),
+		kind,
+		encodeStringPtr(conversation.Purpose),
+		encodeInt64Ptr(conversation.SourceConversationID),
 		unixSeconds(conversation.CreatedAt),
 		unixSeconds(conversation.UpdatedAt),
 		encodeTimePtr(conversation.EndedAt),
@@ -72,15 +79,24 @@ func (r *assistantRepository) GetConversation(ctx context.Context, id int64) (*d
 }
 
 // ListConversations returns a page of conversations plus the total count.
-func (r *assistantRepository) ListConversations(ctx context.Context, limit, offset int) ([]*domainassistant.Conversation, int, error) {
+// A nil kind lists main chats and workspaces together.
+func (r *assistantRepository) ListConversations(ctx context.Context, limit, offset int, kind *domainassistant.Kind) ([]*domainassistant.Conversation, int, error) {
+	where := ""
+	args := make([]any, 0, 3)
+	if kind != nil {
+		where = " WHERE kind = ?"
+		args = append(args, string(*kind))
+	}
+
 	var total int
-	if err := r.tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM conversations`).Scan(&total); err != nil {
+	if err := r.tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM conversations`+where, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count conversations: %w", err)
 	}
 
+	args = append(args, limit, offset)
 	rows, err := r.tx.QueryContext(ctx,
-		`SELECT `+conversationColumns+` FROM conversations ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?`,
-		limit, offset)
+		`SELECT `+conversationColumns+` FROM conversations`+where+` ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?`,
+		args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("list conversations: %w", err)
 	}
@@ -254,21 +270,34 @@ func scanConversation(row rowScanner) (*domainassistant.Conversation, error) {
 		id            int64
 		title         sql.NullString
 		contextScreen sql.NullString
+		kind          string
+		purpose       sql.NullString
+		sourceID      sql.NullInt64
 		createdAt     int64
 		updatedAt     int64
 		endedAt       sql.NullInt64
 	)
-	if err := row.Scan(&id, &title, &contextScreen, &createdAt, &updatedAt, &endedAt); err != nil {
+	if err := row.Scan(&id, &title, &contextScreen, &kind, &purpose, &sourceID, &createdAt, &updatedAt, &endedAt); err != nil {
 		return nil, err
 	}
-	return &domainassistant.Conversation{
-		ID:            id,
-		Title:         stringPtr(title),
-		ContextScreen: stringPtr(contextScreen),
-		CreatedAt:     timeFromUnix(createdAt),
-		UpdatedAt:     timeFromUnix(updatedAt),
-		EndedAt:       timePtr(endedAt),
-	}, nil
+	conversation := &domainassistant.Conversation{
+		ID:                   id,
+		Title:                stringPtr(title),
+		ContextScreen:        stringPtr(contextScreen),
+		Kind:                 domainassistant.Kind(kind),
+		Purpose:              stringPtr(purpose),
+		SourceConversationID: int64Ptr(sourceID),
+		CreatedAt:            timeFromUnix(createdAt),
+		UpdatedAt:            timeFromUnix(updatedAt),
+		EndedAt:              timePtr(endedAt),
+	}
+	if conversation.Kind == "" {
+		conversation.Kind = domainassistant.KindMain
+	}
+	if !conversation.Kind.IsValid() {
+		return nil, fmt.Errorf("conversation %d: invalid stored kind %q", id, kind)
+	}
+	return conversation, nil
 }
 
 func scanMessage(row rowScanner) (*domainassistant.Message, error) {

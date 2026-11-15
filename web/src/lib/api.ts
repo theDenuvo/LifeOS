@@ -430,7 +430,7 @@ export function getSummary(): Promise<Summary> {
 }
 
 export interface Attachment {
-	kind: 'task' | 'task_list' | 'event' | 'event_list' | 'document';
+	kind: 'task' | 'task_list' | 'event' | 'event_list' | 'document' | 'workspace';
 	data: unknown;
 }
 
@@ -462,6 +462,9 @@ export interface PendingAction {
 export interface Conversation {
 	id: number;
 	title: string | null;
+	kind?: 'main' | 'project';
+	purpose?: string | null;
+	source_conversation_id?: number | null;
 	created_at: string;
 	updated_at: string;
 }
@@ -469,6 +472,8 @@ export interface Conversation {
 export interface ConversationView {
 	id: number;
 	title: string | null;
+	kind?: 'main' | 'project';
+	purpose?: string | null;
 	created_at: string;
 	updated_at: string;
 	messages: AssistantMessage[];
@@ -499,8 +504,20 @@ export function sendAssistantMessage(
 	});
 }
 
-export function listConversations(): Promise<{ data: Conversation[]; meta: { total: number } }> {
-	return request<{ data: Conversation[]; meta: { total: number } }>('/api/v1/assistant/conversations');
+export function listConversations(
+	kind?: 'main' | 'project'
+): Promise<{ data: Conversation[]; meta: { total: number } }> {
+	const query = kind ? `?kind=${kind}` : '';
+	return request<{ data: Conversation[]; meta: { total: number } }>(
+		`/api/v1/assistant/conversations${query}`
+	);
+}
+
+export function createWorkspace(title: string, purpose?: string): Promise<Conversation> {
+	return request<Conversation>('/api/v1/assistant/workspaces', {
+		method: 'POST',
+		body: JSON.stringify({ title, purpose: purpose ?? '' })
+	});
 }
 
 export function getConversation(id: number): Promise<ConversationView> {

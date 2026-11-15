@@ -38,10 +38,29 @@ type pendingActionBody struct {
 }
 
 type conversationBody struct {
-	ID        int64   `json:"id"`
-	Title     *string `json:"title"`
-	CreatedAt string  `json:"created_at"`
-	UpdatedAt string  `json:"updated_at"`
+	ID                   int64   `json:"id"`
+	Title                *string `json:"title"`
+	Kind                 string  `json:"kind"`
+	Purpose              *string `json:"purpose"`
+	SourceConversationID *int64  `json:"source_conversation_id"`
+	CreatedAt            string  `json:"created_at"`
+	UpdatedAt            string  `json:"updated_at"`
+}
+
+func newConversationBody(conversation *domainassistant.Conversation) conversationBody {
+	kind := string(conversation.Kind)
+	if kind == "" {
+		kind = string(domainassistant.KindMain)
+	}
+	return conversationBody{
+		ID:                   conversation.ID,
+		Title:                conversation.Title,
+		Kind:                 kind,
+		Purpose:              conversation.Purpose,
+		SourceConversationID: conversation.SourceConversationID,
+		CreatedAt:            formatTime(conversation.CreatedAt),
+		UpdatedAt:            formatTime(conversation.UpdatedAt),
+	}
 }
 
 func newAssistantMessageBody(message *domainassistant.Message) assistantMessageBody {
@@ -132,6 +151,15 @@ func (h *Handler) sendAssistantMessage(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) listAssistantConversations(w http.ResponseWriter, r *http.Request) {
 	limit := 20
 	offset := 0
+	var kind *domainassistant.Kind
+	if raw := strings.TrimSpace(r.URL.Query().Get("kind")); raw != "" {
+		value := domainassistant.Kind(raw)
+		if !value.IsValid() {
+			h.writeProblem(w, r, http.StatusBadRequest, "validation-failed", "Validation Failed", "invalid kind; use main or project")
+			return
+		}
+		kind = &value
+	}
 	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
 		value, err := strconv.Atoi(raw)
 		if err != nil {
@@ -149,7 +177,7 @@ func (h *Handler) listAssistantConversations(w http.ResponseWriter, r *http.Requ
 		offset = value
 	}
 
-	conversations, total, err := h.services.Assistant.ListConversations(r.Context(), limit, offset)
+	conversations, total, err := h.services.Assistant.ListConversations(r.Context(), limit, offset, kind)
 	if err != nil {
 		h.writeAssistantError(w, r, err)
 		return
@@ -157,18 +185,31 @@ func (h *Handler) listAssistantConversations(w http.ResponseWriter, r *http.Requ
 
 	data := make([]conversationBody, 0, len(conversations))
 	for _, conversation := range conversations {
-		data = append(data, conversationBody{
-			ID:        conversation.ID,
-			Title:     conversation.Title,
-			CreatedAt: formatTime(conversation.CreatedAt),
-			UpdatedAt: formatTime(conversation.UpdatedAt),
-		})
+		data = append(data, newConversationBody(conversation))
 	}
 
 	h.writeJSON(w, http.StatusOK, map[string]any{
 		"data": data,
 		"meta": map[string]any{"limit": limit, "offset": offset, "total": total},
 	})
+}
+
+// createWorkspace handles POST /api/v1/assistant/workspaces.
+func (h *Handler) createWorkspace(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Title   string `json:"title"`
+		Purpose string `json:"purpose"`
+	}
+	if err := decodeJSONBody(w, r, &body); err != nil {
+		h.writeProblem(w, r, http.StatusBadRequest, "validation-failed", "Validation Failed", err.Error())
+		return
+	}
+	conversation, err := h.services.Assistant.CreateWorkspace(r.Context(), body.Title, body.Purpose, nil)
+	if err != nil {
+		h.writeAssistantError(w, r, err)
+		return
+	}
+	h.writeJSON(w, http.StatusCreated, newConversationBody(conversation))
 }
 
 // getAssistantConversation handles GET /api/v1/assistant/conversations/{id}.
@@ -194,12 +235,15 @@ func (h *Handler) getAssistantConversation(w http.ResponseWriter, r *http.Reques
 	}
 
 	h.writeJSON(w, http.StatusOK, map[string]any{
-		"id":              view.Conversation.ID,
-		"title":           view.Conversation.Title,
-		"created_at":      formatTime(view.Conversation.CreatedAt),
-		"updated_at":      formatTime(view.Conversation.UpdatedAt),
-		"messages":        messages,
-		"pending_actions": pending,
+		"id":                     view.Conversation.ID,
+		"title":                  view.Conversation.Title,
+		"kind":                   string(view.Conversation.Kind),
+		"purpose":                view.Conversation.Purpose,
+		"source_conversation_id": view.Conversation.SourceConversationID,
+		"created_at":             formatTime(view.Conversation.CreatedAt),
+		"updated_at":             formatTime(view.Conversation.UpdatedAt),
+		"messages":               messages,
+		"pending_actions":        pending,
 	})
 }
 
@@ -248,7 +292,8 @@ func (h *Handler) writeAssistantError(w http.ResponseWriter, r *http.Request, er
 	case errors.Is(err, assistant.ErrProviderNotConfigured):
 		h.writeProblem(w, r, http.StatusServiceUnavailable, "provider-not-configured", "Assistant Not Configured",
 			"LLM provider is not configured; set LIFEOS_LLM_API_KEY or use a local provider")
-	case errors.Is(err, domainassistant.ErrInvalidContent), errors.Is(err, domainassistant.ErrInvalidRole):
+	case errors.Is(err, domainassistant.ErrInvalidContent), errors.Is(err, domainassistant.ErrInvalidRole),
+		errors.Is(err, domainassistant.ErrInvalidKind), errors.Is(err, domainassistant.ErrEmptyWorkspaceTitle):
 		h.writeProblem(w, r, http.StatusBadRequest, "validation-failed", "Validation Failed", err.Error())
 	case errors.Is(err, assistant.ErrToolFailed):
 		h.writeProblem(w, r, http.StatusUnprocessableEntity, "tool-failed", "Tool Failed", err.Error())

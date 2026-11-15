@@ -34,12 +34,12 @@ const goalColumns = `id, title, description, status, target_date, approved_at, c
 
 func scanGoal(row rowScanner) (*domaingoal.Goal, error) {
 	var (
-		g           domaingoal.Goal
-		status      string
-		targetDate  sql.NullInt64
-		approvedAt  sql.NullInt64
-		createdAt   int64
-		updatedAt   int64
+		g          domaingoal.Goal
+		status     string
+		targetDate sql.NullInt64
+		approvedAt sql.NullInt64
+		createdAt  int64
+		updatedAt  int64
 	)
 	if err := row.Scan(&g.ID, &g.Title, &g.Description, &status, &targetDate, &approvedAt, &createdAt, &updatedAt, &g.Version); err != nil {
 		return nil, err
@@ -382,6 +382,39 @@ func (r *goalRepository) ListLinks(ctx context.Context, goalID int64) ([]domaing
 	return links, rows.Err()
 }
 
+// ListLinksByTarget returns every goal linked to one object, or every link of
+// a type when targetID is zero. This replaces walking a bounded goal page: a
+// link is found no matter how many goals exist.
+func (r *goalRepository) ListLinksByTarget(ctx context.Context, target domaingoal.TargetType, targetID int64) ([]domaingoal.Link, error) {
+	query := `SELECT id, goal_id, target_type, target_id, relation, created_at FROM goal_links WHERE target_type = ?`
+	args := []any{string(target)}
+	if targetID > 0 {
+		query += ` AND target_id = ?`
+		args = append(args, targetID)
+	}
+	query += ` ORDER BY id ASC`
+	rows, err := r.tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list goal links by target: %w", err)
+	}
+	defer rows.Close()
+	links := make([]domaingoal.Link, 0, 8)
+	for rows.Next() {
+		var (
+			link       domaingoal.Link
+			targetType string
+			createdAt  int64
+		)
+		if err := rows.Scan(&link.ID, &link.GoalID, &targetType, &link.TargetID, &link.Relation, &createdAt); err != nil {
+			return nil, err
+		}
+		link.TargetType = domaingoal.TargetType(targetType)
+		link.CreatedAt = timeFromUnix(createdAt)
+		links = append(links, link)
+	}
+	return links, rows.Err()
+}
+
 func (r *goalRepository) DeleteLink(ctx context.Context, goalID, linkID int64) error {
 	result, err := r.tx.ExecContext(ctx, `DELETE FROM goal_links WHERE id = ? AND goal_id = ?`, linkID, goalID)
 	if err != nil {
@@ -517,6 +550,20 @@ func (r *goalRepository) LastActivity(ctx context.Context, goalID int64) (*time.
 	return &t, nil
 }
 
+// HasProgressSource reports whether the journal already has an entry of this
+// kind for the given source, which makes progress recording idempotent.
+func (r *goalRepository) HasProgressSource(ctx context.Context, goalID int64, kind domaingoal.ProgressKind, sourceType domaingoal.TargetType, sourceID int64) (bool, error) {
+	var count int
+	err := r.tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM goal_progress
+		WHERE goal_id = ? AND kind = ? AND source_type = ? AND source_id = ?`,
+		goalID, string(kind), string(sourceType), sourceID).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("check goal progress source: %w", err)
+	}
+	return count > 0, nil
+}
+
 const goalProposalColumns = `id, goal_id, summary, payload, status, created_at, decided_at`
 
 func (r *goalRepository) InsertProposal(ctx context.Context, proposal *domaingoal.Proposal) (int64, error) {
@@ -627,4 +674,3 @@ func unixNullableTime(t *time.Time) any {
 	}
 	return unixSeconds(*t)
 }
-

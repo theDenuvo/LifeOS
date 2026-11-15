@@ -111,9 +111,9 @@ func registerGoalTools(registry *Registry, service *goalService) {
 		Direct: true,
 		Execute: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			var args struct {
-				Title       string   `json:"title"`
-				Description string   `json:"description"`
-				TargetDate  string   `json:"target_date"`
+				Title       string             `json:"title"`
+				Description string             `json:"description"`
+				TargetDate  string             `json:"target_date"`
 				Milestones  []goalMilestoneArg `json:"milestones"`
 			}
 			if err := decodeArgs(raw, &args); err != nil {
@@ -136,12 +136,12 @@ func registerGoalTools(registry *Registry, service *goalService) {
 	registry.Register(Tool{
 		Spec: assistantSpec("update_goal_plan", "Изменить план цели, которая ещё не утверждена: название, описание, срок, добавить или убрать этапы. Для утверждённой цели используй propose_goal_change.",
 			objectSchema(map[string]any{
-				"goal_id":              integerProp("ID цели"),
-				"expected_version":     integerProp("Версия цели из get_goal"),
-				"title":                stringProp("Новое название"),
-				"description":          stringProp("Новое описание"),
-				"target_date":          stringProp("Новый срок, YYYY-MM-DD"),
-				"clear_target_date":    booleanProp("Убрать срок"),
+				"goal_id":           integerProp("ID цели"),
+				"expected_version":  integerProp("Версия цели из get_goal"),
+				"title":             stringProp("Новое название"),
+				"description":       stringProp("Новое описание"),
+				"target_date":       stringProp("Новый срок, YYYY-MM-DD"),
+				"clear_target_date": booleanProp("Убрать срок"),
 				"add_milestones": map[string]any{
 					"type":  "array",
 					"items": objectSchema(map[string]any{"title": stringProp("Название этапа"), "criteria": stringProp("Чем измеряется выполнение"), "due_date": stringProp("Срок, YYYY-MM-DD")}, "title"),
@@ -172,8 +172,12 @@ func registerGoalTools(registry *Registry, service *goalService) {
 				input.TargetDate = target
 			}
 			for _, ms := range args.AddMilestones {
+				due, err := parseOptionalGoalDate(ms.DueDate)
+				if err != nil {
+					return nil, fmt.Errorf("этап «%s»: %w", ms.Title, err)
+				}
 				input.AddMilestones = append(input.AddMilestones, domaingoal.MilestoneInput{
-					Title: ms.Title, Criteria: ms.Criteria, DueDate: parseOptionalGoalDate(ms.DueDate),
+					Title: ms.Title, Criteria: ms.Criteria, DueDate: due,
 				})
 			}
 			view, err := service.UpdatePlan(ctx, args.GoalID, args.ExpectedVersion, input)
@@ -245,12 +249,12 @@ func registerGoalTools(registry *Registry, service *goalService) {
 	registry.Register(Tool{
 		Spec: assistantSpec("propose_goal_change", "Предложить существенное изменение утверждённой цели: формулировка, срок или структура плана. Пользователь увидит предложение и сам решит, применять ли его.",
 			objectSchema(map[string]any{
-				"goal_id":              integerProp("ID цели"),
-				"summary":              stringProp("Что меняется и почему, одним понятным абзацем"),
-				"title":                stringProp("Новое название"),
-				"description":          stringProp("Новое описание"),
-				"target_date":          stringProp("Новый срок, YYYY-MM-DD"),
-				"clear_target_date":    booleanProp("Убрать срок"),
+				"goal_id":           integerProp("ID цели"),
+				"summary":           stringProp("Что меняется и почему, одним понятным абзацем"),
+				"title":             stringProp("Новое название"),
+				"description":       stringProp("Новое описание"),
+				"target_date":       stringProp("Новый срок, YYYY-MM-DD"),
+				"clear_target_date": booleanProp("Убрать срок"),
 				"add_milestones": map[string]any{
 					"type":  "array",
 					"items": objectSchema(map[string]any{"title": stringProp("Название этапа"), "criteria": stringProp("Чем измеряется выполнение"), "due_date": stringProp("Срок, YYYY-MM-DD")}, "title"),
@@ -263,17 +267,17 @@ func registerGoalTools(registry *Registry, service *goalService) {
 		Direct: true,
 		Execute: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			var args struct {
-				GoalID         int64              `json:"goal_id"`
-				Summary        string             `json:"summary"`
-				Title          *string            `json:"title"`
-				Description    *string            `json:"description"`
-				TargetDate     string             `json:"target_date"`
-				ClearTarget    bool               `json:"clear_target_date"`
-				AddMilestones  []goalMilestoneArg `json:"add_milestones"`
-				CompleteIDs    []int64            `json:"complete_milestone_ids"`
-				SkipIDs        []int64            `json:"skip_milestone_ids"`
-				ReopenIDs      []int64            `json:"reopen_milestone_ids"`
-				RemoveIDs      []int64            `json:"remove_milestone_ids"`
+				GoalID        int64              `json:"goal_id"`
+				Summary       string             `json:"summary"`
+				Title         *string            `json:"title"`
+				Description   *string            `json:"description"`
+				TargetDate    string             `json:"target_date"`
+				ClearTarget   bool               `json:"clear_target_date"`
+				AddMilestones []goalMilestoneArg `json:"add_milestones"`
+				CompleteIDs   []int64            `json:"complete_milestone_ids"`
+				SkipIDs       []int64            `json:"skip_milestone_ids"`
+				ReopenIDs     []int64            `json:"reopen_milestone_ids"`
+				RemoveIDs     []int64            `json:"remove_milestone_ids"`
 			}
 			if err := decodeArgs(raw, &args); err != nil {
 				return nil, err
@@ -291,8 +295,12 @@ func registerGoalTools(registry *Registry, service *goalService) {
 				payload.TargetDate = target
 			}
 			for _, ms := range args.AddMilestones {
+				due, err := parseOptionalGoalDate(ms.DueDate)
+				if err != nil {
+					return nil, fmt.Errorf("этап «%s»: %w", ms.Title, err)
+				}
 				payload.AddMilestones = append(payload.AddMilestones, domaingoal.MilestoneInput{
-					Title: ms.Title, Criteria: ms.Criteria, DueDate: parseOptionalGoalDate(ms.DueDate),
+					Title: ms.Title, Criteria: ms.Criteria, DueDate: due,
 				})
 			}
 			proposal, err := service.ProposeChange(ctx, args.GoalID, payload, args.Summary)
@@ -537,8 +545,12 @@ func buildCreateInput(title, description, targetDate string, milestones []goalMi
 		input.TargetDate = target
 	}
 	for _, ms := range milestones {
+		due, err := parseOptionalGoalDate(ms.DueDate)
+		if err != nil {
+			return input, fmt.Errorf("этап «%s»: %w", ms.Title, err)
+		}
 		input.Milestones = append(input.Milestones, domaingoal.MilestoneInput{
-			Title: ms.Title, Criteria: ms.Criteria, DueDate: parseOptionalGoalDate(ms.DueDate),
+			Title: ms.Title, Criteria: ms.Criteria, DueDate: due,
 		})
 	}
 	return input, nil
@@ -554,16 +566,14 @@ func parseGoalDate(value string) (*time.Time, error) {
 	return &t, nil
 }
 
-// parseOptionalGoalDate tolerates an absent or empty date.
-func parseOptionalGoalDate(value string) *time.Time {
+// parseOptionalGoalDate treats an absent date as "no deadline". A non-empty
+// date that does not parse is an error, never a silent nil: accepting garbage
+// as "no deadline" would quietly drop a deadline the user asked for.
+func parseOptionalGoalDate(value string) (*time.Time, error) {
 	if strings.TrimSpace(value) == "" {
-		return nil
+		return nil, nil
 	}
-	parsed, err := parseGoalDate(value)
-	if err != nil {
-		return nil
-	}
-	return parsed
+	return parseGoalDate(value)
 }
 
 // goalToolError maps service errors to model-facing messages.
@@ -585,6 +595,8 @@ func goalToolError(err error) error {
 		return errors.New("объект для связи не существует; проверь ID")
 	case errors.Is(err, appgoals.ErrGoalNotProposed):
 		return errors.New("план утверждённой цели меняется только через propose_goal_change")
+	case errors.Is(err, appgoals.ErrGoalTerminal):
+		return errors.New("цель завершена (достигнута или оставлена); её план и этапы больше не меняются")
 	case errors.Is(err, appgoals.ErrProposalNotAllowed):
 		return errors.New("предложения по плану имеет смысл создавать только для активной цели")
 	case errors.Is(err, appgoals.ErrNoPendingProposal):
@@ -678,9 +690,9 @@ func goalView(view *appgoals.View) map[string]any {
 	result["progress_log"] = log
 	if view.Review != nil {
 		review := map[string]any{
-			"milestones_total": view.Review.Progress.MilestonesTotal,
-			"milestones_done":  view.Review.Progress.MilestonesDone,
-			"linked_tasks":     view.Review.Progress.LinkedTasks,
+			"milestones_total":  view.Review.Progress.MilestonesTotal,
+			"milestones_done":   view.Review.Progress.MilestonesDone,
+			"linked_tasks":      view.Review.Progress.LinkedTasks,
 			"linked_tasks_done": view.Review.Progress.LinkedTasksDone,
 		}
 		if last := view.Review.Progress.LastActivityAt; last != nil {
@@ -702,8 +714,8 @@ func goalView(view *appgoals.View) map[string]any {
 // goalProposalView renders one plan-change proposal.
 func goalProposalView(proposal *domaingoal.Proposal) map[string]any {
 	item := map[string]any{
-		"id":     proposal.ID,
-		"status": string(proposal.Status),
+		"id":      proposal.ID,
+		"status":  string(proposal.Status),
 		"summary": proposal.Summary,
 	}
 	if payload, err := json.Marshal(proposal.Payload); err == nil {

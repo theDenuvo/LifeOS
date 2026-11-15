@@ -445,7 +445,8 @@
 												{/if}
 											</div>
 											<span class={`milestone-status ${milestone.status}`}>{milestoneLabels[milestone.status]}</span>
-											<div class="milestone-actions">
+											{#if detail.status !== 'achieved' && detail.status !== 'abandoned'}
+												<div class="milestone-actions">
 												{#if milestone.status === 'pending'}
 													<button class="icon" title="Начать этап" aria-label={`Начать этап «${milestone.title}»`} disabled={busyId === detail.id} on:click={() => milestoneAction(milestone.id, milestone.version, 'in_progress')}>
 														<Play size={13} aria-hidden="true" />
@@ -468,14 +469,15 @@
 														<RotateCcw size={13} aria-hidden="true" />
 													</button>
 												{/if}
-											</div>
+												</div>
+											{/if}
 										</li>
 									{/each}
 									{#if detail.milestones.length === 0}
 										<li class="milestone-empty">План пока пуст. Попросите ассистента разбить цель на этапы.</li>
 									{/if}
 								</ul>
-								{#if detail.status !== 'proposed' && detail.status !== 'active'}
+								{#if detail.status === 'proposed'}
 									<div class="add-milestone">
 										<input
 											bind:value={newMilestoneTitle}
@@ -487,8 +489,10 @@
 											<Plus size={13} aria-hidden="true" /> Добавить
 										</button>
 									</div>
-								{:else if detail.status === 'active'}
-									<p class="hint">Утверждённый план меняется через предложение: попросите ассистента, и оно появится здесь.</p>
+								{:else if detail.status === 'active' || detail.status === 'paused'}
+									<p class="hint">План утверждённой цели меняется только через предложение — попросите ассистента, и оно появится здесь.</p>
+								{:else}
+									<p class="hint">Завершённая цель остаётся в истории без изменений.</p>
 								{/if}
 							</section>
 

@@ -98,8 +98,16 @@ func (s MilestoneStatus) IsValid() bool {
 	}
 }
 
-// Done reports whether the milestone no longer needs work.
+// Done reports whether the milestone was actually completed. A skipped step
+// is deliberately not "done": it does not count as progress in percentages.
 func (s MilestoneStatus) Done() bool {
+	return s == MilestoneDone
+}
+
+// Completed reports whether the milestone no longer needs work: it was either
+// really done or deliberately skipped. This is what the plan's completeness
+// checks use, while progress percentages count only actual completions.
+func (s MilestoneStatus) Completed() bool {
 	return s == MilestoneDone || s == MilestoneSkipped
 }
 
@@ -358,11 +366,12 @@ func (e *ProgressEvent) Validate() error {
 	if !e.Kind.IsValid() {
 		return ErrInvalidStatus
 	}
-	if e.SourceType != nil && (!e.SourceType.IsValid() || e.SourceID == nil) {
-		return ErrInvalidTarget
-	}
-	if e.SourceID != nil && e.SourceType == nil {
-		return ErrInvalidTarget
+	// A source is an optional pair: type and a positive id travel together, so
+	// a journal entry can never point at id 0 or a negative object.
+	if e.SourceType != nil || e.SourceID != nil {
+		if e.SourceType == nil || e.SourceID == nil || !e.SourceType.IsValid() || *e.SourceID <= 0 {
+			return ErrInvalidTarget
+		}
 	}
 	return nil
 }

@@ -3,6 +3,7 @@ package goals
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -24,10 +25,10 @@ const (
 
 // Service coordinates goal mutations, approval, plan proposals and progress.
 type Service struct {
-	uow     UnitOfWork
-	tasks   TaskProvider
-	clock   Clock
-	broker  events.Publisher
+	uow    UnitOfWork
+	tasks  TaskProvider
+	clock  Clock
+	broker events.Publisher
 }
 
 // Option customises the service.
@@ -37,7 +38,9 @@ type Option func(*Service)
 func WithTaskProvider(provider TaskProvider) Option { return func(s *Service) { s.tasks = provider } }
 
 // WithPublisher publishes goal changes to the event stream.
-func WithPublisher(publisher events.Publisher) Option { return func(s *Service) { s.broker = publisher } }
+func WithPublisher(publisher events.Publisher) Option {
+	return func(s *Service) { s.broker = publisher }
+}
 
 // NewService builds the goal service.
 func NewService(uow UnitOfWork, clock Clock, opts ...Option) *Service {
@@ -107,6 +110,8 @@ func (s *Service) List(ctx context.Context, filter Filter) ([]*View, int, error)
 		return nil, 0, err
 	}
 	views := make([]*View, 0, len(goals))
+	// Progress is computed after the read transaction closes, so task lookups
+	// never contend with the single SQLite connection.
 	for _, g := range goals {
 		view, err := s.Get(ctx, g.ID)
 		if err != nil {
@@ -117,61 +122,87 @@ func (s *Service) List(ctx context.Context, filter Filter) ([]*View, int, error)
 	return views, total, nil
 }
 
-// Get returns one goal with milestones, links, pending proposals, the progress
-// journal and the computed review.
-func (s *Service) Get(ctx context.Context, id int64) (*View, error) {
-	var view *View
-	err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
-		var err error
-		view, err = s.view(ctx, tx, id)
-		return err
-	})
-	return view, err
+// aggregate is everything read from one goal transaction. It deliberately
+// stops short of the computed progress: progress needs the task engine, and
+// asking it inside the transaction would wait on the single SQLite connection
+// the transaction already holds.
+type aggregate struct {
+	goal       *domaingoal.Goal
+	milestones []domaingoal.Milestone
+	links      []domaingoal.Link
+	proposals  []domaingoal.Proposal
+	log        []domaingoal.ProgressEvent
+	lastActive *time.Time
 }
 
-// view assembles the full aggregate inside one transaction.
-func (s *Service) view(ctx context.Context, tx Transaction, id int64) (*View, error) {
+// cluster reads the aggregate of one goal inside an open transaction.
+func (s *Service) cluster(ctx context.Context, tx Transaction, id int64) (aggregate, error) {
 	repo := tx.Goals()
 	g, err := repo.GetGoal(ctx, id)
 	if err != nil {
-		return nil, err
+		return aggregate{}, err
 	}
 	milestones, err := repo.ListMilestones(ctx, id)
 	if err != nil {
-		return nil, err
+		return aggregate{}, err
 	}
 	sort.Slice(milestones, func(i, j int) bool { return milestones[i].Position < milestones[j].Position })
 	links, err := repo.ListLinks(ctx, id)
 	if err != nil {
-		return nil, err
+		return aggregate{}, err
 	}
 	proposals, err := repo.ListProposals(ctx, id, false)
 	if err != nil {
-		return nil, err
+		return aggregate{}, err
 	}
 	log, err := repo.ListProgress(ctx, id, progressLogLimit)
 	if err != nil {
-		return nil, err
+		return aggregate{}, err
 	}
-	progress, err := s.computeProgress(ctx, tx, id, g, milestones)
+	last, err := repo.LastActivity(ctx, id)
 	if err != nil {
-		return nil, err
+		return aggregate{}, err
 	}
-	review := s.review(g, progress)
-	for _, proposal := range proposals {
+	return aggregate{
+		goal: g, milestones: milestones, links: links,
+		proposals: proposals, log: log, lastActive: last,
+	}, nil
+}
+
+// buildView turns a transaction aggregate into the full view. Task lookups and
+// the progress arithmetic happen here, outside the goal transaction.
+func (s *Service) buildView(ctx context.Context, data aggregate) (*View, error) {
+	progress := s.computeProgress(ctx, data.goal.ID, data.milestones, data.links, data.lastActive)
+	review := s.review(data.goal, progress)
+	for _, proposal := range data.proposals {
 		if proposal.Status == domaingoal.ProposalPending {
 			review.Signals.PendingProposal = true
 			break
 		}
 	}
 	return &View{
-		Goal:        g,
-		Milestones:  milestones,
-		Links:       links,
-		Proposals:   proposals,
-		ProgressLog: log,
+		Goal:        data.goal,
+		Milestones:  data.milestones,
+		Links:       data.links,
+		Proposals:   data.proposals,
+		ProgressLog: data.log,
 		Review:      review,
 	}, nil
+}
+
+// Get returns one goal with milestones, links, pending proposals, the progress
+// journal and the computed review.
+func (s *Service) Get(ctx context.Context, id int64) (*View, error) {
+	var data aggregate
+	err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
+		var err error
+		data, err = s.cluster(ctx, tx, id)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.buildView(ctx, data)
 }
 
 // Update applies a user edit of the goal itself. Editing the title, note or
@@ -290,6 +321,11 @@ func (s *Service) AddMilestone(ctx context.Context, goalID int64, input domaingo
 		if err := domaingoal.ValidateMilestoneInput(input); err != nil {
 			return err
 		}
+		// A finished goal is history: its plan is immutable. A goal being worked
+		// on extends its plan only through a proposal.
+		if g.Status.Terminal() {
+			return ErrGoalTerminal
+		}
 		if g.Status.Active() {
 			return ErrGoalNotProposed
 		}
@@ -308,12 +344,28 @@ func (s *Service) AddMilestone(ctx context.Context, goalID int64, input domaingo
 	return s.Get(ctx, goalID)
 }
 
-// UpdateMilestone edits one step of the plan; status moves are recorded in the
-// progress journal because they are factual progress.
+// UpdateMilestone edits one step of the plan or moves its state.
+//
+// Two different things live behind one call and must not be confused: a status
+// move is factual progress and may happen at any time, while editing the
+// step's wording, criteria or deadline is a plan change. For an approved goal
+// the latter goes through propose_goal_change, and a finished goal accepts
+// neither.
 func (s *Service) UpdateMilestone(ctx context.Context, goalID, milestoneID int64, expectedVersion int, input MilestoneUpdateInput) (*View, error) {
+	editsPlan := input.Title != nil || input.Criteria != nil || input.DueDate != nil || input.ClearDue
 	now := s.clock.Now().UTC()
 	err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
 		repo := tx.Goals()
+		g, err := repo.GetGoal(ctx, goalID)
+		if err != nil {
+			return err
+		}
+		if g.Status.Terminal() {
+			return ErrGoalTerminal
+		}
+		if editsPlan && g.Status.Active() {
+			return ErrGoalNotProposed
+		}
 		m, err := repo.GetMilestone(ctx, goalID, milestoneID)
 		if err != nil {
 			return err
@@ -337,11 +389,11 @@ func (s *Service) UpdateMilestone(ctx context.Context, goalID, milestoneID int64
 		if input.Status != nil && *input.Status != m.Status {
 			m.Status = *input.Status
 			statusChanged = true
-			if m.Status.Done() && m.CompletedAt == nil {
+			if m.Status.Completed() && m.CompletedAt == nil {
 				completed := now
 				m.CompletedAt = &completed
 			}
-			if !m.Status.Done() {
+			if !m.Status.Completed() {
 				m.CompletedAt = nil
 			}
 		}
@@ -372,6 +424,9 @@ func (s *Service) RemoveMilestone(ctx context.Context, goalID, milestoneID int64
 		g, err := repo.GetGoal(ctx, goalID)
 		if err != nil {
 			return err
+		}
+		if g.Status.Terminal() {
+			return ErrGoalTerminal
 		}
 		if g.Status.Active() {
 			return ErrGoalNotProposed
@@ -665,8 +720,24 @@ func (s *Service) RemoveLink(ctx context.Context, goalID, linkID int64) (*View, 
 func (s *Service) Record(ctx context.Context, goalID int64, input RecordInput) (*View, error) {
 	now := s.clock.Now().UTC()
 	err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
-		if _, err := tx.Goals().GetGoal(ctx, goalID); err != nil {
+		repo := tx.Goals()
+		if _, err := repo.GetGoal(ctx, goalID); err != nil {
 			return err
+		}
+		// A progress entry claims "this happened in that object", so the object
+		// must exist. The check runs inside the same transaction as the insert,
+		// exactly like AddLink, so the claim cannot outlive its source.
+		if input.SourceType != nil || input.SourceID != nil {
+			if input.SourceType == nil || input.SourceID == nil || !input.SourceType.IsValid() || *input.SourceID <= 0 {
+				return ErrInvalidTarget
+			}
+			exists, err := repo.TargetExists(ctx, *input.SourceType, *input.SourceID)
+			if err != nil {
+				return err
+			}
+			if !exists {
+				return ErrInvalidTarget
+			}
 		}
 		return s.record(ctx, tx, goalID, domaingoal.ProgressNote, input.Summary, input.SourceType, input.SourceID, now)
 	})
@@ -701,50 +772,128 @@ func (s *Service) record(ctx context.Context, tx Transaction, goalID int64, kind
 
 // OnTaskCompleted records factual progress for every goal the task is linked
 // to. It is called from the event pump, so a failure here must never fail the
-// task completion that caused it.
+// task completion that caused it — but the failure is logged and the catch-up
+// reconciliation will retry it, because progress must survive a missed event.
 func (s *Service) OnTaskCompleted(ctx context.Context, taskID int64) {
-	_ = s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
-		links, err := s.linksToTask(ctx, tx, taskID)
-		if err != nil || len(links) == 0 {
-			return nil
+	// Resolve the task title before opening the transaction: the task engine
+	// reads through the same single-connection pool.
+	summary := s.taskSummary(ctx, taskID, "completed")
+	var recorded int
+	err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
+		links, err := tx.Goals().ListLinksByTarget(ctx, domaingoal.TargetTask, taskID)
+		if err != nil {
+			return err
 		}
 		now := s.clock.Now().UTC()
 		for _, link := range links {
-			summary := "Связанная задача выполнена"
-			if s.tasks != nil {
-				if task, err := s.tasks.GetTask(ctx, taskID); err == nil && strings.TrimSpace(task.Title) != "" {
-					summary = fmt.Sprintf("Задача «%s» выполнена", task.Title)
-				}
-			}
-			sourceType := domaingoal.TargetTask
-			sourceID := taskID
-			if err := s.record(ctx, tx, link.GoalID, domaingoal.ProgressTaskDone, summary, &sourceType, &sourceID, now); err != nil {
-				continue
-			}
+			recorded += s.recordTaskProgress(ctx, tx, link.GoalID, taskID, summary, now)
 		}
 		return nil
 	})
+	if err != nil {
+		slog.Warn("goal progress for a completed task failed; the catch-up reconciliation will retry",
+			"task_id", taskID, "error", err)
+		return
+	}
+	if recorded > 0 {
+		slog.Debug("goal progress recorded", "task_id", taskID, "goals", recorded)
+	}
 }
 
-// linksToTask finds goal links of one task inside the given transaction.
-func (s *Service) linksToTask(ctx context.Context, tx Transaction, taskID int64) ([]domaingoal.Link, error) {
-	goals, _, err := tx.Goals().ListGoals(ctx, Filter{Limit: maxLimit})
+// recordTaskProgress appends one task_done journal entry unless the same
+// completion is already recorded. It returns 1 when a row was written, so the
+// caller knows whether the goal changed.
+func (s *Service) recordTaskProgress(ctx context.Context, tx Transaction, goalID, taskID int64, summary string, now time.Time) int {
+	repo := tx.Goals()
+	exists, err := repo.HasProgressSource(ctx, goalID, domaingoal.ProgressTaskDone, domaingoal.TargetTask, taskID)
 	if err != nil {
-		return nil, err
+		slog.Warn("check goal progress source failed", "goal_id", goalID, "task_id", taskID, "error", err)
+		return 0
 	}
+	if exists {
+		return 0
+	}
+	sourceType := domaingoal.TargetTask
+	sourceID := taskID
+	if err := s.record(ctx, tx, goalID, domaingoal.ProgressTaskDone, summary, &sourceType, &sourceID, now); err != nil {
+		slog.Warn("record goal progress failed", "goal_id", goalID, "task_id", taskID, "error", err)
+		return 0
+	}
+	return 1
+}
+
+// taskSummary describes a linked task in the journal, falling back to a
+// generic sentence when the task cannot be read.
+func (s *Service) taskSummary(ctx context.Context, taskID int64, _ string) string {
+	if s.tasks != nil {
+		if task, err := s.tasks.GetTask(ctx, taskID); err == nil && strings.TrimSpace(task.Title) != "" {
+			return fmt.Sprintf("Задача «%s» выполнена", task.Title)
+		}
+	}
+	return fmt.Sprintf("Связанная задача #%d выполнена", taskID)
+}
+
+// ReconcileTaskProgress is the catch-up path for the live event pump. A
+// completion can be missed when LifeOS was down, when the broker dropped the
+// event for a slow subscriber, or when a write failed; this walks every task
+// link of every goal and records the missing journal entries. It is
+// idempotent, so running it on a schedule costs nothing when everything is
+// already recorded. It returns how many entries it added.
+func (s *Service) ReconcileTaskProgress(ctx context.Context) (int, error) {
+	if s.tasks == nil {
+		return 0, nil
+	}
+	// Collect every task link first, outside any transaction.
 	var links []domaingoal.Link
-	for _, g := range goals {
-		list, err := tx.Goals().ListLinks(ctx, g.ID)
-		if err != nil {
+	err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
+		var err error
+		links, err = tx.Goals().ListLinksByTarget(ctx, domaingoal.TargetTask, 0)
+		return err
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	// Group completed tasks by id so the task engine is asked once per task.
+	completed := make(map[int64]string)
+	for _, link := range links {
+		if _, seen := completed[link.TargetID]; seen {
 			continue
 		}
-		for _, link := range list {
-			if link.TargetType == domaingoal.TargetTask && link.TargetID == taskID {
-				links = append(links, link)
-			}
+		task, err := s.tasks.GetTask(ctx, link.TargetID)
+		if err != nil || task.Status != "completed" {
+			continue
+		}
+		title := strings.TrimSpace(task.Title)
+		if title == "" {
+			completed[link.TargetID] = fmt.Sprintf("Связанная задача #%d выполнена", link.TargetID)
+		} else {
+			completed[link.TargetID] = fmt.Sprintf("Задача «%s» выполнена", title)
 		}
 	}
-	return links, nil
+	if len(completed) == 0 {
+		return 0, nil
+	}
+
+	added := 0
+	err = s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
+		now := s.clock.Now().UTC()
+		for _, link := range links {
+			summary, ok := completed[link.TargetID]
+			if !ok {
+				continue
+			}
+			added += s.recordTaskProgress(ctx, tx, link.GoalID, link.TargetID, summary, now)
+		}
+		return nil
+	})
+	if err != nil {
+		return added, err
+	}
+	if added > 0 {
+		slog.Info("goal progress reconciled", "entries", added)
+	}
+	return added, nil
 }
 
 // Stats returns goal counts per status for the workspace.
@@ -783,17 +932,22 @@ func (s *Service) Stalled(ctx context.Context) ([]StalledGoal, error) {
 }
 
 // computeProgress derives the factual progress from milestones and linked
-// tasks.
-func (s *Service) computeProgress(ctx context.Context, tx Transaction, goalID int64, g *domaingoal.Goal, milestones []domaingoal.Milestone) (Progress, error) {
-	repo := tx.Goals()
-	progress := Progress{MilestonesTotal: len(milestones)}
+// tasks. It runs outside the goal transaction on purpose: s.tasks reads from
+// the same single-connection SQLite pool, so a lookup inside an open
+// transaction would wait for the connection the transaction itself holds.
+func (s *Service) computeProgress(ctx context.Context, goalID int64, milestones []domaingoal.Milestone, links []domaingoal.Link, lastActive *time.Time) Progress {
+	progress := Progress{MilestonesTotal: len(milestones), LastActivityAt: lastActive}
 	for _, m := range milestones {
+		// Skipped steps close the plan but are not counted as achieved steps.
 		if m.Status.Done() {
 			progress.MilestonesDone++
 		}
+		if m.Status.Completed() {
+			progress.MilestonesCompleted++
+		}
 	}
 	if s.tasks != nil {
-		for _, link := range mustLinks(ctx, repo, goalID) {
+		for _, link := range links {
 			if link.TargetType != domaingoal.TargetTask {
 				continue
 			}
@@ -811,21 +965,7 @@ func (s *Service) computeProgress(ctx context.Context, tx Transaction, goalID in
 		percent := progress.LinkedTasksDone * 100 / progress.LinkedTasks
 		progress.Percent = &percent
 	}
-	if last, err := repo.LastActivity(ctx, goalID); err == nil {
-		progress.LastActivityAt = last
-	}
-	_ = g
-	return progress, nil
-}
-
-// mustLinks is a small helper that swallows repository failures while counting
-// progress: progress is computed best-effort and never fails the whole view.
-func mustLinks(ctx context.Context, repo Repository, goalID int64) []domaingoal.Link {
-	links, err := repo.ListLinks(ctx, goalID)
-	if err != nil {
-		return nil
-	}
-	return links
+	return progress
 }
 
 // review turns facts into named deviations. Every signal explains itself so
@@ -833,20 +973,24 @@ func mustLinks(ctx context.Context, repo Repository, goalID int64) []domaingoal.
 func (s *Service) review(g *domaingoal.Goal, progress Progress) *Review {
 	review := &Review{Progress: progress}
 	now := s.clock.Now().UTC()
-	last := progress.LastActivityAt
-	if last == nil {
-		last = &g.CreatedAt
+	// Only a goal that is actually being worked on can "stall". A proposed goal
+	// is waiting for the user, and a paused one was stopped on purpose, so
+	// neither belongs in the deviation stream.
+	if g.Status == domaingoal.StatusActive {
+		last := progress.LastActivityAt
+		if last == nil {
+			last = &g.CreatedAt
+		}
+		if silent := now.Sub(*last); silent > stallAfterDays*24*time.Hour {
+			review.Signals.Stalled = true
+			review.Signals.StallReason = fmt.Sprintf("нет записей о прогрессе %d дней", int(silent.Hours()/24))
+		}
+		if g.TargetDate != nil && g.TargetDate.Before(now) {
+			review.Signals.Overdue = true
+		}
 	}
-	silent := now.Sub(*last)
-	if silent > stallAfterDays*24*time.Hour {
-		review.Signals.Stalled = true
-		review.Signals.StallReason = fmt.Sprintf("нет записей о прогрессе %d дней", int(silent.Hours()/24))
-	}
-	if g.Status == domaingoal.StatusActive && g.TargetDate != nil && g.TargetDate.Before(now) {
-		review.Signals.Overdue = true
-	}
-	if progress.MilestonesTotal > 0 && progress.MilestonesDone == progress.MilestonesTotal {
-		// everything done but not marked achieved — the user decides, the signal explains
+	if progress.MilestonesTotal > 0 && progress.MilestonesCompleted == progress.MilestonesTotal {
+		// everything closed (done or skipped) but not marked achieved — the user decides
 		review.Signals.NoOpenWork = true
 	} else if progress.MilestonesTotal == 0 && progress.LinkedTasks > 0 && progress.LinkedTasksDone == progress.LinkedTasks {
 		review.Signals.NoOpenWork = true

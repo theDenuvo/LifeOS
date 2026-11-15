@@ -102,12 +102,26 @@ func main() {
 	)
 	inboxService := inbox.NewService(sqlite.NewInboxUnitOfWork(db), clock, cfg.Timezone, inbox.WithPublisher(broker))
 	summaryService := summary.NewService(taskService, inboxService, clock, cfg.Timezone)
+
+	// Roadmap stage 4: long-term goals and initiative management.
+	//
+	// A drafted goal waits for user approval, approved plans change only
+	// through proposals, and progress is derived from milestones and the tasks
+	// actually linked to the goal. It is built before the proactive service so
+	// the stalled-goal detector can join the insight stream.
+	goalsService := goals.NewService(
+		sqlite.NewGoalUnitOfWork(db),
+		clock,
+		goals.WithTaskProvider(goals.TaskEngineAdapter{Service: taskService}),
+		goals.WithPublisher(broker),
+	)
 	proactiveService := proactive.NewService(
 		sqlite.NewInsightUnitOfWork(db),
 		taskService,
 		inboxService,
 		clock,
 		cfg.Timezone,
+		proactive.WithGoals(goalsService),
 	)
 	searchService := search.NewService(taskService, inboxService)
 	eventService := appevents.NewService(
@@ -191,19 +205,6 @@ func main() {
 		clock,
 		appmemory.WithExtractor(agentmemory.NewExtractor(cfg.DocLLMBaseURL, cfg.DocLLMAPIKey, cfg.DocLLMModel)),
 		appmemory.WithPublisher(broker),
-	)
-
-	// Roadmap stage 4: long-term goals and initiative management.
-	//
-	// A drafted goal waits for user approval, approved plans change only
-	// through proposals, and progress is derived from milestones and the tasks
-	// actually linked to the goal. Completed linked tasks reach the journal
-	// through the event pump below, so progress stays factual.
-	goalsService := goals.NewService(
-		sqlite.NewGoalUnitOfWork(db),
-		clock,
-		goals.WithTaskProvider(taskGoalAdapter{service: taskService}),
-		goals.WithPublisher(broker),
 	)
 
 	// The dashboard shows the day's load and the ideas that are due to resurface.
@@ -352,6 +353,9 @@ func main() {
 	// goal journal. The pump reads only the event payload, so it never blocks
 	// the task engine and a goal failure never fails a completion.
 	go runGoalProgressPump(ctx, broker, goalsService)
+	// The pump is the fast path, not the only one. The reconciler catches up on
+	// completions that happened while LifeOS was down or whose event was lost.
+	go goals.NewReconciler(goalsService, goals.DefaultReconcileInterval).Run(ctx)
 
 	<-ctx.Done()
 	slog.Info("Shutting down...")
@@ -373,20 +377,6 @@ func workingDirectory() string {
 		return ""
 	}
 	return dir
-}
-
-// taskGoalAdapter narrows the task engine to what goal progress needs.
-type taskGoalAdapter struct{ service *tasks.Service }
-
-func (a taskGoalAdapter) GetTask(ctx context.Context, id int64) (goals.TaskView, error) {
-	item, err := a.service.GetTask(ctx, id)
-	if err != nil {
-		return goals.TaskView{}, err
-	}
-	return goals.TaskView{
-		ID: item.Task.ID, Title: item.Task.Title, Status: string(item.Task.Status),
-		CompletedAt: item.Task.CompletedAt,
-	}, nil
 }
 
 // runGoalProgressPump records completed linked tasks into goal journals.

@@ -26,6 +26,7 @@ var (
 	ErrInvalidTransition  = errors.New("goal status transition is not allowed")
 	ErrInvalidTarget      = errors.New("goal link target does not exist")
 	ErrGoalNotProposed    = errors.New("the plan of an approved goal changes only through a proposal")
+	ErrGoalTerminal       = errors.New("a finished goal cannot change any more")
 	ErrNoPendingProposal  = errors.New("the proposal is not pending anymore")
 	ErrAlreadyProposed    = errors.New("a pending proposal already exists for this goal")
 	ErrEmptyPayload       = errors.New("the proposal would change nothing")
@@ -38,10 +39,10 @@ type Clock interface{ Now() time.Time }
 
 // Filter bounds goal listing.
 type Filter struct {
-	Query    string
-	Status   *domaingoal.Status
-	Limit    int
-	Offset   int
+	Query  string
+	Status *domaingoal.Status
+	Limit  int
+	Offset int
 }
 
 // CreateInput is one drafted goal with its plan.
@@ -65,12 +66,12 @@ type UpdateInput struct {
 // UpdatePlanInput is a direct plan edit allowed only while the goal is still
 // awaiting approval.
 type UpdatePlanInput struct {
-	Title          *string
-	Description    *string
-	TargetDate     *time.Time
-	ClearTarget    bool
-	AddMilestones  []domaingoal.MilestoneInput
-	RemoveIDs      []int64
+	Title         *string
+	Description   *string
+	TargetDate    *time.Time
+	ClearTarget   bool
+	AddMilestones []domaingoal.MilestoneInput
+	RemoveIDs     []int64
 }
 
 // MilestoneStatusInput updates the state of one milestone.
@@ -132,6 +133,10 @@ type Repository interface {
 
 	InsertLink(ctx context.Context, link *domaingoal.Link) (int64, error)
 	ListLinks(ctx context.Context, goalID int64) ([]domaingoal.Link, error)
+	// ListLinksByTarget returns every goal linked to one LifeOS object. It exists
+	// so completing a task finds all its goals in one query instead of walking a
+	// bounded goal page and missing links past the limit.
+	ListLinksByTarget(ctx context.Context, target domaingoal.TargetType, targetID int64) ([]domaingoal.Link, error)
 	DeleteLink(ctx context.Context, goalID, linkID int64) error
 	// TargetExists verifies a link target inside the same transaction, mirroring
 	// the memory repository: a second connection would deadlock on a
@@ -141,6 +146,11 @@ type Repository interface {
 	InsertProgress(ctx context.Context, event *domaingoal.ProgressEvent) (int64, error)
 	ListProgress(ctx context.Context, goalID int64, limit int) ([]domaingoal.ProgressEvent, error)
 	LastActivity(ctx context.Context, goalID int64) (*time.Time, error)
+	// HasProgressSource reports whether the journal already holds an entry of
+	// this kind for the given source. Progress recording is idempotent because
+	// the same completion may be observed by the live pump and by the catch-up
+	// reconciliation.
+	HasProgressSource(ctx context.Context, goalID int64, kind domaingoal.ProgressKind, sourceType domaingoal.TargetType, sourceID int64) (bool, error)
 
 	InsertProposal(ctx context.Context, proposal *domaingoal.Proposal) (int64, error)
 	GetProposal(ctx context.Context, goalID, proposalID int64) (*domaingoal.Proposal, error)
@@ -160,12 +170,13 @@ type UnitOfWork interface {
 // Progress is the factual state of a goal: what the milestones say and what
 // the linked work has actually produced.
 type Progress struct {
-	MilestonesTotal  int
-	MilestonesDone   int
-	LinkedTasks      int
-	LinkedTasksDone  int
-	Percent          *int
-	LastActivityAt   *time.Time
+	MilestonesTotal     int
+	MilestonesDone      int
+	MilestonesCompleted int
+	LinkedTasks         int
+	LinkedTasksDone     int
+	Percent             *int
+	LastActivityAt      *time.Time
 }
 
 // Signals lists concrete deviations worth attention. Every signal names its

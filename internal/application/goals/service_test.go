@@ -242,6 +242,32 @@ func (r *fakeRepo) ListLinks(_ context.Context, goalID int64) ([]domaingoal.Link
 	return links, nil
 }
 
+func (r *fakeRepo) ListLinksByTarget(_ context.Context, target domaingoal.TargetType, targetID int64) ([]domaingoal.Link, error) {
+	links := make([]domaingoal.Link, 0, 4)
+	for _, link := range r.links {
+		if link.TargetType != target {
+			continue
+		}
+		if targetID > 0 && link.TargetID != targetID {
+			continue
+		}
+		links = append(links, *link)
+	}
+	return links, nil
+}
+
+func (r *fakeRepo) HasProgressSource(_ context.Context, goalID int64, kind domaingoal.ProgressKind, sourceType domaingoal.TargetType, sourceID int64) (bool, error) {
+	for _, event := range r.progress[goalID] {
+		if event.Kind != kind || event.SourceType == nil || event.SourceID == nil {
+			continue
+		}
+		if *event.SourceType == sourceType && *event.SourceID == sourceID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (r *fakeRepo) DeleteLink(_ context.Context, goalID, linkID int64) error {
 	link, ok := r.links[linkID]
 	if !ok || link.GoalID != goalID {
@@ -651,3 +677,192 @@ func TestContextSnapshotListsGoalsAndStall(t *testing.T) {
 func statusPtr(status domaingoal.MilestoneStatus) *domaingoal.MilestoneStatus { return &status }
 
 func ptr(value string) *string { return &value }
+
+// TestApprovedPlanCannotBeEditedThroughMilestoneUpdate covers the review
+// finding that UpdateMilestone skipped the approval gate: renaming a step of an
+// active goal bypassed propose_goal_change.
+func TestApprovedPlanCannotBeEditedThroughMilestoneUpdate(t *testing.T) {
+	service, _, _, _ := newService(t)
+	view, _ := service.Create(context.Background(), appgoals.CreateInput{
+		Title: "Запустить подкаст", Milestones: []domaingoal.MilestoneInput{milestone("Пилотный выпуск")},
+	})
+	goalID := view.Goal.ID
+	if _, err := service.Approve(context.Background(), goalID); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	current, _ := service.Get(context.Background(), goalID)
+	step := current.Milestones[0]
+
+	renamed := "Совсем другой этап"
+	if _, err := service.UpdateMilestone(context.Background(), goalID, step.ID, step.Version,
+		appgoals.MilestoneUpdateInput{Title: &renamed}); !errors.Is(err, appgoals.ErrGoalNotProposed) {
+		t.Fatalf("renaming a step of an approved goal must be refused, got %v", err)
+	}
+
+	// A status move is factual progress and stays allowed.
+	if _, err := service.UpdateMilestone(context.Background(), goalID, step.ID, step.Version,
+		appgoals.MilestoneUpdateInput{Status: statusPtr(domaingoal.MilestoneDone)}); err != nil {
+		t.Fatalf("status move on an approved goal must be allowed, got %v", err)
+	}
+}
+
+// TestTerminalGoalPlanIsImmutable covers AddMilestone/RemoveMilestone allowing
+// changes on achieved or abandoned goals.
+func TestTerminalGoalPlanIsImmutable(t *testing.T) {
+	service, _, _, _ := newService(t)
+	view, _ := service.Create(context.Background(), appgoals.CreateInput{
+		Title: "Завершённая цель", Milestones: []domaingoal.MilestoneInput{milestone("Этап")},
+	})
+	goalID := view.Goal.ID
+	_, _ = service.Approve(context.Background(), goalID)
+	if _, err := service.SetStatus(context.Background(), goalID, domaingoal.StatusAchieved); err != nil {
+		t.Fatalf("achieve: %v", err)
+	}
+
+	if _, err := service.AddMilestone(context.Background(), goalID, milestone("Поздний этап")); !errors.Is(err, appgoals.ErrGoalTerminal) {
+		t.Fatalf("adding a step to an achieved goal must be refused, got %v", err)
+	}
+	current, _ := service.Get(context.Background(), goalID)
+	if _, err := service.RemoveMilestone(context.Background(), goalID, current.Milestones[0].ID); !errors.Is(err, appgoals.ErrGoalTerminal) {
+		t.Fatalf("removing a step from an achieved goal must be refused, got %v", err)
+	}
+	if _, err := service.UpdateMilestone(context.Background(), goalID, current.Milestones[0].ID, current.Milestones[0].Version,
+		appgoals.MilestoneUpdateInput{Status: statusPtr(domaingoal.MilestonePending)}); !errors.Is(err, appgoals.ErrGoalTerminal) {
+		t.Fatalf("changing a step of an achieved goal must be refused, got %v", err)
+	}
+}
+
+// TestRecordRejectsMissingSource covers a journal entry claiming a source that
+// does not exist.
+func TestRecordRejectsMissingSource(t *testing.T) {
+	service, _, _, _ := newService(t)
+	view, _ := service.Create(context.Background(), appgoals.CreateInput{Title: "Цель"})
+	sourceType := domaingoal.TargetTask
+
+	missing := int64(999)
+	if _, err := service.Record(context.Background(), view.Goal.ID, appgoals.RecordInput{
+		Summary: "Сделано", SourceType: &sourceType, SourceID: &missing,
+	}); !errors.Is(err, appgoals.ErrInvalidTarget) {
+		t.Fatalf("record against a missing task must be refused, got %v", err)
+	}
+
+	zero := int64(0)
+	if _, err := service.Record(context.Background(), view.Goal.ID, appgoals.RecordInput{
+		Summary: "Сделано", SourceType: &sourceType, SourceID: &zero,
+	}); !errors.Is(err, appgoals.ErrInvalidTarget) {
+		t.Fatalf("record with a zero source id must be refused, got %v", err)
+	}
+
+	existing := int64(1)
+	if _, err := service.Record(context.Background(), view.Goal.ID, appgoals.RecordInput{
+		Summary: "Сделано", SourceType: &sourceType, SourceID: &existing,
+	}); err != nil {
+		t.Fatalf("record against an existing task: %v", err)
+	}
+}
+
+// TestSkippedMilestoneDoesNotCountAsProgress covers the percentage arithmetic:
+// a skipped step closes the plan but is not an achieved step.
+func TestSkippedMilestoneDoesNotCountAsProgress(t *testing.T) {
+	service, _, _, _ := newService(t)
+	view, _ := service.Create(context.Background(), appgoals.CreateInput{
+		Title:      "Собрать отчёт",
+		Milestones: []domaingoal.MilestoneInput{milestone("Собрать данные"), milestone("Написать текст"), milestone("Сверстать")},
+	})
+	goalID := view.Goal.ID
+	_, _ = service.Approve(context.Background(), goalID)
+	current, _ := service.Get(context.Background(), goalID)
+
+	updated, err := service.UpdateMilestone(context.Background(), goalID, current.Milestones[0].ID, current.Milestones[0].Version,
+		appgoals.MilestoneUpdateInput{Status: statusPtr(domaingoal.MilestoneSkipped)})
+	if err != nil {
+		t.Fatalf("skip milestone: %v", err)
+	}
+	if updated.Review.Progress.MilestonesDone != 0 {
+		t.Fatalf("skipped step counted as done: %+v", updated.Review.Progress)
+	}
+	if updated.Review.Progress.Percent == nil || *updated.Review.Progress.Percent != 0 {
+		t.Fatalf("percent = %v, want 0", updated.Review.Progress.Percent)
+	}
+	if updated.Review.Progress.MilestonesCompleted != 1 {
+		t.Fatalf("skipped step must still close the plan: %+v", updated.Review.Progress)
+	}
+	if updated.Review.Signals.NoOpenWork {
+		t.Fatal("two open steps remain: no_open_work must be false")
+	}
+}
+
+// TestProposedAndPausedGoalsDoNotStall covers the stall signal being computed
+// for goals that are not being worked on.
+func TestProposedAndPausedGoalsDoNotStall(t *testing.T) {
+	service, _, _, clock := newService(t)
+	proposed, _ := service.Create(context.Background(), appgoals.CreateInput{Title: "Идея на будущее"})
+	active, _ := service.Create(context.Background(), appgoals.CreateInput{Title: "В работе"})
+	_, _ = service.Approve(context.Background(), active.Goal.ID)
+	if _, err := service.SetStatus(context.Background(), active.Goal.ID, domaingoal.StatusPaused); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+
+	clock.add(60 * 24 * time.Hour)
+
+	proposedView, err := service.Get(context.Background(), proposed.Goal.ID)
+	if err != nil {
+		t.Fatalf("get proposed: %v", err)
+	}
+	if proposedView.Review.Signals.Stalled {
+		t.Fatal("a proposed goal waits for the user; it must not be reported as stalled")
+	}
+	pausedView, err := service.Get(context.Background(), active.Goal.ID)
+	if err != nil {
+		t.Fatalf("get paused: %v", err)
+	}
+	if pausedView.Review.Signals.Stalled {
+		t.Fatal("a paused goal was stopped on purpose; it must not be reported as stalled")
+	}
+}
+
+// TestReconcileTaskProgressIsIdempotent covers the catch-up path: a completion
+// missed by the live pump is restored once, and a second run writes nothing.
+func TestReconcileTaskProgressIsIdempotent(t *testing.T) {
+	service, _, _, _ := newService(t)
+	view, _ := service.Create(context.Background(), appgoals.CreateInput{Title: "Цель с задачей"})
+	goalID := view.Goal.ID
+	if _, err := service.AddLink(context.Background(), goalID, appgoals.LinkInput{
+		TargetType: domaingoal.TargetTask, TargetID: 1, Relation: "связано",
+	}); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+
+	// The live event is lost: nothing recorded yet.
+	added, err := service.ReconcileTaskProgress(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if added != 1 {
+		t.Fatalf("first reconcile added %d entries, want 1", added)
+	}
+
+	again, err := service.ReconcileTaskProgress(context.Background())
+	if err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+	if again != 0 {
+		t.Fatalf("second reconcile added %d entries, want 0", again)
+	}
+
+	// The live pump observing the same completion must not duplicate it.
+	service.OnTaskCompleted(context.Background(), 1)
+	after, err := service.Get(context.Background(), goalID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	count := 0
+	for _, event := range after.ProgressLog {
+		if event.Kind == domaingoal.ProgressTaskDone {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("task_done entries = %d, want exactly 1", count)
+	}
+}

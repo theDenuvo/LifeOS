@@ -53,30 +53,33 @@ type goalProposalBody struct {
 }
 
 type goalBody struct {
-	ID           int64                `json:"id"`
-	Title        string               `json:"title"`
-	Description  string               `json:"description"`
-	Status       string               `json:"status"`
-	TargetDate   *string              `json:"target_date"`
-	ApprovedAt   *string              `json:"approved_at"`
-	CreatedAt    string               `json:"created_at"`
-	UpdatedAt    string               `json:"updated_at"`
-	Version      int                  `json:"version"`
-	Milestones   []goalMilestoneBody  `json:"milestones"`
-	Links        []goalLinkBody       `json:"links"`
-	Proposals    []goalProposalBody   `json:"proposals"`
-	ProgressLog  []goalProgressBody   `json:"progress_log"`
-	Progress     *goalProgressSummary `json:"progress,omitempty"`
-	Signals      *goalSignals         `json:"signals,omitempty"`
+	ID          int64                `json:"id"`
+	Title       string               `json:"title"`
+	Description string               `json:"description"`
+	Status      string               `json:"status"`
+	TargetDate  *string              `json:"target_date"`
+	ApprovedAt  *string              `json:"approved_at"`
+	CreatedAt   string               `json:"created_at"`
+	UpdatedAt   string               `json:"updated_at"`
+	Version     int                  `json:"version"`
+	Milestones  []goalMilestoneBody  `json:"milestones"`
+	Links       []goalLinkBody       `json:"links"`
+	Proposals   []goalProposalBody   `json:"proposals"`
+	ProgressLog []goalProgressBody   `json:"progress_log"`
+	Progress    *goalProgressSummary `json:"progress,omitempty"`
+	Signals     *goalSignals         `json:"signals,omitempty"`
 }
 
 type goalProgressSummary struct {
-	MilestonesTotal int     `json:"milestones_total"`
-	MilestonesDone  int     `json:"milestones_done"`
-	LinkedTasks     int     `json:"linked_tasks"`
-	LinkedTasksDone int     `json:"linked_tasks_done"`
-	Percent         *int    `json:"percent"`
-	LastActivityAt  *string `json:"last_activity_at"`
+	MilestonesTotal int `json:"milestones_total"`
+	MilestonesDone  int `json:"milestones_done"`
+	// MilestonesCompleted counts done and skipped steps: the plan is closed,
+	// but only MilestonesDone feeds the percentage.
+	MilestonesCompleted int     `json:"milestones_completed"`
+	LinkedTasks         int     `json:"linked_tasks"`
+	LinkedTasksDone     int     `json:"linked_tasks_done"`
+	Percent             *int    `json:"percent"`
+	LastActivityAt      *string `json:"last_activity_at"`
 }
 
 type goalSignals struct {
@@ -164,12 +167,13 @@ func newGoalBody(view *appgoals.View) goalBody {
 	if view.Review != nil {
 		progress := view.Review.Progress
 		body.Progress = &goalProgressSummary{
-			MilestonesTotal: progress.MilestonesTotal,
-			MilestonesDone:  progress.MilestonesDone,
-			LinkedTasks:     progress.LinkedTasks,
-			LinkedTasksDone: progress.LinkedTasksDone,
-			Percent:         progress.Percent,
-			LastActivityAt:  formatOptionalTime(progress.LastActivityAt),
+			MilestonesTotal:     progress.MilestonesTotal,
+			MilestonesDone:      progress.MilestonesDone,
+			MilestonesCompleted: progress.MilestonesCompleted,
+			LinkedTasks:         progress.LinkedTasks,
+			LinkedTasksDone:     progress.LinkedTasksDone,
+			Percent:             progress.Percent,
+			LastActivityAt:      formatOptionalTime(progress.LastActivityAt),
 		}
 		signals := view.Review.Signals
 		body.Signals = &goalSignals{
@@ -303,11 +307,11 @@ func (h *Handler) patchGoal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Title          *string `json:"title"`
-		Description    *string `json:"description"`
-		TargetDate     *string `json:"target_date"`
-		ClearTarget    bool    `json:"clear_target_date"`
-		ExpectedVersion int    `json:"expected_version"`
+		Title           *string `json:"title"`
+		Description     *string `json:"description"`
+		TargetDate      *string `json:"target_date"`
+		ClearTarget     bool    `json:"clear_target_date"`
+		ExpectedVersion int     `json:"expected_version"`
 	}
 	data, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
@@ -534,12 +538,12 @@ func (h *Handler) createGoalProposal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Summary        string `json:"summary"`
-		Title          *string `json:"title"`
-		Description    *string `json:"description"`
-		TargetDate     string  `json:"target_date"`
-		ClearTarget    bool    `json:"clear_target_date"`
-		Milestones     []struct {
+		Summary     string  `json:"summary"`
+		Title       *string `json:"title"`
+		Description *string `json:"description"`
+		TargetDate  string  `json:"target_date"`
+		ClearTarget bool    `json:"clear_target_date"`
+		Milestones  []struct {
 			Title    string `json:"title"`
 			Criteria string `json:"criteria"`
 			DueDate  string `json:"due_date"`
@@ -743,6 +747,7 @@ func (h *Handler) writeGoalError(w http.ResponseWriter, r *http.Request, err err
 		h.writeProblem(w, r, http.StatusConflict, "conflict", "Conflict", err.Error())
 	case errors.Is(err, appgoals.ErrInvalidTransition),
 		errors.Is(err, appgoals.ErrGoalNotProposed),
+		errors.Is(err, appgoals.ErrGoalTerminal),
 		errors.Is(err, appgoals.ErrNoPendingProposal),
 		errors.Is(err, appgoals.ErrAlreadyProposed),
 		errors.Is(err, appgoals.ErrEmptyPayload),

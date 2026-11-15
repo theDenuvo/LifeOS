@@ -82,6 +82,15 @@ type GoalsWatcher interface {
 	Stalled(ctx context.Context) ([]appgoals.StalledGoal, error)
 }
 
+// Option customises the proactive service.
+type Option func(*Service)
+
+// WithGoals attaches the goal service used by the stalled-goal detector.
+// Without it the detector is skipped and nothing else changes.
+func WithGoals(watcher GoalsWatcher) Option {
+	return func(s *Service) { s.goals = watcher }
+}
+
 // Service computes and manages insights.
 type Service struct {
 	uow      UnitOfWork
@@ -93,19 +102,18 @@ type Service struct {
 }
 
 // NewService builds the proactive service.
-func NewService(uow UnitOfWork, taskLister TaskLister, inboxCounter InboxCounter, clock Clock, timezone string) *Service {
+func NewService(uow UnitOfWork, taskLister TaskLister, inboxCounter InboxCounter, clock Clock, timezone string, opts ...Option) *Service {
 	if clock == nil {
 		clock = systemClock{}
 	}
 	if timezone == "" {
 		timezone = tasks.DefaultTimezone
 	}
-	return &Service{uow: uow, tasks: taskLister, inbox: inboxCounter, clock: clock, timezone: timezone}
-}
-
-// WithGoals attaches the goal service used by the stalled-goal detector.
-func WithGoals(watcher GoalsWatcher) func(*Service) {
-	return func(s *Service) { s.goals = watcher }
+	s := &Service{uow: uow, tasks: taskLister, inbox: inboxCounter, clock: clock, timezone: timezone}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 type systemClock struct{}

@@ -109,7 +109,21 @@ const eventTypes = [
 	'assistant.message',
 	'assistant.workspace',
 	'pending_action.created',
-	'pending_action.resolved'
+	'pending_action.resolved',
+	// Goals and memory are edited from the assistant as well as the workspace;
+	// without these the pages that subscribe to liveRevision never refresh.
+	'goal.created',
+	'goal.updated',
+	'goal.deleted',
+	'memory.created',
+	'memory.updated',
+	'memory.deleted',
+	'memory.conflict.detected',
+	'memory.conflict.resolved',
+	// The server sends resync when a burst outran the replay buffer: some events
+	// are gone, so every page must re-read its state instead of trusting the
+	// stream to be complete.
+	'resync'
 ];
 
 let started = false;
@@ -129,6 +143,13 @@ export function startLive(): void {
 	}
 
 	source.addEventListener('assistant.workspace', () => bumpConversations());
+
+	source.addEventListener('resync', () => {
+		// A gap the server could not repair means this tab may be showing stale
+		// state. Reloading from the API is what closes it.
+		bump();
+		void catchUpReminders();
+	});
 
 	source.addEventListener('reminder', (event) => {
 		try {

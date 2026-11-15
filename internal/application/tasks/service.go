@@ -32,6 +32,10 @@ type Service struct {
 	// afterComplete runs after a recurring task was completed, so the next
 	// occurrence is created by the caller that owns recurrence rules.
 	afterComplete func(ctx context.Context, completed TaskWithVersion) error
+	// completionSink runs after any completion is committed. It is how a goal
+	// journal records progress synchronously instead of depending on an event
+	// that could be lost, and it runs before the caller gets control back.
+	completionSink func(ctx context.Context, completed TaskWithVersion) error
 }
 
 // ReminderSink re-derives a task's reminders. The planner implements it, so a
@@ -104,6 +108,16 @@ func NewService(uow UnitOfWork, clock Clock, opts ...ServiceOption) *Service {
 // recurrence service is built on top of the task service.
 func (s *Service) SetRecurrenceHook(hook func(ctx context.Context, completed TaskWithVersion) error) {
 	s.afterComplete = hook
+}
+
+// SetCompletionHook attaches the observer that runs after any completion is
+// committed.
+//
+// It is synchronous on purpose: goal progress must not depend on a live event
+// subscriber or on a later reconciliation. The write has already committed, so
+// a failure here is logged and never fails the completion itself.
+func (s *Service) SetCompletionHook(hook func(ctx context.Context, completed TaskWithVersion) error) {
+	s.completionSink = hook
 }
 
 // CreateTask creates a task and its `created` event in one transaction.
@@ -459,6 +473,11 @@ func (s *Service) transition(
 
 	s.publish("task."+string(eventType), result)
 	s.syncReminders(ctx, result)
+	if eventType == task.EventTypeCompleted && s.completionSink != nil {
+		if err := s.completionSink(ctx, result); err != nil {
+			slog.Warn("completion observer failed", "task_id", result.Task.ID, "error", err)
+		}
+	}
 	if eventType == task.EventTypeCompleted && s.afterComplete != nil {
 		// The next occurrence of a recurring task is created after the
 		// completion is committed, so a failure here never loses the completion.

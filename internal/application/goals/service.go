@@ -833,12 +833,17 @@ func (s *Service) taskSummary(ctx context.Context, taskID int64, _ string) strin
 	return fmt.Sprintf("Связанная задача #%d выполнена", taskID)
 }
 
-// ReconcileTaskProgress is the catch-up path for the live event pump. A
-// completion can be missed when LifeOS was down, when the broker dropped the
-// event for a slow subscriber, or when a write failed; this walks every task
-// link of every goal and records the missing journal entries. It is
-// idempotent, so running it on a schedule costs nothing when everything is
-// already recorded. It returns how many entries it added.
+// ReconcileTaskProgress is the catch-up path behind the synchronous completion
+// observer. It repairs journals whose write failed, and it rebuilds a journal
+// after an interrupted run.
+//
+// Its scope is deliberate and worth stating plainly: it observes the current
+// task state. A completion whose event was lost *and* whose task was reopened
+// before the next pass looks like an open task and is not restored. That is why
+// the primary path is the synchronous hook, not this reconciliation.
+//
+// Recording is idempotent, so a scheduled pass over consistent data writes
+// nothing. It returns how many entries it added.
 func (s *Service) ReconcileTaskProgress(ctx context.Context) (int, error) {
 	if s.tasks == nil {
 		return 0, nil
@@ -856,12 +861,21 @@ func (s *Service) ReconcileTaskProgress(ctx context.Context) (int, error) {
 
 	// Group completed tasks by id so the task engine is asked once per task.
 	completed := make(map[int64]string)
+	failed := 0
 	for _, link := range links {
 		if _, seen := completed[link.TargetID]; seen {
 			continue
 		}
 		task, err := s.tasks.GetTask(ctx, link.TargetID)
-		if err != nil || task.Status != "completed" {
+		if err != nil {
+			// A read failure is not "the task is open": without the record the
+			// journal cannot be checked, so say so instead of skipping silently.
+			failed++
+			slog.Warn("goal progress reconciliation could not read a linked task",
+				"task_id", link.TargetID, "goal_id", link.GoalID, "error", err)
+			continue
+		}
+		if task.Status != "completed" {
 			continue
 		}
 		title := strings.TrimSpace(task.Title)
@@ -872,6 +886,9 @@ func (s *Service) ReconcileTaskProgress(ctx context.Context) (int, error) {
 		}
 	}
 	if len(completed) == 0 {
+		if failed > 0 {
+			slog.Warn("goal progress reconciliation skipped tasks it could not read", "tasks", failed)
+		}
 		return 0, nil
 	}
 

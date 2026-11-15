@@ -233,3 +233,65 @@ func TestGoalValidationAndProposedPlanOverHTTP(t *testing.T) {
 		t.Fatalf("progress log = %+v", withNote.ProgressLog)
 	}
 }
+
+// TestTerminalGoalRejectsPlanChangesOverHTTP pins the status code the review
+// could not confirm: a finished goal answers 412, not 500 or 400, for every
+// kind of plan change.
+func TestTerminalGoalRejectsPlanChangesOverHTTP(t *testing.T) {
+	handler, cleanup := setupTestHandler(t)
+	defer cleanup()
+
+	created := createGoalForTest(t, handler, "Уже завершённая цель")
+	goalID := strconv.FormatInt(created.ID, 10)
+	if w := goalRequest(t, handler, http.MethodPost, "/api/v1/goals/"+goalID+"/approve", ""); w.Code != http.StatusOK {
+		t.Fatalf("approve: status %d body %s", w.Code, w.Body.String())
+	}
+	if w := goalRequest(t, handler, http.MethodPost, "/api/v1/goals/"+goalID+"/status", `{"status":"achieved"}`); w.Code != http.StatusOK {
+		t.Fatalf("achieve: status %d body %s", w.Code, w.Body.String())
+	}
+
+	current := created
+	if w := goalRequest(t, handler, http.MethodGet, "/api/v1/goals/"+goalID, ""); w.Code != http.StatusOK {
+		t.Fatalf("get: status %d", w.Code)
+	} else if err := json.Unmarshal(w.Body.Bytes(), &current); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	milestone := current.Milestones[0]
+
+	checks := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{
+			name:   "add milestone",
+			method: http.MethodPost,
+			path:   "/api/v1/goals/" + goalID + "/milestones",
+			body:   `{"title":"Поздний этап"}`,
+		},
+		{
+			name:   "remove milestone",
+			method: http.MethodDelete,
+			path:   fmt.Sprintf("/api/v1/goals/%s/milestones/%d", goalID, milestone.ID),
+		},
+		{
+			name:   "rename milestone",
+			method: http.MethodPatch,
+			path:   fmt.Sprintf("/api/v1/goals/%s/milestones/%d", goalID, milestone.ID),
+			body:   fmt.Sprintf(`{"title":"Другое","expected_version":%d}`, milestone.Version),
+		},
+		{
+			name:   "move milestone",
+			method: http.MethodPatch,
+			path:   fmt.Sprintf("/api/v1/goals/%s/milestones/%d", goalID, milestone.ID),
+			body:   fmt.Sprintf(`{"status":"in_progress","expected_version":%d}`, milestone.Version),
+		},
+	}
+	for _, check := range checks {
+		w := goalRequest(t, handler, check.method, check.path, check.body)
+		if w.Code != http.StatusPreconditionFailed {
+			t.Fatalf("%s on a finished goal: status %d, want 412 (body %s)", check.name, w.Code, w.Body.String())
+		}
+	}
+}

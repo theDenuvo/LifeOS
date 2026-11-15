@@ -349,12 +349,15 @@ func main() {
 	go planning.NewDispatcher(planningService, broker, clock, 30*time.Second).Run(ctx)
 	go recurrence.NewWorker(recurrenceService, time.Minute).Run(ctx)
 
-	// Goal progress pump: completed linked tasks become factual progress in the
-	// goal journal. The pump reads only the event payload, so it never blocks
-	// the task engine and a goal failure never fails a completion.
-	go runGoalProgressPump(ctx, broker, goalsService)
-	// The pump is the fast path, not the only one. The reconciler catches up on
-	// completions that happened while LifeOS was down or whose event was lost.
+	// Goal progress is recorded synchronously when a completion commits. It
+	// does not depend on a live event subscriber, and the result is on disk
+	// before the completing request returns. The reconciler is the second line:
+	// it restores entries whose write failed, and it repairs journals after an
+	// interrupted run.
+	taskService.SetCompletionHook(func(ctx context.Context, completed tasks.TaskWithVersion) error {
+		goalsService.OnTaskCompleted(ctx, completed.Task.ID)
+		return nil
+	})
 	go goals.NewReconciler(goalsService, goals.DefaultReconcileInterval).Run(ctx)
 
 	<-ctx.Done()
@@ -377,25 +380,6 @@ func workingDirectory() string {
 		return ""
 	}
 	return dir
-}
-
-// runGoalProgressPump records completed linked tasks into goal journals.
-func runGoalProgressPump(ctx context.Context, broker *events.Broker, goalsService *goals.Service) {
-	subscription := broker.Subscribe(ctx)
-	for event := range subscription {
-		if event.Type != "task.completed" {
-			continue
-		}
-		payload, ok := event.Data.(map[string]any)
-		if !ok {
-			continue
-		}
-		id, _ := payload["id"].(int64)
-		if id <= 0 {
-			continue
-		}
-		goalsService.OnTaskCompleted(ctx, id)
-	}
 }
 
 // documentTextProvider feeds extracted document Markdown into the assistant

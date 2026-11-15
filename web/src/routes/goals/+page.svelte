@@ -14,6 +14,7 @@
 		type GoalStatus
 	} from '$lib/api';
 	import { errorMessage, formatDate } from '$lib/format';
+	import { liveRevision } from '$lib/live';
 	import { Target, Check, Plus, Trash2, X, Flag, CircleAlert, ChevronDown, RotateCcw, SkipForward, Play } from 'lucide-svelte';
 
 	type Tab = 'proposed' | 'active' | 'paused' | 'finished';
@@ -275,7 +276,35 @@
 		return signals;
 	}
 
-	onMount(load);
+	onMount(() => {
+		load();
+		// The assistant and other tabs change goals too; a live event refreshes
+		// the list and the open card instead of leaving stale progress on screen.
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const unsubscribe = liveRevision.subscribe((revision) => {
+			if (revision === 0) return;
+			clearTimeout(timer);
+			timer = setTimeout(refresh, 250);
+		});
+		return () => {
+			unsubscribe();
+			clearTimeout(timer);
+		};
+	});
+
+	/** refresh reloads the list and re-reads the expanded card. */
+	async function refresh() {
+		await load();
+		if (expandedId === null) return;
+		try {
+			detail = await import('$lib/api').then((api) => api.getGoal(expandedId!));
+		} catch {
+			// The card may have been deleted or closed elsewhere; the list reload
+			// already reflects that, so nothing else is required here.
+			expandedId = null;
+			detail = null;
+		}
+	}
 </script>
 
 <svelte:head>

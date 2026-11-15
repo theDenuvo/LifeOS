@@ -1,0 +1,6 @@
+import{l as s,w as d,f}from"./BzxQnngr.js";import{g as p}from"./DE4bBn8R.js";import{c as m,a as u}from"./CEUd_QXk.js";import{I as $,s as g}from"./Cp3fJaof.js";import{l as h,s as v}from"./DIqPTXXf.js";const y={name:"Профиль",initials:"•",role:""},o=d(y);let t=!1;async function I(e=!1){if(t&&!e)return s(o);try{const a=await p();o.set(a),t=!0}catch{}return s(o)}const N=[{id:"work",label:"Работа",color:"var(--accent)"},{id:"meetings",label:"Встречи",color:"var(--success)"},{id:"personal",label:"Личное",color:"var(--info)"}];function x(e,a){const l=h(a,["children","$$slots","$$events","$$legacy"]);/**
+ * @license lucide-svelte v0.0.1 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */const n=[["path",{d:"m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"}],["path",{d:"m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"}],["path",{d:"m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"}]];$(e,v({name:"layers"},()=>l,{get iconNode(){return n},children:(c,_)=>{var r=m(),i=f(r);g(i,a,"default",{}),u(c,r)},$$slots:{default:!0}}))}export{x as L,N as c,I as l,o as p};

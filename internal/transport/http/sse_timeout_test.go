@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/theDenuvo/LifeOS/internal/application/assistant"
+	"github.com/theDenuvo/LifeOS/internal/events"
 )
 
 // slowProvider answers only after a delay, like a model that thinks for a while
@@ -147,5 +148,51 @@ func TestEventsStreamOutlivesWriteTimeout(t *testing.T) {
 	}
 	if line == "" {
 		t.Fatal("event did not arrive on the live stream")
+	}
+}
+
+// TestClosesGapDistinguishesRecoverableFromLost covers the limitation the
+// review named: the replay ring is bounded, so a long enough gap cannot be
+// repaired by replay. The stream must be able to tell the difference.
+func TestClosesGapDistinguishesRecoverableFromLost(t *testing.T) {
+	mk := func(ids ...uint64) []events.Event {
+		out := make([]events.Event, 0, len(ids))
+		for _, id := range ids {
+			out = append(out, events.Event{ID: id, Type: "task.updated"})
+		}
+		return out
+	}
+
+	cases := []struct {
+		name     string
+		replayed []events.Event
+		lastSent uint64
+		want     bool
+	}{
+		{"empty ring cannot help", mk(), 10, false},
+		{"contiguous replay closes the gap", mk(11, 12, 13), 10, true},
+		{"oldest buffered entry is still too new", mk(45, 46), 10, false},
+		{"single next event is enough", mk(11), 10, true},
+	}
+	for _, tc := range cases {
+		if got := closesGap(tc.replayed, tc.lastSent); got != tc.want {
+			t.Fatalf("%s: closesGap = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestWriteResyncReportsTheRange pins the wire format the client parses when it
+// decides to re-read its state.
+func TestWriteResyncReportsTheRange(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	if err := writeResync(recorder, 10, 400, 256); err != nil {
+		t.Fatalf("writeResync: %v", err)
+	}
+	body := recorder.Body.String()
+	if !strings.HasPrefix(body, "event: resync") {
+		t.Fatalf("resync event type missing: %q", body)
+	}
+	if !strings.Contains(body, "\"reason\":\"gap\"") || !strings.Contains(body, "\"until\":400") {
+		t.Fatalf("resync payload = %q", body)
 	}
 }

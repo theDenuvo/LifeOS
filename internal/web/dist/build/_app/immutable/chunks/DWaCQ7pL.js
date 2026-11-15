@@ -1,4 +1,4 @@
-import{w as l,f as n}from"./BzxQnngr.js";import{c as p,a as h}from"./CEUd_QXk.js";import"./DpUz3A9u.js";import{I as i,s as c}from"./uWkijpQ_.js";import{l as f,s as m}from"./DIqPTXXf.js";const $=["work","meetings","personal"],M=l([...$]);function w(t){M.update(a=>a.includes(t)?a.filter(s=>s!==t):[...a,t])}function x(t,a){const s=f(a,["children","$$slots","$$events","$$legacy"]);/**
+import{w as l,f as n}from"./BzxQnngr.js";import{c as p,a as h}from"./CEUd_QXk.js";import"./DE4bBn8R.js";import{I as i,s as c}from"./Cp3fJaof.js";import{l as f,s as m}from"./DIqPTXXf.js";const $=["work","meetings","personal"],M=l([...$]);function w(t){M.update(a=>a.includes(t)?a.filter(s=>s!==t):[...a,t])}function x(t,a){const s=f(a,["children","$$slots","$$events","$$legacy"]);/**
  * @license lucide-svelte v0.0.1 - ISC
  *
  * This source code is licensed under the ISC license.

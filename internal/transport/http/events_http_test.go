@@ -87,8 +87,8 @@ func TestSSEReplaysAfterLastEventID(t *testing.T) {
 	defer cleanup()
 
 	broker := handler.services.Broker
-	broker.Publish("task.created", map[string]any{"id": 1})
-	broker.Publish("task.updated", map[string]any{"id": 1})
+	_ = broker.Publish("task.created", map[string]any{"id": 1})
+	_ = broker.Publish("task.updated", map[string]any{"id": 1})
 
 	server := httptest.NewServer(handler.Routes())
 	defer server.Close()

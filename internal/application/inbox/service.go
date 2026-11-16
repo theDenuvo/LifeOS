@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -427,7 +428,11 @@ func (s *Service) publish(eventType string, data any) {
 	if s.publisher == nil {
 		return
 	}
-	s.publisher.Publish(eventType, data)
+	if err := s.publisher.Publish(eventType, data); err != nil {
+		// The event did not reach the stream; the durable change itself already
+		// committed, so the failure is reported rather than propagated.
+		slog.Error("publish event failed", "type", eventType, "error", err)
+	}
 }
 
 // splitCapturedText fits captured text into the task title limit.

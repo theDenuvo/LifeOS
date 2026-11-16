@@ -1128,5 +1128,9 @@ func (s *Service) publish(eventType string, goalID int64) {
 	if s.broker == nil {
 		return
 	}
-	s.broker.Publish(eventType, map[string]any{"id": goalID})
+	if err := s.broker.Publish(eventType, map[string]any{"id": goalID}); err != nil {
+		// The event did not reach the stream; the goal change itself already
+		// committed, so the failure is reported rather than propagated.
+		slog.Error("publish event failed", "type", eventType, "goal_id", goalID, "error", err)
+	}
 }

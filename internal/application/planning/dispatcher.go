@@ -65,7 +65,11 @@ func (d *Dispatcher) Tick(ctx context.Context) error {
 			continue
 		}
 		if d.publisher != nil {
-			d.publisher.Publish("reminder", reminderPayload(item, now))
+			if err := d.publisher.Publish("reminder", reminderPayload(item, now)); err != nil {
+				// The reminder is still durable and will fire again; a lost
+				// live event only delays the toast, never the reminder.
+				slog.Error("publish reminder failed", "reminder_id", item.Reminder.ID, "error", err)
+			}
 		}
 		if err := d.planner.MarkReminderNotified(ctx, item.Reminder.ID, now); err != nil {
 			return err

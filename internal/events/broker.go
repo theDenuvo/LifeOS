@@ -8,25 +8,39 @@ package events
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
+	"time"
 )
 
-// Event is one published change.
+// Event is one published change. Epoch identifies the durable id range the seq
+// was handed out from, so a client can tell a stale position from a current one.
 type Event struct {
-	ID   uint64
-	Type string
-	Data any
+	Epoch uint64
+	ID    uint64
+	Type  string
+	Data  any
 }
 
-// Publisher is the write side used by application services.
+// Publisher is the write side used by application services. An error means the
+// event was not published and must not be assumed delivered.
 type Publisher interface {
-	Publish(eventType string, data any)
+	Publish(eventType string, data any) error
 }
+
+// IDReserve hands out the next block of event ids. The epoch identifies the
+// range, start is the first seq of it; both come from durable storage.
+type IDReserve func(ctx context.Context, block uint64) (epoch, start uint64, err error)
 
 // Broker fans events out to subscribers and keeps a replay buffer.
 type Broker struct {
 	mu       sync.Mutex
 	nextID   uint64
+	epoch    uint64
+	blockEnd uint64
+	block    uint64
+	reserve  IDReserve
 	ring     []Event
 	ringSize int
 	subs     map[int]chan Event
@@ -52,6 +66,10 @@ func NewBrokerWithReplay(size int) *Broker {
 // lifetime: a browser reconnecting after a restart sends the last id it saw, and
 // ids that begin again at one would all look older than that position. The
 // caller passes the first id of a durably reserved range.
+//
+// The broker is unbounded: it never runs out of ids and never renews a block.
+// Production builds use NewBrokerReserved, which keeps the handed-out ids inside
+// the durably reserved range.
 func NewBrokerAt(start uint64, size int) *Broker {
 	if size < 1 {
 		size = 1
@@ -67,6 +85,56 @@ func NewBrokerAt(start uint64, size int) *Broker {
 	}
 }
 
+// reserveTimeout bounds one id reservation while a Publish waits for it.
+const reserveTimeout = 3 * time.Second
+
+// NewBrokerReserved builds a broker whose ids stay inside durable ranges.
+//
+// reserve is called once up front and again before the current range runs out,
+// so Publish can never hand out an id the durable counter did not give it. The
+// epoch returned by reserve is stamped on the events, which lets a reconnecting
+// client prove its position belongs to this database instead of a restored
+// older copy.
+//
+// An error here means the id ranges are not durable and the stream would
+// eventually reuse ids; the caller must not start the application on it.
+func NewBrokerReserved(size int, block uint64, reserve IDReserve) (*Broker, error) {
+	broker := NewBrokerAt(0, size)
+	if block == 0 {
+		return nil, errors.New("event ids: block must be positive")
+	}
+	if reserve == nil {
+		return nil, errors.New("event ids: reserve function is required")
+	}
+	broker.block = block
+	broker.reserve = reserve
+	if err := broker.renewBlock(); err != nil {
+		return nil, err
+	}
+	return broker, nil
+}
+
+// renewBlock swaps in the next durable id range. It is called under the mutex.
+func (b *Broker) renewBlock() error {
+	ctx, cancel := context.WithTimeout(context.Background(), reserveTimeout)
+	defer cancel()
+	epoch, start, err := b.reserve(ctx, b.block)
+	if err != nil {
+		return fmt.Errorf("reserve event ids: %w", err)
+	}
+	if epoch == 0 {
+		return errors.New("reserve event ids: epoch must not be zero")
+	}
+	if start <= b.nextID {
+		return fmt.Errorf("reserve event ids: range starts at %d, which overlaps ids already handed out (last %d)", start, b.nextID)
+	}
+	b.epoch = epoch
+	b.nextID = start - 1
+	// The block ends where the next reservation must begin.
+	b.blockEnd = start + b.block - 1
+	return nil
+}
+
 // Publish records an event and delivers it to every current subscriber.
 //
 // The whole operation happens under the mutex, and delivery is non-blocking:
@@ -76,12 +144,20 @@ func NewBrokerAt(start uint64, size int) *Broker {
 // guarantees two things the stream relies on: events reach subscribers in
 // ascending ID order, and a channel cancelled concurrently cannot be closed
 // while a send is in flight (no "send on closed channel" panic).
-func (b *Broker) Publish(eventType string, data any) {
+func (b *Broker) Publish(eventType string, data any) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	// A reserved broker must never leave its durable range: when the next id
+	// would be past the block, get the next block first. An error here refuses
+	// the event instead of silently reusing an id a browser may still hold.
+	if b.reserve != nil && b.nextID+1 > b.blockEnd {
+		if err := b.renewBlock(); err != nil {
+			return err
+		}
+	}
 	b.nextID++
-	event := Event{ID: b.nextID, Type: eventType, Data: data}
+	event := Event{Epoch: b.epoch, ID: b.nextID, Type: eventType, Data: data}
 	b.ring = append(b.ring, event)
 	if len(b.ring) > b.ringSize {
 		b.ring = b.ring[len(b.ring)-b.ringSize:]
@@ -92,6 +168,16 @@ func (b *Broker) Publish(eventType string, data any) {
 		default:
 		}
 	}
+	return nil
+}
+
+// Epoch reports the epoch of the current durable id range. A reconnecting
+// client whose epoch differs is holding ids from another database state and
+// must resynchronise instead of trusting the numbers.
+func (b *Broker) Epoch() uint64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.epoch
 }
 
 // Subscribe registers a subscriber until ctx is cancelled.

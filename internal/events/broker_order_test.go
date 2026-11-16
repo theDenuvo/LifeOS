@@ -51,7 +51,7 @@ func TestBrokerPublishIsOrderedUnderConcurrency(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < perPublisher; j++ {
-				broker.Publish("task.updated", map[string]any{"id": j})
+				_ = broker.Publish("task.updated", map[string]any{"id": j})
 			}
 		}()
 	}
@@ -90,7 +90,7 @@ func TestBrokerCancelledSubscriptionNeverReceivesAndNeverPanics(t *testing.T) {
 		}()
 		go func() {
 			defer wg.Done()
-			broker.Publish("task.updated", map[string]any{"round": round})
+			_ = broker.Publish("task.updated", map[string]any{"round": round})
 		}()
 		wg.Wait()
 
@@ -120,7 +120,7 @@ func TestBrokerPublishAfterAllSubscribersCancel(t *testing.T) {
 		// drain until closed
 	}
 	for i := 0; i < 10; i++ {
-		broker.Publish("task.updated", map[string]any{"id": i})
+		_ = broker.Publish("task.updated", map[string]any{"id": i})
 	}
 	if broker.LastID() != 10 {
 		t.Fatalf("LastID = %d, want 10", broker.LastID())

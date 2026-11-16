@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/theDenuvo/LifeOS/internal/domain/event"
@@ -243,7 +244,11 @@ func (s *Service) publish(eventType string, data any) {
 	if s.publisher == nil {
 		return
 	}
-	s.publisher.Publish(eventType, data)
+	if err := s.publisher.Publish(eventType, data); err != nil {
+		// The event did not reach the stream; the durable change itself already
+		// committed, so the failure is reported rather than propagated.
+		slog.Error("publish event failed", "type", eventType, "error", err)
+	}
 }
 
 // NotFound reports whether err means "no such event".

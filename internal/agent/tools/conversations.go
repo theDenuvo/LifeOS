@@ -369,7 +369,11 @@ func (h *WorkspaceHub) publish(eventType string, data any) {
 	if h.publisher == nil {
 		return
 	}
-	h.publisher.Publish(eventType, data)
+	if err := h.publisher.Publish(eventType, data); err != nil {
+		// The event did not reach the stream; the durable change itself already
+		// committed, so the failure is reported rather than propagated.
+		slog.Error("publish event failed", "type", eventType, "error", err)
+	}
 }
 
 // sourceConversationID is the main chat a delegated call came from.

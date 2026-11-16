@@ -29,7 +29,7 @@ func TestEventsSurviveRestartWithStaleLastEventID(t *testing.T) {
 	// The first process publishes up to id 500.
 	oldBroker := handler.services.Broker
 	for i := 0; i < 500; i++ {
-		oldBroker.Publish("task.updated", map[string]any{"i": i})
+		_ = oldBroker.Publish("task.updated", map[string]any{"i": i})
 	}
 	if last := oldBroker.LastID(); last != 500 {
 		t.Fatalf("first process last id = %d, want 500", last)
@@ -67,7 +67,7 @@ func TestEventsSurviveRestartWithStaleLastEventID(t *testing.T) {
 	}
 
 	// The new event must reach the client instead of being dropped as stale.
-	broker.Publish("task.updated", map[string]any{"after": "restart"})
+	_ = broker.Publish("task.updated", map[string]any{"after": "restart"})
 	line := readUntil(t, reader, "after", 3*time.Second)
 	if !strings.Contains(line, "id: "+strconv.FormatUint(restartSequence, 10)) {
 		t.Fatalf("new event %d was dropped after the restart: %s", restartSequence, line)
@@ -86,7 +86,7 @@ func TestEventsReconnectAtHeadDoesNotResync(t *testing.T) {
 	broker := handler.services.Broker
 
 	for i := 0; i < 3; i++ {
-		broker.Publish("task.updated", map[string]any{"i": i})
+		_ = broker.Publish("task.updated", map[string]any{"i": i})
 	}
 	headID := broker.LastID()
 
@@ -105,7 +105,7 @@ func TestEventsReconnectAtHeadDoesNotResync(t *testing.T) {
 	defer response.Body.Close()
 
 	reader := bufio.NewReader(response.Body)
-	broker.Publish("task.updated", map[string]any{"after": "head"})
+	_ = broker.Publish("task.updated", map[string]any{"after": "head"})
 	body := readUntil(t, reader, "after", 3*time.Second)
 	if strings.Contains(body, "event: resync") {
 		t.Fatalf("a client that is exactly at the head was told it lost history: %s", body)
@@ -125,7 +125,7 @@ func TestResyncAdvancesCursorAcrossReconnects(t *testing.T) {
 
 	total := events.DefaultReplaySize + 40
 	for i := 0; i < total; i++ {
-		broker.Publish("task.updated", map[string]any{"i": i})
+		_ = broker.Publish("task.updated", map[string]any{"i": i})
 	}
 	oldestBuffered := uint64(total - events.DefaultReplaySize + 1)
 

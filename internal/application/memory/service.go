@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -727,6 +728,10 @@ func float64Ptr(value float64) *float64 { return &value }
 
 func (s *Service) publish(eventType string, data any) {
 	if s.publisher != nil && eventType != "" {
-		s.publisher.Publish(eventType, data)
+		if err := s.publisher.Publish(eventType, data); err != nil {
+			// The event did not reach the stream; the durable change itself
+			// already committed, so the failure is reported, not propagated.
+			slog.Error("publish event failed", "type", eventType, "error", err)
+		}
 	}
 }

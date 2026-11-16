@@ -90,7 +90,7 @@ type UnitOfWork interface {
 
 // Publisher publishes change events after a commit.
 type Publisher interface {
-	Publish(eventType string, data any)
+	Publish(eventType string, data any) error
 }
 
 // TaskReminderSync is implemented by Service and consumed by the task engine: a

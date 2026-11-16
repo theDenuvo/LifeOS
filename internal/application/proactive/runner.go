@@ -71,12 +71,17 @@ func (r *Runner) RunOnce(ctx context.Context) {
 			continue
 		}
 		if r.publisher != nil {
-			r.publisher.Publish("insight.detected", map[string]any{
+			payload := map[string]any{
 				"key":      insight.Key,
 				"title":    insight.Title,
 				"severity": string(insight.Severity),
 				"count":    insight.Count,
-			})
+			}
+			if err := r.publisher.Publish("insight.detected", payload); err != nil {
+				// The insight is recorded durably; a lost live event only
+				// delays when the interface shows it.
+				slog.Error("publish insight failed", "key", insight.Key, "error", err)
+			}
 		}
 	}
 	r.seen = current

@@ -134,12 +134,13 @@ func TestDismissAndSnoozeFilterInsights(t *testing.T) {
 
 type recordingPublisher struct{ keys []string }
 
-func (p *recordingPublisher) Publish(_ string, data any) {
+func (p *recordingPublisher) Publish(_ string, data any) error {
 	if payload, ok := data.(map[string]any); ok {
 		if key, ok := payload["key"].(string); ok {
 			p.keys = append(p.keys, key)
 		}
 	}
+	return nil
 }
 
 func TestRunnerPublishesOnlyNewInsights(t *testing.T) {

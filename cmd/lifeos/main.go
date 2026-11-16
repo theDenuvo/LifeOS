@@ -92,15 +92,18 @@ func main() {
 	// Event ids are durable, not per-process. A browser that reconnects after a
 	// restart sends the last id it saw, so a counter starting again at one would
 	// make every new event look older than the client's position and be dropped.
-	// The counter is reserved in blocks: one write at startup, no reuse even
-	// after a crash.
-	brokerStart := uint64(1)
-	if reserved, err := sqlite.NewEventSequence(db).Reserve(context.Background(), eventIDBlock); err != nil {
-		slog.Error("Could not reserve event ids; the stream restarts its numbering", "error", err)
-	} else {
-		brokerStart = reserved
+	// The broker keeps its ids inside the durably reserved range and renews the
+	// range before it runs out, and each range carries an epoch: a browser that
+	// answers with ids from a restored older database is told to resynchronise.
+	//
+	// A failed reservation means the stream could not prove id uniqueness, so
+	// the application must not start on it.
+	idSequence := sqlite.NewEventSequence(db)
+	broker, err := events.NewBrokerReserved(events.DefaultReplaySize, eventIDBlock, idSequence.Reserve)
+	if err != nil {
+		slog.Error("Could not reserve durable event ids; refusing to run the stream on a reusable counter", "error", err)
+		os.Exit(1)
 	}
-	broker := events.NewBrokerAt(brokerStart, events.DefaultReplaySize)
 	// planningService is assigned below; the task engine keeps the reference so a
 	// task change re-derives its reminders in the same breath.
 	var planningService *planning.Service

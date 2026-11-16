@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -513,7 +514,9 @@ func (s *Service) Apply(ctx context.Context, in ApplyInput) (ApplyResult, error)
 		return ApplyResult{}, err
 	}
 	if s.pub != nil && len(result.Applied) > 0 {
-		s.pub.Publish("plan.updated", map[string]any{"applied": len(result.Applied)})
+		if err := s.pub.Publish("plan.updated", map[string]any{"applied": len(result.Applied)}); err != nil {
+			slog.Error("publish plan.updated failed", "applied", len(result.Applied), "error", err)
+		}
 	}
 	return result, nil
 }
@@ -592,7 +595,9 @@ func (s *Service) RemoveBlock(ctx context.Context, blockID int64) error {
 		return err
 	}
 	if s.pub != nil {
-		s.pub.Publish("plan.updated", map[string]any{"removed_block": blockID})
+		if err := s.pub.Publish("plan.updated", map[string]any{"removed_block": blockID}); err != nil {
+			slog.Error("publish plan.updated failed", "block_id", blockID, "error", err)
+		}
 	}
 	return nil
 }

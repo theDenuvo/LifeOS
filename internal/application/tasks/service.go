@@ -524,11 +524,15 @@ func (s *Service) publish(eventType string, result TaskWithVersion) {
 	if s.publisher == nil || result.Task == nil {
 		return
 	}
-	s.publisher.Publish(eventType, map[string]any{
+	if err := s.publisher.Publish(eventType, map[string]any{
 		"id":      result.Task.ID,
 		"version": result.Version,
 		"status":  string(result.Task.Status),
-	})
+	}); err != nil {
+		// The task write committed; a lost live event is repaired by the
+		// clients' catch-up reads, so the failure is only reported.
+		slog.Error("publish task event failed", "type", eventType, "task_id", result.Task.ID, "error", err)
+	}
 }
 
 // buildUpdateOptions converts a partial update into domain options.

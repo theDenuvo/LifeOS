@@ -12,8 +12,9 @@ type recordingPublisher struct {
 	types []string
 }
 
-func (p *recordingPublisher) Publish(eventType string, _ any) {
+func (p *recordingPublisher) Publish(eventType string, _ any) error {
 	p.types = append(p.types, eventType)
+	return nil
 }
 
 func TestServicePublishesAfterCommit(t *testing.T) {

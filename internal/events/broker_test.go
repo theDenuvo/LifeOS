@@ -26,7 +26,7 @@ func TestBrokerPublishesToSubscribers(t *testing.T) {
 	defer cancel()
 
 	stream := broker.Subscribe(ctx)
-	broker.Publish("task.created", map[string]any{"id": 1})
+	_ = broker.Publish("task.created", map[string]any{"id": 1})
 
 	event := receive(t, stream)
 	if event.Type != "task.created" || event.ID != 1 {
@@ -36,9 +36,9 @@ func TestBrokerPublishesToSubscribers(t *testing.T) {
 
 func TestBrokerReplayAfterID(t *testing.T) {
 	broker := NewBroker()
-	broker.Publish("task.created", map[string]any{"id": 1})
-	broker.Publish("task.updated", map[string]any{"id": 1})
-	broker.Publish("inbox.captured", map[string]any{"id": 2})
+	_ = broker.Publish("task.created", map[string]any{"id": 1})
+	_ = broker.Publish("task.updated", map[string]any{"id": 1})
+	_ = broker.Publish("inbox.captured", map[string]any{"id": 2})
 
 	replayed := broker.Replay(1)
 	if len(replayed) != 2 {
@@ -55,7 +55,7 @@ func TestBrokerReplayAfterID(t *testing.T) {
 func TestBrokerReplayBufferIsBounded(t *testing.T) {
 	broker := NewBrokerWithReplay(2)
 	for i := 0; i < 5; i++ {
-		broker.Publish("task.updated", map[string]any{"id": i})
+		_ = broker.Publish("task.updated", map[string]any{"id": i})
 	}
 	replayed := broker.Replay(0)
 	if len(replayed) != 2 {
@@ -92,7 +92,7 @@ func TestNewBrokerAtContinuesADurableRange(t *testing.T) {
 	var seen []uint64
 	stream := broker.Subscribe(context.Background())
 	for i := 0; i < 3; i++ {
-		broker.Publish("task.updated", map[string]any{"i": i})
+		_ = broker.Publish("task.updated", map[string]any{"i": i})
 	}
 	for i := 0; i < 3; i++ {
 		select {
@@ -110,7 +110,7 @@ func TestNewBrokerAtContinuesADurableRange(t *testing.T) {
 	}
 	// A zero start is a programming mistake, not a reason to reuse id zero.
 	zero := NewBrokerAt(0, 4)
-	zero.Publish("x", nil)
+	_ = zero.Publish("x", nil)
 	if zero.LastID() != 1 {
 		t.Fatalf("a zero start produced id %d, want 1", zero.LastID())
 	}

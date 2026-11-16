@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -133,7 +132,7 @@ func TestEventsStreamOutlivesWriteTimeout(t *testing.T) {
 	// Keep the connection open past the write timeout, then confirm it still
 	// accepts a write by publishing through the broker.
 	time.Sleep(400 * time.Millisecond)
-	handler.services.Broker.Publish("task.created", map[string]any{"id": 1})
+	_ = handler.services.Broker.Publish("task.created", map[string]any{"id": 1})
 
 	reader := bufio.NewReader(response.Body)
 	deadline := time.Now().Add(3 * time.Second)
@@ -187,13 +186,13 @@ func TestClosesGapDistinguishesRecoverableFromLost(t *testing.T) {
 // decides to re-read its state.
 func TestWriteResyncReportsTheRange(t *testing.T) {
 	recorder := httptest.NewRecorder()
-	if err := writeResync(recorder, 10, 10, 400, 256); err != nil {
+	if err := writeResync(recorder, 7, 10, 10, 400, 256); err != nil {
 		t.Fatalf("writeResync: %v", err)
 	}
 	body := recorder.Body.String()
 	// The frame must advance the browser cursor, otherwise a reconnect reports
 	// the same gap again and the client stays behind forever.
-	if !strings.HasPrefix(body, "id: 10\n") {
+	if !strings.HasPrefix(body, "id: 7.10\n") {
 		t.Fatalf("resync does not advance the EventSource cursor: %q", body)
 	}
 	if !strings.Contains(body, "event: resync") {
@@ -233,9 +232,8 @@ func sseIDs(body string) []uint64 {
 		if !strings.HasPrefix(line, "id: ") {
 			continue
 		}
-		if id, err := strconv.ParseUint(strings.TrimSpace(line[len("id: "):]), 10, 64); err == nil {
-			ids = append(ids, id)
-		}
+		_, seq := parseEventID(strings.TrimSpace(line[len("id: "):]))
+		ids = append(ids, seq)
 	}
 	return ids
 }
@@ -249,7 +247,7 @@ func TestEventsReconnectReplaysWhenRingCoversTheGap(t *testing.T) {
 	broker := handler.services.Broker
 
 	for i := 0; i < 5; i++ {
-		broker.Publish("task.updated", map[string]any{"i": i})
+		_ = broker.Publish("task.updated", map[string]any{"i": i})
 	}
 
 	server := httptest.NewServer(handler.Routes())
@@ -285,7 +283,7 @@ func TestEventsReconnectSignalsLostHistory(t *testing.T) {
 
 	total := events.DefaultReplaySize + 40
 	for i := 0; i < total; i++ {
-		broker.Publish("task.updated", map[string]any{"i": i})
+		_ = broker.Publish("task.updated", map[string]any{"i": i})
 	}
 
 	server := httptest.NewServer(handler.Routes())

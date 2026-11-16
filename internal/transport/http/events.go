@@ -32,11 +32,6 @@ func (h *Handler) streamEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Subscribe before writing headers and before replaying, so a client that
-	// has received the response can never miss an event published in between.
-	stream := broker.Subscribe(r.Context())
-	lastSent := uint64(0)
-
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -49,18 +44,36 @@ func (h *Handler) streamEvents(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
+	// Subscribe before resolving the reconnecting position and before the
+	// replay, so a client that has received buffered events can never miss one
+	// published in between. Events published between this Subscribe and the
+	// head read below are inside the cursor the resync announces and are
+	// dropped in the live loop as already accounted for; events published
+	// after the head read arrive through the channel with higher ids and are
+	// delivered.
+	stream := broker.Subscribe(r.Context())
+	lastSent := uint64(0)
+
+	// A stale position is resolved here, after Subscribe: the head read and the
+	// cursor belong to one atomic broker read, and everything the cursor covers
+	// is either in the ring or already in the channel, never in between.
 	if raw := strings.TrimSpace(r.Header.Get("Last-Event-ID")); raw != "" {
 		epoch, seq := parseEventID(raw)
-		current := broker.Epoch()
+		current, head := broker.Head()
 		switch {
 		case epoch != current:
 			// The ids the client holds come from another database state — a
 			// restored older copy, or unknown provenance. Numbers cannot be
 			// trusted across that boundary, so order a full resynchronisation.
-			if err := writeResync(w, current, broker.LastID(), seq, 0, 0); err != nil {
+			if err := writeResync(w, current, head, seq, 0, 0); err != nil {
 				return
 			}
 			flusher.Flush()
+			// The cursor just handed to the client already accounts for
+			// everything up to head. Without this, events that reached the
+			// channel between Subscribe and this read would be delivered after
+			// the resync and would move the browser's cursor backwards.
+			lastSent = head
 		default:
 			sent, err := catchUp(w, broker, flusher, seq)
 			if err != nil {
@@ -127,7 +140,9 @@ func catchUp(w http.ResponseWriter, broker *events.Broker, flusher http.Flusher,
 	// interface stale for seconds.
 	defer flusher.Flush()
 
-	lastID := broker.LastID()
+	// One atomic read: a cursor built from one epoch and another epoch's id
+	// would be a position that never existed.
+	currentEpoch, lastID := broker.Head()
 	replayed := broker.Replay(after)
 
 	switch {
@@ -141,7 +156,7 @@ func catchUp(w http.ResponseWriter, broker *events.Broker, flusher http.Flusher,
 		// ahead of it. Both need a resync; the second only happens when the
 		// durable id range was lost with the database, and rebasing the cursor
 		// is what stops every new event from looking older than the client.
-		if err := writeResync(w, broker.Epoch(), lastID, after, lastID, 0); err != nil {
+		if err := writeResync(w, currentEpoch, lastID, after, lastID, 0); err != nil {
 			return after, err
 		}
 		return lastID, nil
@@ -150,7 +165,7 @@ func catchUp(w http.ResponseWriter, broker *events.Broker, flusher http.Flusher,
 		// replay cannot start where it stopped. Announce what is lost, then send
 		// what survived.
 		oldest := replayed[0].ID
-		if err := writeResync(w, broker.Epoch(), oldest-1, after, oldest-1, len(replayed)); err != nil {
+		if err := writeResync(w, currentEpoch, oldest-1, after, oldest-1, len(replayed)); err != nil {
 			return after, err
 		}
 	}

@@ -180,6 +180,17 @@ func (b *Broker) Epoch() uint64 {
 	return b.epoch
 }
 
+// Head returns the current epoch and the last handed-out id together.
+//
+// Reading them as one value under the mutex is what lets a reconnecting handler
+// build a resync cursor that belongs to one epoch: two separate reads could
+// straddle a block renewal, which changes both.
+func (b *Broker) Head() (epoch, id uint64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.epoch, b.nextID
+}
+
 // Subscribe registers a subscriber until ctx is cancelled.
 //
 // The returned channel is closed when the subscription ends, so a consumer can

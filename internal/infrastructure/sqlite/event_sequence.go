@@ -18,10 +18,14 @@ import (
 // counter is persisted and reserved in blocks: one write at startup instead of
 // a write per event, with no risk of reusing an id that was already delivered.
 //
-// The epoch is regenerated on every reservation. A browser stores the epoch its
-// ids came from, so a database restored from an older copy produces a different
-// epoch and the client is told to resynchronise instead of trusting numbers that
-// skip the lost window.
+// The epoch is regenerated on every reservation, not only per process. A
+// browser stores the epoch its ids came from, so a database restored from an
+// older copy produces a different epoch and the client is told to resynchronise
+// instead of trusting numbers that skip the lost window. The price is
+// deliberate: a browser that reconnects after an ordinary mid-run block renewal
+// also gets a resync, even when everything it missed still sits in the replay
+// buffer. With a 4096-event block that is rare, and a needless reload is far
+// cheaper than a silent hole after a database restore.
 type EventSequence struct {
 	db *sql.DB
 }

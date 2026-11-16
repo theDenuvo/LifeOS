@@ -211,3 +211,111 @@ func sseSeqs(body string) []uint64 {
 	}
 	return out
 }
+
+// TestEventsResyncCursorSkipsEventsItAccountsFor is the review's race: events
+// published around the moment the handler resolves a stale position end up in
+// the subscriber channel, and the resync cursor already accounts for them. After
+// the resync, every delivered event must have an id above that cursor —
+// otherwise the browser's Last-Event-ID would move backwards and the next
+// reconnect would resync again for nothing.
+//
+// The handler resolves the position before Subscribe, so the window the review
+// described no longer exists structurally; this test still hammers the seam
+// from both sides (publish right after the response headers arrive, which is
+// always after Subscribe on the server, and publish right after the resync is
+// read) and asserts the invariant for every attempt.
+func TestEventsResyncCursorSkipsEventsItAccountsFor(t *testing.T) {
+	handler, cleanup := setupTestHandler(t)
+	defer cleanup()
+
+	reserve := &fixedReserve{epoch: 42, next: 1, block: 1 << 20}
+	broker, err := events.NewBrokerReserved(events.DefaultReplaySize, 1<<20, reserve.reserve)
+	if err != nil {
+		t.Fatalf("build broker: %v", err)
+	}
+	handler.services.Broker = broker
+
+	server := httptest.NewServer(handler.Routes())
+	defer server.Close()
+
+	for attempt := 0; attempt < 3; attempt++ {
+		request, err := http.NewRequest(http.MethodGet, server.URL+"/api/v1/events", nil)
+		if err != nil {
+			t.Fatalf("build request: %v", err)
+		}
+		// The client holds ids from a foreign epoch.
+		request.Header.Set("Last-Event-ID", "7.9999")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatalf("attempt %d: events request: %v", attempt, err)
+		}
+		reader := bufio.NewReader(response.Body)
+
+		// The response headers have arrived, which means the server has already
+		// resolved the stale position: the resync cursor is on the wire. Publish
+		// immediately — this is the closest an outside observer can get to the
+		// seam the review described.
+		broker.Publish("task.updated", map[string]any{"n": attempt*3 + 1})
+
+		head := readUntil(t, reader, "missed_after", 2*time.Second)
+		if !strings.Contains(head, "event: resync") {
+			t.Fatalf("attempt %d: no resync: %s", attempt, head)
+		}
+		cursor := firstIDString(head)
+		_, headSeq := parseEventID(cursor)
+
+		// Publish two more events after the resync was read: they must arrive,
+		// and nothing at or below the cursor may appear after it.
+		broker.Publish("task.updated", map[string]any{"n": attempt*3 + 2})
+		broker.Publish("task.updated", map[string]any{"n": attempt*3 + 3})
+		tail := readUntil(t, reader, "event: task.updated", 2*time.Second)
+		tail += readUntil(t, reader, "event: task.updated", 2*time.Second)
+
+		if strings.Contains(tail, "event: resync") {
+			t.Fatalf("attempt %d: a second resync was sent: %s", attempt, tail)
+		}
+		for _, id := range sseIDs(tail) {
+			if id <= headSeq {
+				t.Fatalf("attempt %d: event %d arrived after a resync whose cursor is %d", attempt, id, headSeq)
+			}
+		}
+		if ids := sseSeqs(tail); len(ids) != 2 || ids[0] != headSeq+1 {
+			t.Fatalf("attempt %d: events after resync = %v, want %d,%d", attempt, ids, headSeq+1, headSeq+2)
+		}
+		response.Body.Close()
+	}
+}
+
+// TestBrokerHeadMatchesEpochAndID pins the atomic head read: the pair returned
+// by Head is the same the broker published, never a mix of two ranges.
+func TestBrokerHeadMatchesEpochAndID(t *testing.T) {
+	const block = 2
+	// rotate makes every reservation carry a fresh epoch, like the durable
+	// allocator does.
+	reserve := &fixedReserve{epoch: 42, next: 1, block: block, rotate: true}
+	broker, err := events.NewBrokerReserved(8, block, reserve.reserve)
+	if err != nil {
+		t.Fatalf("build broker: %v", err)
+	}
+	if err := broker.Publish("a", nil); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	epoch, id := broker.Head()
+	if epoch != 42 || id != 1 {
+		t.Fatalf("Head = %d,%d, want 42,1", epoch, id)
+	}
+	// Crossing into the next range changes both values together.
+	if err := broker.Publish("b", nil); err != nil {
+		t.Fatalf("publish 2: %v", err)
+	}
+	if err := broker.Publish("c", nil); err != nil {
+		t.Fatalf("publish 3: %v", err)
+	}
+	epoch, id = broker.Head()
+	if epoch == 42 {
+		t.Fatalf("epoch did not change after a range renewal: %d", epoch)
+	}
+	if id != 3 {
+		t.Fatalf("Head id = %d, want 3", id)
+	}
+}

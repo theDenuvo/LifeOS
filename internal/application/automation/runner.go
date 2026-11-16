@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	domainautomation "github.com/theDenuvo/LifeOS/internal/domain/automation"
 	"github.com/theDenuvo/LifeOS/internal/events"
 )
 
@@ -20,6 +21,12 @@ type EventSource interface {
 // from spawning unbounded goroutines. An overflow is recorded as a skipped
 // run, so refused work stays in the journal instead of disappearing silently.
 const maxDispatchQueue = 8
+
+// maxFinishedWindows is how many finished run windows the attribution memory
+// keeps. Runs are the only things that can cause deeper chains, and they
+// finish within minutes at most, so a small ring covers the recent history.
+// Active windows are never evicted — see remember.
+const maxFinishedWindows = 32
 
 // runWindow is one executing or executed run the runner remembers. Event
 // attribution needs it: an event published while a run executes may be caused
@@ -40,13 +47,20 @@ type runWindow struct {
 // maxChainDepth is refused and journalled as skipped, which makes cycles —
 // including an automation reacting to its own effects — impossible to
 // sustain.
+//
+// Startup recovery of stale reservations is deliberately not done here: it
+// belongs to main before the HTTP server opens, so recovery can never race a
+// legitimate run that started after the server began accepting requests.
 type Runner struct {
 	service  *Service
 	source   EventSource
 	interval time.Duration
 
-	mu      sync.Mutex
-	windows []runWindow
+	mu       sync.Mutex
+	running  []runWindow // active runs: never evicted while unfinished
+	finished []runWindow // capped ring of completed runs
+
+	cache eventCache
 }
 
 // NewRunner builds a runner. A zero interval defaults to 30 seconds, which is
@@ -58,12 +72,8 @@ func NewRunner(service *Service, source EventSource, interval time.Duration) *Ru
 	return &Runner{service: service, source: source, interval: interval}
 }
 
-// Start runs the loops until ctx is cancelled. The first thing it does is
-// release the reservations a previous process may have left running.
+// Start runs the loops until ctx is cancelled.
 func (r *Runner) Start(ctx context.Context) {
-	if _, err := r.service.RecoverStaleRuns(ctx); err != nil && ctx.Err() == nil {
-		slog.Warn("automation: stale run recovery failed", "error", err)
-	}
 	go r.watchEvents(ctx)
 	r.tickLoop(ctx)
 }
@@ -100,18 +110,27 @@ func (r *Runner) tick(ctx context.Context) {
 }
 
 // watchEvents feeds every published LifeOS event to the event-triggered
-// automations. The receive loop stays cheap (one matching query per event);
-// runs execute in bounded background work so a long scenario cannot fill the
-// broker's subscriber buffer and silently lose further events.
+// automations. The receive loop stays cheap — matching runs against an
+// in-memory cache, never against the database — so a burst cannot outrun it
+// and overflow the broker's subscriber buffer; runs execute in bounded
+// background work.
 func (r *Runner) watchEvents(ctx context.Context) {
 	if r.source == nil {
 		return
 	}
+	r.refreshCache(ctx)
+	// The cache is the belt: automation events and a slow timer both refresh
+	// it, so a missed automation.* event cannot leave stale subscriptions for
+	// longer than one tick.
+	go r.refreshLoop(ctx)
+
 	queue := make(chan struct{}, maxDispatchQueue)
-	defer close(queue)
 	for event := range r.source.Subscribe(ctx) {
 		if ctx.Err() != nil {
 			return
+		}
+		if isAutomationEvent(event.Type) {
+			r.refreshCache(ctx)
 		}
 		payload, ok := event.Data.(map[string]any)
 		if !ok && event.Data != nil {
@@ -127,36 +146,65 @@ func (r *Runner) watchEvents(ctx context.Context) {
 		if payload == nil {
 			payload = map[string]any{}
 		}
-		matched, err := r.service.MatchedEvents(ctx, event.Type, payload)
-		if err != nil {
-			if ctx.Err() == nil {
-				slog.Warn("automation: event query failed", "event", event.Type, "error", err)
-			}
-			continue
-		}
-		for _, automation := range matched {
+		for _, id := range r.cache.match(event.Type, payload) {
 			depth := r.depthFor(event.At)
 			select {
 			case queue <- struct{}{}:
-				go r.runEvent(ctx, queue, automation.ID, depth, event.Type)
+				go r.runEvent(ctx, queue, id, depth, event.Type)
 			default:
 				// The queue is full: the run is refused before any step, and
 				// the journal explains why instead of the event vanishing.
-				r.service.recordSkipped(ctx, automation.ID, "event",
+				r.service.recordSkipped(ctx, id, "event",
 					"очередь запусков переполнена, событие не обработано", time.Now().UTC())
-				slog.Warn("automation: dispatch queue full", "automation_id", automation.ID, "event", event.Type)
+				slog.Warn("automation: dispatch queue full", "automation_id", id, "event", event.Type)
 			}
 		}
 	}
+}
+
+// isAutomationEvent reports whether the event type changes the set of active
+// event subscriptions and therefore requires a cache refresh.
+func isAutomationEvent(eventType string) bool {
+	switch eventType {
+	case "automation.created", "automation.updated", "automation.deleted":
+		return true
+	}
+	return false
+}
+
+// refreshLoop refreshes the subscription cache on a slow cadence as the
+// braces to the event-driven invalidation.
+func (r *Runner) refreshLoop(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			r.refreshCache(ctx)
+		}
+	}
+}
+
+func (r *Runner) refreshCache(ctx context.Context) {
+	found, err := r.service.eventAutomations(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			slog.Warn("automation: subscription cache refresh failed", "error", err)
+		}
+		return
+	}
+	r.cache.replace(found)
 }
 
 // runEvent executes one event-triggered run and remembers its execution
 // window for chain attribution.
 func (r *Runner) runEvent(ctx context.Context, queue <-chan struct{}, automationID int64, depth int, eventType string) {
 	defer func() { <-queue }()
-	window := runWindow{start: time.Now().UTC(), depth: int(depth)}
+	window := runWindow{start: time.Now().UTC(), depth: depth}
 	r.remember(window)
-	if err := r.service.RunFromEvent(ctx, automationID, int(depth), window.start); err != nil {
+	if err := r.service.RunFromEvent(ctx, automationID, depth, window.start); err != nil {
 		if ctx.Err() == nil {
 			slog.Error("automation: event run failed to start", "id", automationID, "event", eventType, "error", err)
 		}
@@ -164,26 +212,38 @@ func (r *Runner) runEvent(ctx context.Context, queue <-chan struct{}, automation
 	r.closeWindow(window)
 }
 
-// remember records a run window; the ring keeps the last few runs, which is
-// all attribution needs because runs are the only things that can cause
-// deeper chains and they finish within minutes at most.
+// remember records a run window. An unfinished window is never evicted: a
+// long scenario must keep its attribution even if many short runs pass by,
+// otherwise its later events would look like direct human actions.
 func (r *Runner) remember(window runWindow) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.windows = append(r.windows, window)
-	if len(r.windows) > 32 {
-		r.windows = r.windows[len(r.windows)-32:]
+	if window.finish.IsZero() {
+		r.running = append(r.running, window)
+		return
+	}
+	r.appendFinished(window)
+}
+
+func (r *Runner) appendFinished(window runWindow) {
+	r.finished = append(r.finished, window)
+	if len(r.finished) > maxFinishedWindows {
+		r.finished = r.finished[len(r.finished)-maxFinishedWindows:]
 	}
 }
 
-// closeWindow stamps the recorded window as finished.
+// closeWindow stamps the recorded window as finished and moves it into the
+// evictable ring.
 func (r *Runner) closeWindow(window runWindow) {
 	finish := time.Now().UTC()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for i := len(r.windows) - 1; i >= 0; i-- {
-		if r.windows[i].start.Equal(window.start) && r.windows[i].depth == window.depth {
-			r.windows[i].finish = finish
+	for i := range r.running {
+		if r.running[i].start.Equal(window.start) && r.running[i].depth == window.depth {
+			closed := r.running[i]
+			closed.finish = finish
+			r.running = append(r.running[:i], r.running[i+1:]...)
+			r.appendFinished(closed)
 			return
 		}
 	}
@@ -198,16 +258,63 @@ func (r *Runner) depthFor(at time.Time) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	depth := 0
-	for _, window := range r.windows {
-		end := window.finish
-		if end.IsZero() {
-			end = time.Now().UTC()
+	for _, window := range r.running {
+		// A running window covers everything from its start onwards: the
+		// finish moment is not known yet.
+		if !at.Before(window.start) && window.depth+1 > depth {
+			depth = window.depth + 1
 		}
-		if !at.Before(window.start) && !at.After(end) {
-			if window.depth+1 > depth {
-				depth = window.depth + 1
-			}
+	}
+	for _, window := range r.finished {
+		if !at.Before(window.start) && !at.After(window.finish) && window.depth+1 > depth {
+			depth = window.depth + 1
 		}
 	}
 	return depth
+}
+
+// eventSub is one cached event subscription.
+type eventSub struct {
+	id      int64
+	trigger domainautomation.EventTrigger
+}
+
+// eventCache keeps the active event-triggered automations in memory, so the
+// receive loop matches without a database query per event. It is replaced
+// atomically by refreshCache.
+type eventCache struct {
+	mu     sync.RWMutex
+	subs   map[string][]eventSub
+	loaded bool
+}
+
+func (c *eventCache) replace(automations []*domainautomation.Automation) {
+	subs := map[string][]eventSub{}
+	for _, item := range automations {
+		if !item.Active() || item.Trigger.Kind != domainautomation.TriggerEvent || item.Trigger.Event == nil {
+			continue
+		}
+		subs[item.Trigger.Event.Name] = append(subs[item.Trigger.Event.Name], eventSub{id: item.ID, trigger: *item.Trigger.Event})
+	}
+	c.mu.Lock()
+	c.subs = subs
+	c.loaded = true
+	c.mu.Unlock()
+}
+
+// match returns the automation ids the event should run. An unloaded cache
+// matches nothing: the receiver loads it before processing events.
+func (c *eventCache) match(eventType string, payload map[string]any) []int64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if !c.loaded {
+		return nil
+	}
+	var ids []int64
+	for _, sub := range c.subs[eventType] {
+		if sub.trigger.MatchesPayload(payload) {
+			ids = append(ids, sub.id)
+		}
+	}
+	return ids
 }

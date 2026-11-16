@@ -520,9 +520,15 @@ func (s *Service) Observe(ctx context.Context, eventType string, payload map[str
 // MatchedEvents returns the active event-triggered automations the event
 // should run: trigger name matches and every payload filter entry matches.
 func (s *Service) MatchedEvents(ctx context.Context, eventType string, payload map[string]any) ([]*domainautomation.Automation, error) {
-	matched, err := s.eventAutomations(ctx, eventType)
+	all, err := s.eventAutomations(ctx)
 	if err != nil {
 		return nil, err
+	}
+	matched := make([]*domainautomation.Automation, 0, len(all))
+	for _, item := range all {
+		if item.Trigger.Event != nil && item.Trigger.Event.Name == eventType {
+			matched = append(matched, item)
+		}
 	}
 	result := make([]*domainautomation.Automation, 0, len(matched))
 	for _, item := range matched {
@@ -562,15 +568,23 @@ func (s *Service) RunFromEvent(ctx context.Context, id int64, depth int, now tim
 	return nil
 }
 
-// recordSkipped writes a visible journal entry for a launch that never ran.
+// recordSkipped writes a visible journal entry for a launch that never ran
+// and announces it, so the open interface shows the refusal immediately.
 func (s *Service) recordSkipped(ctx context.Context, automationID int64, trigger, reason string, now time.Time) {
+	var runID int64
 	err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
-		_, err := tx.Automations().RecordSkipped(ctx, automationID, trigger, reason, now)
+		var err error
+		runID, err = tx.Automations().RecordSkipped(ctx, automationID, trigger, reason, now)
 		return err
 	})
 	if err != nil {
 		slog.Error("automation: skipped-run record failed", "automation_id", automationID, "error", err)
+		return
 	}
+	s.publish("automation.run.finished", map[string]any{
+		"automation_id": automationID, "run_id": runID,
+		"status": string(domainautomation.RunSkipped), "error": reason,
+	})
 }
 
 // RecoverStaleRuns releases reservations a crashed process left behind.
@@ -578,20 +592,29 @@ func (s *Service) recordSkipped(ctx context.Context, automationID int64, trigger
 // stale by definition: the process that held it is gone. They become failed
 // runs with the reason, and the automation is free to run again — schedule
 // moments recompute from the last known point and catch up as usual.
-func (s *Service) RecoverStaleRuns(ctx context.Context) (int64, error) {
-	var released int64
+//
+// The caller must run this before anything can start a new run (in main,
+// before the HTTP server opens): a recovery that races a legitimate run
+// would mark that run failed while its steps keep executing.
+func (s *Service) RecoverStaleRuns(ctx context.Context) ([]*domainautomation.Run, error) {
+	var recovered []*domainautomation.Run
 	err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
-		count, err := tx.Automations().RecoverRunning(ctx, s.clock.Now().UTC())
-		released = count
+		var err error
+		recovered, err = tx.Automations().RecoverRunning(ctx, s.clock.Now().UTC())
 		return err
 	})
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	if released > 0 {
-		slog.Warn("automation: recovered runs left running by an earlier process", "count", released)
+	for _, run := range recovered {
+		slog.Warn("automation: recovered a run left running by an earlier process",
+			"run_id", run.ID, "automation_id", run.AutomationID)
+		s.publish("automation.run.finished", map[string]any{
+			"automation_id": run.AutomationID, "run_id": run.ID,
+			"status": string(domainautomation.RunFailed), "error": run.Error,
+		})
 	}
-	return released, nil
+	return recovered, nil
 }
 
 // dueSchedule loads the schedule automations whose moment has come. A
@@ -651,18 +674,16 @@ func (s *Service) conditionAutomations(ctx context.Context) ([]*domainautomation
 	return found, err
 }
 
-func (s *Service) eventAutomations(ctx context.Context, eventType string) ([]*domainautomation.Automation, error) {
+// eventAutomations returns every active event-triggered automation. The
+// caller narrows the list by event name and payload filters.
+func (s *Service) eventAutomations(ctx context.Context) ([]*domainautomation.Automation, error) {
 	var found []*domainautomation.Automation
 	err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
 		items, err := tx.Automations().ListByTrigger(ctx, domainautomation.TriggerEvent)
 		if err != nil {
 			return err
 		}
-		for _, item := range items {
-			if item.Trigger.Event != nil && item.Trigger.Event.Name == eventType {
-				found = append(found, item)
-			}
-		}
+		found = items
 		return nil
 	})
 	return found, err
@@ -755,7 +776,12 @@ func (s *Service) execute(ctx context.Context, item *domainautomation.Automation
 	finished := s.clock.Now().UTC()
 	run.FinishedAt = &finished
 
-	err = s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
+	// The journal write must survive the caller's cancellation: a user closing
+	// the HTTP connection (or any other ctx cancellation) is not a reason to
+	// leave the reservation running. The context keeps its values but drops
+	// the cancellation signal from here on.
+	detached := context.WithoutCancel(ctx)
+	err = s.uow.Do(detached, func(ctx context.Context, tx Transaction) error {
 		if err := tx.Automations().FinishRun(ctx, run); err != nil {
 			return err
 		}
@@ -776,13 +802,20 @@ func (s *Service) execute(ctx context.Context, item *domainautomation.Automation
 	if err != nil {
 		// The steps did run; only the journal write failed. Without the finish
 		// the run would hold the reservation until the next restart, so the
-		// failed write is retried best-effort as a plain failure record; the
-		// startup recovery is the second line of defence.
+		// failed write is retried best-effort as a plain failure record — on
+		// the same detached context — and the startup recovery is the second
+		// line of defence.
 		slog.Error("automation: run journal write failed", "automation_id", item.ID, "run_id", run.ID, "error", err)
-		if fallbackErr := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
-			return tx.Automations().FailRun(ctx, run.ID, "журнал запуска не записан: "+err.Error(), finished)
+		reason := "журнал запуска не записан: " + err.Error()
+		if fallbackErr := s.uow.Do(detached, func(ctx context.Context, tx Transaction) error {
+			return tx.Automations().FailRun(ctx, run.ID, reason, finished)
 		}); fallbackErr != nil {
 			slog.Error("automation: run reservation release failed", "automation_id", item.ID, "run_id", run.ID, "error", fallbackErr)
+		} else {
+			s.publish("automation.run.finished", map[string]any{
+				"automation_id": item.ID, "run_id": run.ID,
+				"status": string(domainautomation.RunFailed), "error": reason,
+			})
 		}
 		return run, nil
 	}

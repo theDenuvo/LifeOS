@@ -251,8 +251,8 @@ func (r *fakeRepo) FailRun(_ context.Context, runID int64, reason string, at tim
 	return nil
 }
 
-func (r *fakeRepo) RecoverRunning(_ context.Context, at time.Time) (int64, error) {
-	var released int64
+func (r *fakeRepo) RecoverRunning(_ context.Context, at time.Time) ([]*domainautomation.Run, error) {
+	recovered := []*domainautomation.Run{}
 	for _, run := range r.runs {
 		if run.Status != domainautomation.RunRunning {
 			continue
@@ -260,9 +260,9 @@ func (r *fakeRepo) RecoverRunning(_ context.Context, at time.Time) (int64, error
 		run.Status = domainautomation.RunFailed
 		run.Error = "выполнение прервано: LifeOS был перезапущен во время работы сценария"
 		run.FinishedAt = &at
-		released++
+		recovered = append(recovered, run)
 	}
-	return released, nil
+	return recovered, nil
 }
 
 func (r *fakeRepo) RecordSkipped(_ context.Context, automationID int64, trigger, reason string, at time.Time) (int64, error) {
@@ -277,7 +277,13 @@ func (r *fakeRepo) RecordSkipped(_ context.Context, automationID int64, trigger,
 
 type fakeUoW struct{ repo *fakeRepo }
 
+// Do mirrors database/sql: a cancelled context fails the transaction before
+// any statement runs, which is exactly the failure mode the journal writes
+// must survive.
 func (u fakeUoW) Do(ctx context.Context, fn func(context.Context, appautomation.Transaction) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return fn(ctx, u.repo)
 }
 
@@ -706,12 +712,12 @@ func TestRecoverStaleRunsReleasesReservation(t *testing.T) {
 	}
 
 	// Startup recovery releases it as a failed run with the reason.
-	released, err := service.RecoverStaleRuns(context.Background())
+	recovered, err := service.RecoverStaleRuns(context.Background())
 	if err != nil {
 		t.Fatalf("recover: %v", err)
 	}
-	if released != 1 {
-		t.Fatalf("released = %d, want 1", released)
+	if len(recovered) != 1 {
+		t.Fatalf("recovered = %d runs, want 1", len(recovered))
 	}
 	runs, _, err := service.Runs(context.Background(), view.Automation.ID, 10, 0)
 	if err != nil {
@@ -790,5 +796,54 @@ func TestEventTriggerOverlappingRunRecordedAsSkipped(t *testing.T) {
 	tools.mu.Unlock()
 	if count != len(sampleSteps()) {
 		t.Fatalf("the second event must not execute steps: %d calls", count)
+	}
+}
+
+// TestJournalSurvivesCancelledContext pins the P1 from the reliability
+// review: the user closing the HTTP connection cancels the request context,
+// and the journal write must still land — the reservation must not survive
+// the connection.
+func TestJournalSurvivesCancelledContext(t *testing.T) {
+	clock := testClock()
+	repo := newFakeRepo()
+	service := newTestService(clock, repo, &fakeTools{}, &recordedPublisher{})
+	view := mustCreate(t, service, domainautomation.Trigger{
+		Kind:  domainautomation.TriggerEvent,
+		Event: &domainautomation.EventTrigger{Name: "task.completed"},
+	})
+	if _, err := service.Approve(context.Background(), view.Automation.ID); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		service.Observe(ctx, "task.completed", map[string]any{}, clock.Now())
+	}()
+	// Cancel while the run is executing: the finish transaction and the
+	// fallback must run on a context that ignores this cancellation.
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	<-done
+
+	runs, _, err := service.Runs(context.Background(), view.Automation.ID, 10, 0)
+	if err != nil {
+		t.Fatalf("runs: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("runs = %d, want 1", len(runs))
+	}
+	if !runs[0].Status.Terminal() {
+		t.Fatalf("run must reach a terminal status despite the cancelled context: %+v", runs[0])
+	}
+	// The reservation is released: the next event can run again.
+	service.Observe(context.Background(), "task.completed", map[string]any{}, clock.Now())
+	runs, total, err := service.Runs(context.Background(), view.Automation.ID, 10, 0)
+	if err != nil {
+		t.Fatalf("runs after cancel: %v", err)
+	}
+	if total != 2 {
+		t.Fatalf("total runs = %d, want 2: the released reservation must not block", total)
 	}
 }

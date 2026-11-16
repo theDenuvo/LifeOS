@@ -16,47 +16,6 @@ func appRunner(service *appautomation.Service) *appautomation.Runner {
 	return appautomation.NewRunner(service, nil, time.Minute)
 }
 
-// TestRunnerStartRecoversStaleRuns pins the startup behaviour: the runner
-// releases the reservations a crashed process left behind before any loop
-// starts, so an automation never stays blocked forever after a crash.
-func TestRunnerStartRecoversStaleRuns(t *testing.T) {
-	clock := testClock()
-	repo := newFakeRepo()
-	service := newTestService(clock, repo, &fakeTools{}, &recordedPublisher{})
-	view := mustCreate(t, service, domainautomation.Trigger{
-		Kind:  domainautomation.TriggerEvent,
-		Event: &domainautomation.EventTrigger{Name: "task.completed"},
-	})
-	if _, err := service.Approve(context.Background(), view.Automation.ID); err != nil {
-		t.Fatalf("approve: %v", err)
-	}
-	if _, err := repo.StartRun(context.Background(), view.Automation.ID, "event", clock.Now()); err != nil {
-		t.Fatalf("simulate crash: %v", err)
-	}
-
-	runner := appRunner(service)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan struct{})
-	go func() {
-		runner.Start(ctx)
-		close(done)
-	}()
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("runner did not stop")
-	}
-	runs, _, err := service.Runs(context.Background(), view.Automation.ID, 10, 0)
-	if err != nil {
-		t.Fatalf("runs: %v", err)
-	}
-	if len(runs) != 1 || runs[0].Status != domainautomation.RunFailed || runs[0].Error == "" {
-		t.Fatalf("startup recovery must release the stale run: %+v", runs)
-	}
-}
-
 // TestRunnerDispatchesEventRuns checks the live path end to end over a real
 // broker: an event on the stream starts the run without any tick.
 func TestRunnerDispatchesEventRuns(t *testing.T) {

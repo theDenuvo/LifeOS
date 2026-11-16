@@ -404,6 +404,21 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Roadmap stage 6: release the automation reservations a previous process
+	// left running BEFORE anything can start a new run. LifeOS is
+	// single-process, so every running run is stale at startup. This must
+	// happen before the HTTP server opens: a recovery that races a legitimate
+	// run would mark that run failed while its steps keep executing. A failed
+	// recovery leaves the reservation state unproven, so the application
+	// refuses to run rather than block or double-run automations.
+	recoveryCtx, recoveryCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if _, err := automationService.RecoverStaleRuns(recoveryCtx); err != nil {
+		recoveryCancel()
+		slog.Error("Could not recover automation runs from an earlier process; refusing to start on an unproven reservation state", "error", err)
+		os.Exit(1)
+	}
+	recoveryCancel()
+
 	go func() {
 		slog.Info("HTTP server listening", "addr", cfg.ListenAddr)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

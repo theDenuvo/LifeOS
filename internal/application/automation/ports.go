@@ -111,8 +111,9 @@ type Repository interface {
 	FailRun(ctx context.Context, runID int64, reason string, at time.Time) error
 	// RecoverRunning releases the reservations a crashed process left
 	// behind. LifeOS is single-process, so at startup every running run is
-	// stale by definition; they are recorded as failed with the reason.
-	RecoverRunning(ctx context.Context, at time.Time) (int64, error)
+	// stale by definition; they are recorded as failed with the reason and
+	// returned so the service can announce them.
+	RecoverRunning(ctx context.Context, at time.Time) ([]*domainautomation.Run, error)
 	// RecordSkipped stores a visible journal entry for a launch that was
 	// refused before any step ran: chain-depth limit, an overlapping run or
 	// a full dispatch queue. Lost work stays in the journal instead of

@@ -228,18 +228,25 @@ func TestAutomationRunRecoveryAndSkipped(t *testing.T) {
 		t.Fatalf("start run: run=%v err=%v", run, err)
 	}
 
-	// Startup recovery releases it as failed with the reason.
-	var released int64
+	// Startup recovery releases it as failed with the reason and returns the
+	// released runs for announcing.
+	var recoveredCount int
 	err = uow.Do(ctx, func(ctx context.Context, tx appautomation.Transaction) error {
-		var err error
-		released, err = tx.Automations().RecoverRunning(ctx, started.Add(time.Hour))
-		return err
+		recovered, err := tx.Automations().RecoverRunning(ctx, started.Add(time.Hour))
+		if err != nil {
+			return err
+		}
+		recoveredCount = len(recovered)
+		if recoveredCount != 1 {
+			t.Fatalf("recovered = %d runs, want 1", recoveredCount)
+		}
+		if recovered[0].ID != run.ID || recovered[0].Status != domainautomation.RunFailed || recovered[0].Error == "" {
+			t.Fatalf("recovered run = %+v", recovered[0])
+		}
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("recover: %v", err)
-	}
-	if released != 1 {
-		t.Fatalf("released = %d, want 1", released)
 	}
 	err = uow.Do(ctx, func(ctx context.Context, tx appautomation.Transaction) error {
 		read, err := tx.Automations().GetRun(ctx, id, run.ID)

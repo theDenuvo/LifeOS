@@ -404,23 +404,58 @@ func (r *automationRepository) FailRun(ctx context.Context, runID int64, reason 
 
 // RecoverRunning releases every reservation left running by an earlier
 // process. Single-process LifeOS means all of them are stale at startup.
-func (r *automationRepository) RecoverRunning(ctx context.Context, at time.Time) (int64, error) {
-	result, err := r.tx.ExecContext(ctx, `
-		UPDATE automation_runs
-		SET status = 'failed',
-		    error = 'выполнение прервано: LifeOS был перезапущен во время работы сценария',
-		    finished_at = ?
-		WHERE status = 'running'`,
-		unixSeconds(at),
-	)
+// The updated runs are returned so the caller can announce them.
+func (r *automationRepository) RecoverRunning(ctx context.Context, at time.Time) ([]*domainautomation.Run, error) {
+	rows, err := r.tx.QueryContext(ctx, `
+		SELECT id, automation_id, trigger, started_at FROM automation_runs WHERE status = 'running'`)
 	if err != nil {
-		return 0, fmt.Errorf("recover automation runs: %w", err)
+		return nil, fmt.Errorf("recover automation runs: %w", err)
 	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("recover automation runs: %w", err)
+	type stale struct {
+		id, automationID int64
+		trigger          string
+		startedAt        int64
 	}
-	return affected, nil
+	found := []stale{}
+	for rows.Next() {
+		var item stale
+		if err := rows.Scan(&item.id, &item.automationID, &item.trigger, &item.startedAt); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("recover automation runs: %w", err)
+		}
+		found = append(found, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("recover automation runs: %w", err)
+	}
+	rows.Close()
+
+	reason := "выполнение прервано: LifeOS был перезапущен во время работы сценария"
+	recovered := make([]*domainautomation.Run, 0, len(found))
+	for _, item := range found {
+		result, err := r.tx.ExecContext(ctx, `
+			UPDATE automation_runs SET status = 'failed', error = ?, finished_at = ?
+			WHERE id = ? AND status = 'running'`,
+			reason, unixSeconds(at), item.id,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("recover automation run %d: %w", item.id, err)
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return nil, fmt.Errorf("recover automation run %d: %w", item.id, err)
+		}
+		if affected == 0 {
+			continue
+		}
+		recovered = append(recovered, &domainautomation.Run{
+			ID: item.id, AutomationID: item.automationID, Trigger: item.trigger,
+			Status: domainautomation.RunFailed, Error: reason,
+			StartedAt: timeFromUnix(item.startedAt), FinishedAt: &at,
+		})
+	}
+	return recovered, nil
 }
 
 // RecordSkipped stores a terminal journal entry for a launch that was

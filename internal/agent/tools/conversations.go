@@ -277,6 +277,9 @@ func (h *WorkspaceHub) ensure(ctx context.Context, id int64, title, task string,
 		if workspace.Kind != domainassistant.KindProject {
 			return nil, false, fmt.Errorf("диалог %d не является рабочим пространством", id)
 		}
+		if err := h.bindRoute(ctx, workspace, sourceID); err != nil {
+			return nil, false, err
+		}
 		return workspace, false, nil
 	}
 
@@ -288,6 +291,9 @@ func (h *WorkspaceHub) ensure(ctx context.Context, id int64, title, task string,
 	needle := strings.ToLower(title)
 	for _, workspace := range workspaces {
 		if workspace.Title != nil && strings.ToLower(strings.TrimSpace(*workspace.Title)) == needle {
+			if err := h.bindRoute(ctx, workspace, sourceID); err != nil {
+				return nil, false, err
+			}
 			return workspace, false, nil
 		}
 	}
@@ -297,6 +303,33 @@ func (h *WorkspaceHub) ensure(ctx context.Context, id int64, title, task string,
 		return nil, false, err
 	}
 	return created, true, nil
+}
+
+// bindRoute attaches the delegating main chat to a workspace that has no
+// route yet: without it report_result would never reach a main conversation.
+// A route that already exists belongs to the chat that delegated first and is
+// never overwritten.
+func (h *WorkspaceHub) bindRoute(ctx context.Context, workspace *domainassistant.Conversation, sourceID *int64) error {
+	if sourceID == nil || workspace.SourceConversationID != nil || workspace.ID == *sourceID {
+		return nil
+	}
+	bound := false
+	err := h.uow.Do(ctx, func(ctx context.Context, tx assistant.Transaction) error {
+		set, err := tx.Assistant().BindSourceConversation(ctx, workspace.ID, *sourceID)
+		if err != nil {
+			return err
+		}
+		bound = set
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("bind workspace %d to main chat %d: %w", workspace.ID, *sourceID, err)
+	}
+	if bound {
+		workspace.SourceConversationID = sourceID
+		slog.Info("workspace route bound on first delegation", "workspace_id", workspace.ID, "main_conversation_id", *sourceID)
+	}
+	return nil
 }
 
 // report copies a workspace's significant result into the main conversation.

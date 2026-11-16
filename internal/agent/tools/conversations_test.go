@@ -79,6 +79,17 @@ func (s *memoryAssistantStore) TouchConversation(ctx context.Context, id int64, 
 	return nil
 }
 
+// BindSourceConversation mirrors the SQL rule: only an unbound project
+// conversation can be bound.
+func (s *memoryAssistantStore) BindSourceConversation(ctx context.Context, conversationID, sourceID int64) (bool, error) {
+	conversation, ok := s.conversations[conversationID]
+	if !ok || conversation.Kind != domainassistant.KindProject || conversation.SourceConversationID != nil {
+		return false, nil
+	}
+	conversation.SourceConversationID = &sourceID
+	return true, nil
+}
+
 func (s *memoryAssistantStore) InsertMessage(ctx context.Context, message *domainassistant.Message) (int64, error) {
 	s.messages[message.ConversationID] = append(s.messages[message.ConversationID], message)
 	return int64(len(s.messages[message.ConversationID])), nil

@@ -180,6 +180,12 @@ type Repository interface {
 	ListConversations(ctx context.Context, limit, offset int, kind *domainassistant.Kind) ([]*domainassistant.Conversation, int, error)
 	TouchConversation(ctx context.Context, id int64, at time.Time) error
 
+	// BindSourceConversation records the main chat that first delegated work
+	// into a project workspace. Only an unbound workspace can be bound, so an
+	// existing route is never overwritten; the result reports whether this
+	// call set the binding.
+	BindSourceConversation(ctx context.Context, conversationID, sourceID int64) (bool, error)
+
 	InsertMessage(ctx context.Context, message *domainassistant.Message) (int64, error)
 	ListMessages(ctx context.Context, conversationID int64, limit int) ([]*domainassistant.Message, error)
 

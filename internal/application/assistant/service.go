@@ -569,6 +569,16 @@ func (s *Service) documentPrompt(ctx context.Context, attachments []domainassist
 	return b.String()
 }
 
+// workspaceRoutingPrompt carries the main chat's routing rules. They are
+// unconditional: the model must know how to create a space, offer one for a
+// grown topic, delegate into it and expect its results back even when no
+// workspace exists yet.
+const workspaceRoutingPrompt = "Рабочие пространства: продолжительная отдельная тема заслуживает собственного пространства. " +
+	"Если пользователь просит вынести тему в отдельное пространство, разбирать её отдельно или продолжить работу над проектом: " +
+	"для новой темы вызови create_workspace с коротким названием и темой, затем delegate_to_workspace с самим поручением; " +
+	"для существующего пространства используй его ID или точное название. Когда тема в главном чате разрослась в продолжительную работу, " +
+	"сам предложи вынести её в отдельное пространство. Результаты пространств возвращаются в главный чат сами — вручную копировать их не нужно.\n"
+
 func (s *Service) systemPrompt(now time.Time, snapshot string, contextUnavailable bool, interaction InteractionContext, autoConfirm bool, conversation *domainassistant.Conversation, workspaces string) string {
 	prompt := "Ты — ассистент LifeOS и главный интерфейс пользователя со своей персональной системой.\n" +
 		"Твоя задача — понять намерение и помочь его выполнить, а не заставлять пользователя искать разделы, поля и связи между модулями.\n" +
@@ -581,19 +591,25 @@ func (s *Service) systemPrompt(now time.Time, snapshot string, contextUnavailabl
 		if conversation.Purpose != nil && strings.TrimSpace(*conversation.Purpose) != "" {
 			prompt += "Тема пространства: " + *conversation.Purpose + "\n"
 		}
-		prompt += "Это продолжительная работа над одной темой; здесь уместны глубокий разбор, файлы, документы и промежуточные шаги. " +
-			"Когда появляется существенный результат, итог или решение, вызови report_result с кратким итогом — он вернёт результат в главный чат. " +
-			"Не вызывай delegate_to_workspace: внутри пространства это запрещено.\n"
+		if conversation.SourceConversationID != nil {
+			prompt += "Это продолжительная работа над одной темой; здесь уместны глубокий разбор, файлы, документы и промежуточные шаги. " +
+				"Когда появляется существенный результат, итог или решение, вызови report_result с кратким итогом — он вернёт результат в исходный главный чат.\n"
+		} else {
+			prompt += "Это продолжительная работа над одной темой; здесь уместны глубокий разбор, файлы, документы и промежуточные шаги.\n"
+			prompt += "У этого пространства нет привязки к главному чату: report_result вернёт ошибку и ничего не доставит. " +
+				"Важные результаты и итоги излагай здесь, в диалоге, или предложи пользователю продолжить работу из главного чата.\n"
+		}
+		prompt += "Не вызывай delegate_to_workspace: внутри пространства это запрещено.\n"
+	} else {
+		// The routing rules belong to the main chat and do not depend on how
+		// many workspaces already exist; the list below may be empty.
+		prompt += "\n" + workspaceRoutingPrompt
+		if strings.TrimSpace(workspaces) != "" {
+			prompt += "\nОткрытые рабочие пространства (проектные чаты):\n" + workspaces + "\n"
+		}
 	}
 	if strings.TrimSpace(snapshot) != "" {
 		prompt += "\nТекущее состояние LifeOS (обновляется автоматически; может быть неполным):\n" + snapshot + "\n"
-	}
-	if strings.TrimSpace(workspaces) != "" {
-		prompt += "\nОткрытые рабочие пространства (проектные чаты):\n" + workspaces + "\n"
-		prompt += "Если пользователь просит вынести тему в отдельное пространство, разбирать её отдельно или продолжить работу над проектом: " +
-			"для новой темы вызови create_workspace с коротким названием и темой, затем delegate_to_workspace с самим поручением; " +
-			"для существующего пространства используй его ID. Когда тема в главном чате разрослась в продолжительную работу, сам предложи вынести её в отдельное пространство. " +
-			"Результаты пространств возвращаются в главный чат сами — вручную копировать их не нужно.\n"
 	}
 	if s.workdir != "" {
 		prompt += "\nРабочий каталог на машине пользователя: " + s.workdir + " (" + osName() + "). Относительные пути в инструментах считаются от него.\n"

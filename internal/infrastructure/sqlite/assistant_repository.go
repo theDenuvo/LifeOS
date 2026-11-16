@@ -124,6 +124,23 @@ func (r *assistantRepository) TouchConversation(ctx context.Context, id int64, a
 	return nil
 }
 
+// BindSourceConversation records the main chat that first delegated into a
+// project workspace. The write targets only unbound project conversations, so
+// a route that already exists is never replaced.
+func (r *assistantRepository) BindSourceConversation(ctx context.Context, conversationID, sourceID int64) (bool, error) {
+	result, err := r.tx.ExecContext(ctx,
+		`UPDATE conversations SET source_conversation_id = ? WHERE id = ? AND kind = 'project' AND source_conversation_id IS NULL`,
+		sourceID, conversationID)
+	if err != nil {
+		return false, fmt.Errorf("bind source conversation %d -> %d: %w", sourceID, conversationID, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("bind source conversation %d -> %d: rows affected: %w", sourceID, conversationID, err)
+	}
+	return affected > 0, nil
+}
+
 // InsertMessage stores a message and returns its ID.
 func (r *assistantRepository) InsertMessage(ctx context.Context, message *domainassistant.Message) (int64, error) {
 	attachments, err := encodeAttachments(message.Attachments)

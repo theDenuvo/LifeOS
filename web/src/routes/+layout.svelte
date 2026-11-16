@@ -7,6 +7,8 @@
 		conversationsRevision,
 		reminderNotice,
 		dismissReminder,
+		outreachNotice,
+		dismissOutreachNotice,
 		bumpConversations
 	} from '$lib/live';
 	import { goto } from '$app/navigation';
@@ -266,8 +268,7 @@
 	</main>
 
 	{#if $reminderNotice}
-		<aside class="reminder-toast" role="status" aria-live="polite">
-			<div class="reminder-body">
+		<aside class="reminder-toast" role="status" aria-live="polite">			<div class="reminder-body">
 				<span class="reminder-kind">
 					{$reminderNotice.kind === 'overdue'
 						? 'Просрочено'
@@ -288,6 +289,25 @@
 				{/if}
 			</div>
 			<button class="reminder-close" on:click={dismissReminder} aria-label="Скрыть напоминание">×</button>
+		</aside>
+	{/if}
+
+	{#if $outreachNotice}
+		<aside class="reminder-toast outreach-toast" role="status" aria-live="polite">
+			<div class="reminder-body">
+				<span class="reminder-kind">Инициатива LifeOS</span>
+				<span class="reminder-title">{$outreachNotice.title}</span>
+				<button
+					class="outreach-open"
+					on:click={() => {
+						dismissOutreachNotice();
+						goto('/');
+					}}
+				>
+					Открыть чат
+				</button>
+			</div>
+			<button class="reminder-close" on:click={dismissOutreachNotice} aria-label="Скрыть обращение">×</button>
 		</aside>
 	{/if}
 
@@ -807,6 +827,30 @@
 		cursor: pointer;
 		font-size: 1.1rem;
 		line-height: 1;
+	}
+
+	.outreach-toast .reminder-kind {
+		color: var(--accent-bright);
+	}
+
+	/* Stack above the reminder toast when both are on screen at once. */
+	.outreach-toast {
+		bottom: calc(var(--space-5) + 11rem);
+	}
+
+	.outreach-open {
+		margin-top: var(--space-2);
+		padding: var(--space-2) var(--space-4);
+		border: none;
+		border-radius: var(--radius-sm);
+		background: var(--accent);
+		color: var(--fg-primary);
+		font-size: var(--text-xs);
+		cursor: pointer;
+	}
+
+	.outreach-open:hover {
+		filter: brightness(1.1);
 	}
 
 	.shell.collapsed {

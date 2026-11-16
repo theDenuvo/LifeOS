@@ -41,6 +41,7 @@ type Services struct {
 	Summary    *summary.Service
 	Assistant  *assistant.Service
 	Proactive  *proactive.Service
+	Outreach   *proactive.OutreachService
 	Search     *search.Service
 	Settings   *settings.Service
 	Profile    *profile.Service
@@ -151,6 +152,11 @@ func (h *Handler) apiRoutes() http.Handler {
 	mux.HandleFunc("GET /insights", h.listInsights)
 	mux.HandleFunc("POST /insights/{key}/dismiss", h.dismissInsight)
 	mux.HandleFunc("POST /insights/{key}/snooze", h.snoozeInsight)
+	mux.HandleFunc("GET /outreach", h.listOutreach)
+	mux.HandleFunc("GET /outreach/{id}", h.getOutreach)
+	mux.HandleFunc("POST /outreach/{id}/ack", h.acknowledgeOutreach)
+	mux.HandleFunc("POST /outreach/{id}/dismiss", h.dismissOutreach)
+	mux.HandleFunc("POST /outreach/{id}/snooze", h.snoozeOutreach)
 	mux.HandleFunc("GET /search", h.search)
 	mux.HandleFunc("GET /memory", h.listMemory)
 	mux.HandleFunc("POST /memory", h.createMemory)

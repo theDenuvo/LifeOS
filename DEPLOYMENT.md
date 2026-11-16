@@ -197,6 +197,11 @@ curl -I http://127.0.0.1:8787/healthz # 200 OK, application/json
 | `LIFEOS_MCP_ALLOW_WRITES` | Нет | `false` | Разрешить мутирующие MCP-инструменты |
 | `LIFEOS_TOOLS_ROOT` | Нет | — (вся машина) | Ограничить файловые инструменты каталогом |
 | `LIFEOS_TOOLS_SHELL` | Нет | `true` | Разрешить инструмент `run_command` |
+| `LIFEOS_OUTREACH_ENABLED` | Нет | `true` | Разрешить LifeOS самому начинать диалог |
+| `LIFEOS_OUTREACH_QUIET_FROM` | Нет | `22` | Час начала тихого времени (локальное время) |
+| `LIFEOS_OUTREACH_QUIET_TO` | Нет | `8` | Час конца тихого времени |
+| `LIFEOS_OUTREACH_MIN_INTERVAL_MINUTES` | Нет | `90` | Минимальная пауза между обращениями |
+| `LIFEOS_OUTREACH_KIND_COOLDOWN_HOURS` | Нет | `24` | Пауза между обращениями об одном и том же виде наблюдения |
 
 * — обязательны если соответствующий провайдер включен
 

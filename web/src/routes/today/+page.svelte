@@ -263,6 +263,9 @@
 				<div class="insight-main">
 					<span class="insight-title">{insight.title}</span>
 					<p class="insight-detail">{insight.detail}</p>
+					{#if insight.proposal}
+						<p class="insight-proposal">Предлагаю: {insight.proposal}</p>
+					{/if}
 				</div>
 				<div class="insight-actions">
 					<button class="ghost" on:click={() => remindTomorrow(insight.key)}>Завтра</button>
@@ -796,6 +799,12 @@
 		margin: 0.15rem 0 0;
 		font-size: 0.78rem;
 		color: var(--fg-muted);
+	}
+
+	.insight-proposal {
+		margin: 0.25rem 0 0;
+		font-size: 0.78rem;
+		color: var(--fg-secondary);
 	}
 
 	.insight-actions {

@@ -223,3 +223,11 @@ type StalledGoal struct {
 	Goal   *domaingoal.Goal
 	Review *Review
 }
+
+// DeadlineRisk pairs one active goal with the factual signs that its target
+// date is approaching faster than the work is moving.
+type DeadlineRisk struct {
+	Goal     *domaingoal.Goal
+	DaysLeft int
+	IdleDays int
+}

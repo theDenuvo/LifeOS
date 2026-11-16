@@ -545,10 +545,49 @@ export interface Insight {
 	detail: string;
 	count: number;
 	task_ids: number[];
+	/** Roadmap stage 5: the concrete next action the user can accept. */
+	proposal?: string;
+}
+
+export type OutreachOutcome = 'pending' | 'acknowledged' | 'dismissed' | 'snoozed';
+
+export interface Outreach {
+	id: number;
+	conversation_id: number;
+	message_id: number;
+	insight_key: string;
+	kind: string;
+	severity: 'critical' | 'warning' | 'info';
+	title: string;
+	reason: string;
+	proposal: string;
+	outcome: OutreachOutcome;
+	created_at: string;
+	decided_at?: string | null;
+	snoozed_until?: string | null;
 }
 
 export function getInsights(): Promise<{ data: Insight[] }> {
 	return request<{ data: Insight[] }>('/api/v1/insights');
+}
+
+export function listOutreach(limit = 30): Promise<{ data: Outreach[]; total: number }> {
+	return request(`/api/v1/outreach?limit=${limit}`);
+}
+
+export function acknowledgeOutreach(id: number): Promise<void> {
+	return request(`/api/v1/outreach/${id}/ack`, { method: 'POST' });
+}
+
+export function dismissOutreach(id: number): Promise<void> {
+	return request(`/api/v1/outreach/${id}/dismiss`, { method: 'POST' });
+}
+
+export function snoozeOutreach(id: number, until?: string): Promise<void> {
+	return request(`/api/v1/outreach/${id}/snooze`, {
+		method: 'POST',
+		body: JSON.stringify({ until })
+	});
 }
 
 export function dismissInsight(key: string): Promise<void> {

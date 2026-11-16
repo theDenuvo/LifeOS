@@ -88,6 +88,10 @@ func (t taskTransaction) Assistant() assistant.Repository { return &assistantRep
 
 func (t taskTransaction) Insights() proactive.Repository { return &insightRepository{tx: t.tx} }
 
+func (t taskTransaction) Outreach() proactive.OutreachRepository {
+	return &outreachRepository{tx: t.tx}
+}
+
 func (t taskTransaction) Settings() settings.Repository { return &settingsRepository{tx: t.tx} }
 
 // taskRepository is the SQLite implementation of tasks.TaskRepository.

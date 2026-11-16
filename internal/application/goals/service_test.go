@@ -888,3 +888,43 @@ func TestOnTaskCompletedReportsFailures(t *testing.T) {
 		t.Fatalf("OnTaskCompleted on an unlinked task: %v", err)
 	}
 }
+
+func TestDeadlineRisksSurfacesCloseDatesWithoutProgress(t *testing.T) {
+	service, _, _, clock := newService(t)
+
+	// Target date inside the window, no activity at all: a clear risk.
+	soon := clock.at.Add(4 * 24 * time.Hour)
+	created, _ := service.Create(context.Background(), appgoals.CreateInput{
+		Title:      "Успеть к сдаче",
+		TargetDate: &soon,
+	})
+	if _, err := service.Approve(context.Background(), created.Goal.ID); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	// Target date far away: not a risk yet, whatever the activity.
+	far := clock.at.Add(60 * 24 * time.Hour)
+	calmer, _ := service.Create(context.Background(), appgoals.CreateInput{
+		Title:      "Долгая цель",
+		TargetDate: &far,
+	})
+	if _, err := service.Approve(context.Background(), calmer.Goal.ID); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	// Time passes and nothing moves: the close goal starts drifting.
+	clock.add(4 * 24 * time.Hour)
+	risks, err := service.DeadlineRisks(context.Background())
+	if err != nil {
+		t.Fatalf("deadline risks: %v", err)
+	}
+	if len(risks) != 1 || risks[0].Goal.ID != created.Goal.ID {
+		t.Fatalf("expected only the close deadline goal to surface, got %+v", risks)
+	}
+	if risks[0].DaysLeft < 0 || risks[0].DaysLeft > 7 {
+		t.Fatalf("days left must be within the window, got %d", risks[0].DaysLeft)
+	}
+	if risks[0].IdleDays < 3 {
+		t.Fatalf("idle days must explain the drift, got %d", risks[0].IdleDays)
+	}
+}

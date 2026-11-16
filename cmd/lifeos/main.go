@@ -34,6 +34,7 @@ import (
 	"github.com/theDenuvo/LifeOS/internal/application/summary"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	"github.com/theDenuvo/LifeOS/internal/config"
+	domainmemory "github.com/theDenuvo/LifeOS/internal/domain/memory"
 	"github.com/theDenuvo/LifeOS/internal/domain/task"
 	"github.com/theDenuvo/LifeOS/internal/events"
 	infradocuments "github.com/theDenuvo/LifeOS/internal/infrastructure/documents"
@@ -134,14 +135,6 @@ func main() {
 		goals.WithTaskProvider(goals.TaskEngineAdapter{Service: taskService}),
 		goals.WithPublisher(broker),
 	)
-	proactiveService := proactive.NewService(
-		sqlite.NewInsightUnitOfWork(db),
-		taskService,
-		inboxService,
-		clock,
-		cfg.Timezone,
-		proactive.WithGoals(goalsService),
-	)
 	searchService := search.NewService(taskService, inboxService)
 	eventService := appevents.NewService(
 		sqlite.NewEventUnitOfWork(db),
@@ -224,6 +217,22 @@ func main() {
 		clock,
 		appmemory.WithExtractor(agentmemory.NewExtractor(cfg.DocLLMBaseURL, cfg.DocLLMAPIKey, cfg.DocLLMModel)),
 		appmemory.WithPublisher(broker),
+	)
+
+	// Roadmap stage 5: full proactivity. The detectors now cross-reference
+	// tasks with the calendar, goals with their deadlines and durable
+	// agreements with their own age, and the outreach engine decides when one
+	// of the resulting insights is worth starting a dialogue about.
+	proactiveService := proactive.NewService(
+		sqlite.NewInsightUnitOfWork(db),
+		taskService,
+		inboxService,
+		clock,
+		cfg.Timezone,
+		proactive.WithGoals(goalsService),
+		proactive.WithDeadlineRisks(goalsService),
+		proactive.WithCalendar(eventService),
+		proactive.WithMemory(memoryAgreements{service: memoryService}),
 	)
 
 	// The dashboard shows the day's load and the ideas that are due to resurface.
@@ -315,6 +324,30 @@ func main() {
 	)
 	workspaceHub.Bind(assistantService)
 
+	// Roadmap stage 5: the initiative engine. It writes into the main chat on
+	// LifeOS's own behalf, so it is built after the assistant storage exists.
+	outreachConfig := proactive.OutreachConfig{
+		QuietFrom:    cfg.OutreachQuietFrom,
+		QuietTo:      cfg.OutreachQuietTo,
+		MinInterval:  time.Duration(cfg.OutreachMinIntervalMinutes) * time.Minute,
+		KindCooldown: time.Duration(cfg.OutreachKindCooldownHours) * time.Hour,
+	}
+	outreachService := proactive.NewOutreachService(
+		sqlite.NewInsightUnitOfWork(db),
+		sqlite.NewOutreachAssistant(db),
+		broker,
+		clock,
+		cfg.Timezone,
+		proactive.WithOutreachSettings(settingsService),
+		proactive.WithOutreachCalendar(eventService),
+		proactive.WithOutreachConfig(outreachConfig),
+	)
+	if !cfg.OutreachEnabled {
+		// The env switch is the hard off; the runtime setting stays available
+		// for the soft off the user controls from the interface.
+		outreachService.Disable()
+	}
+
 	// Create HTTP handler with all routes
 	handler := httptransport.NewHandler(db, cfg, dist.FS, httptransport.Services{
 		Tasks:      taskService,
@@ -322,6 +355,7 @@ func main() {
 		Summary:    summaryService,
 		Assistant:  assistantService,
 		Proactive:  proactiveService,
+		Outreach:   outreachService,
 		Search:     searchService,
 		Settings:   settingsService,
 		Profile:    profileService,
@@ -360,8 +394,9 @@ func main() {
 		}
 	}()
 
-	// Proactive runner: recompute insights periodically and announce new ones.
-	go proactive.NewRunner(proactiveService, broker, 15*time.Minute).Start(ctx)
+	// Proactive runner: recompute insights periodically, announce new ones and
+	// run the initiative gate over the fresh picture.
+	go proactive.NewRunner(proactiveService, broker, 15*time.Minute, outreachService).Start(ctx)
 
 	// Reminder delivery: reminders are planned when a task changes and published
 	// here when their moment comes, so the browser shows them without polling.
@@ -401,6 +436,34 @@ func workingDirectory() string {
 		return ""
 	}
 	return dir
+}
+
+// memoryAgreements feeds the forgotten-commitment detector from the durable
+// memory: active agreements are exactly the promises worth revisiting.
+type memoryAgreements struct {
+	service *appmemory.Service
+}
+
+func (a memoryAgreements) Agreements(ctx context.Context) ([]proactive.Agreement, error) {
+	category := domainmemory.CategoryAgreement
+	status := domainmemory.StatusActive
+	entries, _, err := a.service.List(ctx, appmemory.Filter{
+		Category: &category,
+		Status:   &status,
+		Limit:    200,
+	})
+	if err != nil {
+		return nil, err
+	}
+	result := make([]proactive.Agreement, 0, len(entries))
+	for _, entry := range entries {
+		result = append(result, proactive.Agreement{
+			ID:        entry.ID,
+			Content:   entry.Content,
+			UpdatedAt: entry.UpdatedAt,
+		})
+	}
+	return result, nil
 }
 
 // documentTextProvider feeds extracted document Markdown into the assistant

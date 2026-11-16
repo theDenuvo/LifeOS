@@ -86,6 +86,22 @@ export function dismissReminder(): void {
 	reminderNotice.set(null);
 }
 
+// outreach is LifeOS starting the dialogue itself (roadmap stage 5). Like a
+// reminder it must reach the user wherever they are, so it lives here instead
+// of one page's subscription.
+export interface OutreachNotice {
+	id: number;
+	conversation_id: number;
+	title: string;
+	severity: 'critical' | 'warning' | 'info';
+}
+
+export const outreachNotice = writable<OutreachNotice | null>(null);
+
+export function dismissOutreachNotice(): void {
+	outreachNotice.set(null);
+}
+
 export function bumpConversations(): void {
 	conversationsRevision.update((value) => value + 1);
 }
@@ -101,6 +117,7 @@ const eventTypes = [
 	'inbox.converted',
 	'inbox.dismissed',
 	'insight.detected',
+	'outreach.created',
 	'reminder',
 	'plan.updated',
 	'event.created',
@@ -164,6 +181,28 @@ export function startLive(): void {
 			deliverReminder(payload);
 		} catch {
 			// A malformed reminder is not worth breaking the stream for.
+		}
+	});
+
+	// An outreach is LifeOS speaking first. The toast links into the main
+	// chat, where the full reason and the proposal wait as an assistant
+	// message; the chat reloads it through the same liveRevision bump.
+	source.addEventListener('outreach.created', (event) => {
+		try {
+			const payload = JSON.parse((event as MessageEvent).data) as {
+				id: number;
+				conversation_id: number;
+				title: string;
+				severity: string;
+			};
+			outreachNotice.set({
+				id: payload.id,
+				conversation_id: payload.conversation_id,
+				title: payload.title,
+				severity: payload.severity === 'critical' ? 'critical' : payload.severity === 'info' ? 'info' : 'warning'
+			});
+		} catch {
+			// A malformed outreach event is not worth breaking the stream for.
 		}
 	});
 

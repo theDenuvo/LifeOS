@@ -43,6 +43,14 @@ type Config struct {
 	// means the assistant may work with any path on the machine.
 	ToolsRoot  string
 	ToolsShell bool
+
+	// Roadmap stage 5: proactive initiative. The gate decides when LifeOS
+	// itself starts the dialogue; the user can turn it off entirely.
+	OutreachEnabled            bool
+	OutreachQuietFrom          int
+	OutreachQuietTo            int
+	OutreachMinIntervalMinutes int
+	OutreachKindCooldownHours  int
 }
 
 func Load(configPath string) (*Config, error) {
@@ -52,25 +60,30 @@ func Load(configPath string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		ListenAddr:         getEnv("LIFEOS_LISTEN_ADDR", "127.0.0.1:8787"),
-		DataDir:            getEnv("LIFEOS_DATA_DIR", "./data"),
-		Timezone:           getEnv("LIFEOS_TIMEZONE", "Europe/Moscow"),
-		LogLevel:           getEnv("LIFEOS_LOG_LEVEL", "info"),
-		LLMProvider:        getEnv("LIFEOS_LLM_PROVIDER", "openrouter"),
-		LLMBaseURL:         getEnv("LIFEOS_LLM_BASE_URL", "https://openrouter.ai/api/v1"),
-		LLMAPIKey:          getEnv("LIFEOS_LLM_API_KEY", ""),
-		LLMModel:           getEnv("LIFEOS_LLM_MODEL", "openai/gpt-4o-mini"),
-		LLMRetryAttempts:   getEnvInt("LIFEOS_LLM_RETRY_ATTEMPTS", 3),
-		LLMRetryDelayMS:    getEnvInt("LIFEOS_LLM_RETRY_DELAY_MS", 400),
-		AssistantMaxRounds: getEnvInt("LIFEOS_ASSISTANT_MAX_ROUNDS", 12),
-		DocLLMBaseURL:      getEnv("LIFEOS_DOC_LLM_BASE_URL", ""),
-		DocLLMAPIKey:       getEnv("LIFEOS_DOC_LLM_API_KEY", ""),
-		DocLLMModel:        getEnv("LIFEOS_DOC_LLM_MODEL", ""),
-		MCPEnabled:         getEnvBool("LIFEOS_MCP_ENABLED", false),
-		MCPPath:            getEnv("LIFEOS_MCP_PATH", "/mcp"),
-		MCPAllowWrites:     getEnvBool("LIFEOS_MCP_ALLOW_WRITES", false),
-		ToolsRoot:          getEnv("LIFEOS_TOOLS_ROOT", ""),
-		ToolsShell:         getEnvBool("LIFEOS_TOOLS_SHELL", true),
+		ListenAddr:                 getEnv("LIFEOS_LISTEN_ADDR", "127.0.0.1:8787"),
+		DataDir:                    getEnv("LIFEOS_DATA_DIR", "./data"),
+		Timezone:                   getEnv("LIFEOS_TIMEZONE", "Europe/Moscow"),
+		LogLevel:                   getEnv("LIFEOS_LOG_LEVEL", "info"),
+		LLMProvider:                getEnv("LIFEOS_LLM_PROVIDER", "openrouter"),
+		LLMBaseURL:                 getEnv("LIFEOS_LLM_BASE_URL", "https://openrouter.ai/api/v1"),
+		LLMAPIKey:                  getEnv("LIFEOS_LLM_API_KEY", ""),
+		LLMModel:                   getEnv("LIFEOS_LLM_MODEL", "openai/gpt-4o-mini"),
+		LLMRetryAttempts:           getEnvInt("LIFEOS_LLM_RETRY_ATTEMPTS", 3),
+		LLMRetryDelayMS:            getEnvInt("LIFEOS_LLM_RETRY_DELAY_MS", 400),
+		AssistantMaxRounds:         getEnvInt("LIFEOS_ASSISTANT_MAX_ROUNDS", 12),
+		DocLLMBaseURL:              getEnv("LIFEOS_DOC_LLM_BASE_URL", ""),
+		DocLLMAPIKey:               getEnv("LIFEOS_DOC_LLM_API_KEY", ""),
+		DocLLMModel:                getEnv("LIFEOS_DOC_LLM_MODEL", ""),
+		MCPEnabled:                 getEnvBool("LIFEOS_MCP_ENABLED", false),
+		MCPPath:                    getEnv("LIFEOS_MCP_PATH", "/mcp"),
+		MCPAllowWrites:             getEnvBool("LIFEOS_MCP_ALLOW_WRITES", false),
+		ToolsRoot:                  getEnv("LIFEOS_TOOLS_ROOT", ""),
+		ToolsShell:                 getEnvBool("LIFEOS_TOOLS_SHELL", true),
+		OutreachEnabled:            getEnvBool("LIFEOS_OUTREACH_ENABLED", true),
+		OutreachQuietFrom:          getEnvInt("LIFEOS_OUTREACH_QUIET_FROM", 22),
+		OutreachQuietTo:            getEnvInt("LIFEOS_OUTREACH_QUIET_TO", 8),
+		OutreachMinIntervalMinutes: getEnvInt("LIFEOS_OUTREACH_MIN_INTERVAL_MINUTES", 90),
+		OutreachKindCooldownHours:  getEnvInt("LIFEOS_OUTREACH_KIND_COOLDOWN_HOURS", 24),
 	}
 
 	// Load .env file if it exists (non-fatal if missing)
@@ -99,6 +112,11 @@ func Load(configPath string) (*Config, error) {
 	cfg.MCPAllowWrites = getEnvBool("LIFEOS_MCP_ALLOW_WRITES", cfg.MCPAllowWrites)
 	cfg.ToolsRoot = getEnv("LIFEOS_TOOLS_ROOT", cfg.ToolsRoot)
 	cfg.ToolsShell = getEnvBool("LIFEOS_TOOLS_SHELL", cfg.ToolsShell)
+	cfg.OutreachEnabled = getEnvBool("LIFEOS_OUTREACH_ENABLED", cfg.OutreachEnabled)
+	cfg.OutreachQuietFrom = getEnvInt("LIFEOS_OUTREACH_QUIET_FROM", cfg.OutreachQuietFrom)
+	cfg.OutreachQuietTo = getEnvInt("LIFEOS_OUTREACH_QUIET_TO", cfg.OutreachQuietTo)
+	cfg.OutreachMinIntervalMinutes = getEnvInt("LIFEOS_OUTREACH_MIN_INTERVAL_MINUTES", cfg.OutreachMinIntervalMinutes)
+	cfg.OutreachKindCooldownHours = getEnvInt("LIFEOS_OUTREACH_KIND_COOLDOWN_HOURS", cfg.OutreachKindCooldownHours)
 
 	// Validate timezone using embedded IANA database
 	loc, err := time.LoadLocation(cfg.Timezone)

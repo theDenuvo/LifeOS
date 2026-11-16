@@ -638,7 +638,7 @@ GET /api/v1/insights
 Возвращает вычисленные наблюдения: просрочки, дедлайны сегодня, перегрузку дня, накопившиеся входящие, задачи без срока, совпадающие точные дедлайны. Наблюдения не хранятся: они исчезают, когда исчезает причина.
 
 ```json
-{"data": [{"key": "overdue", "kind": "overdue", "severity": "critical", "title": "Просроченные задачи", "detail": "2 задач(и) просрочены", "count": 2, "task_ids": [1, 2]}]}
+{"data": [{"key": "overdue", "kind": "overdue", "severity": "critical", "title": "Просроченные задачи", "detail": "2 задач(и) просрочены", "count": 2, "task_ids": [1, 2], "proposal": "Перенести просроченное на реальные даты или закрыть"}]}
 ```
 
 ```
@@ -647,6 +647,26 @@ POST /api/v1/insights/{key}/snooze   {"until": "2026-11-13T12:00:00Z"}
 ```
 
 `dismiss` скрывает наблюдение до изменения ситуации; `snooze` — до указанного момента (по умолчанию +24 часа). Оба возвращают `204`.
+
+### 6.1. Инициатива LifeOS (outreach)
+
+Когда наблюдение оправдывает обращение, LifeOS сам начинает диалог в главном чате: сообщение ассистента с причиной и предлагаемым действием. Каждое обращение хранится с реакцией пользователя.
+
+```
+GET /api/v1/outreach?limit=30&offset=0
+GET /api/v1/outreach/{id}
+POST /api/v1/outreach/{id}/ack
+POST /api/v1/outreach/{id}/dismiss
+POST /api/v1/outreach/{id}/snooze   {"until": "2026-11-13T12:00:00Z"}
+```
+
+```json
+{"data": [{"id": 1, "conversation_id": 4, "message_id": 21, "insight_key": "overdue", "kind": "overdue", "severity": "critical", "title": "Просроченные задачи", "reason": "2 задач(и) просрочены", "proposal": "Перенести или закрыть", "outcome": "pending", "created_at": "2026-11-12T09:00:00Z", "decided_at": null, "snoozed_until": null}]}
+```
+
+`outcome` — `pending`, `acknowledged`, `dismissed` или `snoozed`. Ответ пользователя в том же диалоге засчитывается как `acknowledged` автоматически при следующем проходе движка проактивности. Повторная реакция по уже решённому обращению возвращает `500` с текстом ошибки, неизвестный id — `404`.
+
+Обращения инициируются только для наблюдений уровня `critical` и `warning` и сдерживаются вратами: тихие часы (`LIFEOS_OUTREACH_QUIET_FROM/TO`), минимальный интервал (`LIFEOS_OUTREACH_MIN_INTERVAL_MINUTES`), откат на вид (`LIFEOS_OUTREACH_KIND_COOLDOWN_HOURS`), вид, отклонённый пользователем трижды за неделю, замолкает на неделю, идущая встреча. Глобальный выключатель — переменная `LIFEOS_OUTREACH_ENABLED` или настройка `proactive.outreach` (`{"enabled": false}`).
 
 ### 7. События (SSE)
 

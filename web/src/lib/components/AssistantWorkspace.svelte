@@ -69,6 +69,7 @@
 		actions: PendingAction[];
 		attachments: Attachment[];
 		handoff?: { workspace_id: number; title?: string };
+		outreach?: { insight_key: string; kind: string };
 	}
 
 	type Row =
@@ -336,7 +337,8 @@
 				cards,
 				actions: [],
 				attachments: message.attachments ?? [],
-				handoff: readHandoff(message.metadata)
+				handoff: readHandoff(message.metadata),
+				outreach: readOutreach(message.metadata)
 			});
 		}
 
@@ -362,6 +364,20 @@
 		return {
 			workspace_id: raw.workspace_id,
 			title: typeof raw.title === 'string' ? raw.title : undefined
+		};
+	}
+
+	// Roadmap stage 5: an assistant turn LifeOS started on its own carries the
+	// outreach metadata, so the chat shows why the initiative exists.
+	function readOutreach(metadata: unknown): { insight_key: string; kind: string } | undefined {
+		if (!metadata || typeof metadata !== 'object') return undefined;
+		const outreach = (metadata as Record<string, unknown>)['outreach'];
+		if (!outreach || typeof outreach !== 'object') return undefined;
+		const raw = outreach as Record<string, unknown>;
+		if (typeof raw.insight_key !== 'string') return undefined;
+		return {
+			insight_key: raw.insight_key,
+			kind: typeof raw.kind === 'string' ? raw.kind : 'insight'
 		};
 	}
 
@@ -1422,6 +1438,12 @@
 											>Открыть</button>
 										</div>
 									{/if}
+									{#if row.turn.outreach}
+										<div class="outreach-badge" title="LifeOS начал этот диалог сам — реакция учитывается при следующих инициативах">
+											<Sparkles size={12} strokeWidth={1.8} aria-hidden="true" />
+											<span>Инициатива LifeOS</span>
+										</div>
+									{/if}
 									<div class="turn-text">{@html renderMessage(row.turn.content)}</div>
 
 									{#each row.turn.cards as task (task.id)}
@@ -2353,6 +2375,19 @@
 
 	.handoff-badge button:hover {
 		background: rgba(255, 255, 255, 0.08);
+	}
+
+	.outreach-badge {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		margin-top: 10px;
+		padding: 5px 10px;
+		border-radius: 8px;
+		background: var(--accent-surface);
+		color: var(--accent-bright);
+		font-size: var(--text-xs);
+		width: fit-content;
 	}
 
 	.workspace-chip {

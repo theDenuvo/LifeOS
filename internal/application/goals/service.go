@@ -999,6 +999,53 @@ func (s *Service) Stalled(ctx context.Context) ([]StalledGoal, error) {
 	return stalled, nil
 }
 
+// deadlineRiskWindow is how soon a goal's target date must be before its
+// slow progress becomes a risk worth surfacing. A deadline further out is
+// still on plan; inside the window the remaining time is the resource that
+// is actually running out.
+const deadlineRiskWindow = 7 * 24 * time.Hour
+
+// deadlineRiskIdle is how long a goal may stay without any recorded activity
+// while a target date is inside the window before it counts as drifting.
+const deadlineRiskIdle = 3 * 24 * time.Hour
+
+// DeadlineRisks lists active goals whose target date is close while factual
+// progress lags: the deadline is approaching faster than the work is moving.
+func (s *Service) DeadlineRisks(ctx context.Context) ([]DeadlineRisk, error) {
+	views, _, err := s.List(ctx, Filter{Status: statusPtr(domaingoal.StatusActive), Limit: maxLimit})
+	if err != nil {
+		return nil, err
+	}
+	now := s.clock.Now()
+	risks := make([]DeadlineRisk, 0, 2)
+	for _, view := range views {
+		goal := view.Goal
+		if goal.TargetDate == nil || goal.TargetDate.IsZero() {
+			continue
+		}
+		daysLeft := int(time.Until(*goal.TargetDate).Hours() / 24)
+		if daysLeft < 0 || goal.TargetDate.Sub(now) > deadlineRiskWindow {
+			continue
+		}
+		last := now
+		if view.Review != nil && view.Review.Progress.LastActivityAt != nil {
+			last = *view.Review.Progress.LastActivityAt
+		}
+		idle := now.Sub(last)
+		if view.Review != nil && view.Review.Signals.Stalled {
+			idle = deadlineRiskIdle // A stalled review is drift by definition.
+		} else if idle < deadlineRiskIdle {
+			continue
+		}
+		risks = append(risks, DeadlineRisk{
+			Goal:     goal,
+			DaysLeft: daysLeft,
+			IdleDays: int(idle.Hours() / 24),
+		})
+	}
+	return risks, nil
+}
+
 // computeProgress derives the factual progress from milestones and linked
 // tasks. It runs outside the goal transaction on purpose: s.tasks reads from
 // the same single-connection SQLite pool, so a lookup inside an open

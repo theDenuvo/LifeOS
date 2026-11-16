@@ -11,8 +11,10 @@ import (
 	"sort"
 	"time"
 
+	appevents "github.com/theDenuvo/LifeOS/internal/application/events"
 	appgoals "github.com/theDenuvo/LifeOS/internal/application/goals"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
+	"github.com/theDenuvo/LifeOS/internal/domain/event"
 	"github.com/theDenuvo/LifeOS/internal/domain/task"
 )
 
@@ -34,6 +36,10 @@ type Insight struct {
 	Detail   string   `json:"detail"`
 	Count    int      `json:"count"`
 	TaskIDs  []int64  `json:"task_ids"`
+	// Proposal is the concrete next action the user can accept, change or
+	// reject. Roadmap stage 5: an observation without a proposed action is
+	// only half of an initiative.
+	Proposal string `json:"proposal,omitempty"`
 }
 
 // State is the stored user decision for one insight key.
@@ -53,6 +59,7 @@ type Repository interface {
 // Transaction exposes the insight repository bound to one transaction.
 type Transaction interface {
 	Insights() Repository
+	Outreach() OutreachRepository
 }
 
 // UnitOfWork defines the transaction boundary.
@@ -82,6 +89,34 @@ type GoalsWatcher interface {
 	Stalled(ctx context.Context) ([]appgoals.StalledGoal, error)
 }
 
+// DeadlineRiskWatcher is the slice of the goal service that reports goals
+// whose target date is approaching faster than the work is moving.
+type DeadlineRiskWatcher interface {
+	DeadlineRisks(ctx context.Context) ([]appgoals.DeadlineRisk, error)
+}
+
+// CalendarWatcher is the slice of the calendar read model the day-shape
+// detectors need. Roadmap stage 5: a plan is only honest when it knows where
+// the meetings are, so the calendar joins the same cross-reference as tasks
+// and goals.
+type CalendarWatcher interface {
+	ListRange(ctx context.Context, from, to time.Time, calendars []event.Calendar) ([]appevents.EventWithVersion, error)
+}
+
+// Agreement is one durable agreement stored in memory.
+type Agreement struct {
+	ID        int64
+	Content   string
+	UpdatedAt time.Time
+}
+
+// MemoryWatcher is the slice of the memory service the forgotten-commitment
+// detector needs. An agreement the user has not touched in weeks may still be
+// valid — or a forgotten obligation nobody is tracking.
+type MemoryWatcher interface {
+	Agreements(ctx context.Context) ([]Agreement, error)
+}
+
 // Option customises the proactive service.
 type Option func(*Service)
 
@@ -91,14 +126,32 @@ func WithGoals(watcher GoalsWatcher) Option {
 	return func(s *Service) { s.goals = watcher }
 }
 
+// WithDeadlineRisks attaches the goal deadline-risk watcher.
+func WithDeadlineRisks(watcher DeadlineRiskWatcher) Option {
+	return func(s *Service) { s.deadlineRisks = watcher }
+}
+
+// WithCalendar attaches the calendar read model used by the day-shape detectors.
+func WithCalendar(watcher CalendarWatcher) Option {
+	return func(s *Service) { s.calendar = watcher }
+}
+
+// WithMemory attaches the memory slice used by the forgotten-commitment detector.
+func WithMemory(watcher MemoryWatcher) Option {
+	return func(s *Service) { s.memory = watcher }
+}
+
 // Service computes and manages insights.
 type Service struct {
-	uow      UnitOfWork
-	tasks    TaskLister
-	inbox    InboxCounter
-	goals    GoalsWatcher
-	clock    Clock
-	timezone string
+	uow           UnitOfWork
+	tasks         TaskLister
+	inbox         InboxCounter
+	goals         GoalsWatcher
+	deadlineRisks DeadlineRiskWatcher
+	calendar      CalendarWatcher
+	memory        MemoryWatcher
+	clock         Clock
+	timezone      string
 }
 
 // NewService builds the proactive service.
@@ -141,11 +194,29 @@ func (s *Service) Compute(ctx context.Context) ([]Insight, error) {
 		return nil, err
 	}
 
-	insights := s.detect(open, inboxCount, now, dayStart, dayEnd)
+	// Cross-referencing is deliberately failure-tolerant: a calendar or memory
+	// hiccup degrades the day's picture, it must not erase the task insights.
+	var events []appevents.EventWithVersion
+	if s.calendar != nil {
+		if found, err := s.calendar.ListRange(ctx, dayStart, dayEnd, nil); err == nil {
+			events = found
+		}
+	}
+	var agreements []Agreement
+	if s.memory != nil {
+		if found, err := s.memory.Agreements(ctx); err == nil {
+			agreements = found
+		}
+	}
+
+	insights := s.detect(open, inboxCount, now, dayStart, dayEnd, events, agreements)
 	// A stopped goal is discovered from its own journal, not from the task
 	// list, so the detector runs separately and never fails the day's insights.
 	if s.goals != nil {
 		insights = append(insights, s.stalledGoalInsights(ctx)...)
+	}
+	if s.deadlineRisks != nil {
+		insights = append(insights, s.deadlineRiskInsights(ctx)...)
 	}
 	if len(insights) == 0 {
 		return []Insight{}, nil
@@ -209,8 +280,8 @@ func (s *Service) Snooze(ctx context.Context, key string, until time.Time) error
 }
 
 // detect runs every detector over the current data.
-func (s *Service) detect(open []tasks.TaskWithVersion, inboxCount int, now, dayStart, dayEnd time.Time) []Insight {
-	insights := make([]Insight, 0, 6)
+func (s *Service) detect(open []tasks.TaskWithVersion, inboxCount int, now, dayStart, dayEnd time.Time, events []appevents.EventWithVersion, agreements []Agreement) []Insight {
+	insights := make([]Insight, 0, 8)
 
 	overdue := make([]int64, 0)
 	for _, item := range open {
@@ -224,9 +295,10 @@ func (s *Service) detect(open []tasks.TaskWithVersion, inboxCount int, now, dayS
 			Kind:     "overdue",
 			Severity: SeverityCritical,
 			Title:    "Просроченные задачи",
-			Detail:   fmt.Sprintf("%d задач(и) просрочены — стоит перенести или закрыть", len(overdue)),
+			Detail:   fmt.Sprintf("%d задач(и) просрочены", len(overdue)),
 			Count:    len(overdue),
 			TaskIDs:  limitIDs(overdue, 10),
+			Proposal: "Перенести просроченное на реальные даты или закрыть",
 		})
 	}
 
@@ -256,6 +328,7 @@ func (s *Service) detect(open []tasks.TaskWithVersion, inboxCount int, now, dayS
 			Detail:   fmt.Sprintf("На сегодня запланировано %d задач(и)", len(today)),
 			Count:    len(today),
 			TaskIDs:  limitIDs(ids, 10),
+			Proposal: "Пройтись по списку и зафиксировать порядок",
 		})
 	}
 
@@ -267,6 +340,7 @@ func (s *Service) detect(open []tasks.TaskWithVersion, inboxCount int, now, dayS
 			Title:    "Перегруженный день",
 			Detail:   fmt.Sprintf("%d задач на сегодня, из них %d высокого приоритета", len(today), highToday),
 			Count:    len(today),
+			Proposal: "Перенести часть на другие дни заранее",
 		})
 	}
 
@@ -297,6 +371,7 @@ func (s *Service) detect(open []tasks.TaskWithVersion, inboxCount int, now, dayS
 			Title:    "Задачи без срока",
 			Detail:   fmt.Sprintf("%d задач(и) висят без дедлайна больше двух недель", len(stale)),
 			Count:    len(stale),
+			Proposal: "Назначить срок каждой или убрать лишнее",
 			TaskIDs:  limitIDs(stale, 10),
 		})
 	}
@@ -326,9 +401,237 @@ func (s *Service) detect(open []tasks.TaskWithVersion, inboxCount int, now, dayS
 			Detail:   fmt.Sprintf("%d задач(и) имеют совпадающее точное время", len(conflicts)),
 			Count:    len(conflicts),
 			TaskIDs:  limitIDs(conflicts, 10),
+			Proposal: "Разнести дедлайны по времени или объединить в одну задачу",
 		})
 	}
 
+	// Roadmap stage 5: the calendar joins the cross-reference. A task due in
+	// the middle of a meeting cannot be done on time — the clash is real even
+	// though both items alone look perfectly fine.
+	if clash := taskEventClashInsight(open, events, dayStart, dayEnd); clash != nil {
+		insights = append(insights, *clash)
+	}
+	if busy := busyDayInsight(events, len(today), dayStart); busy != nil {
+		insights = append(insights, *busy)
+	}
+	if free := freeCapacityInsight(open, events, now, dayStart, dayEnd); free != nil {
+		insights = append(insights, *free)
+	}
+	if prepare := dueTomorrowInsight(open, dayEnd); prepare != nil {
+		insights = append(insights, *prepare)
+	}
+	if forgotten := forgottenAgreementsInsight(agreements, now); forgotten != nil {
+		insights = append(insights, *forgotten)
+	}
+
+	return insights
+}
+
+// meetingOverlapTolerance absorbs boundaries: a task due exactly at a
+// meeting's end is not a clash, a task due mid-meeting is.
+const meetingOverlapTolerance = 5 * time.Minute
+
+// busyDayMeetingHours is the meeting load after which a day stops being a
+// workday with meetings and becomes a meeting day with fragments of work.
+const busyDayMeetingHours = 5 * time.Hour
+
+// freeCapacityWindow is the minimum continuous free time that makes an
+// "use it" suggestion honest: shorter gaps are fragments, not capacity.
+const freeCapacityWindow = 90 * time.Minute
+
+// taskEventClashInsight finds open tasks whose exact deadline falls inside a
+// meeting happening today.
+func taskEventClashInsight(open []tasks.TaskWithVersion, events []appevents.EventWithVersion, dayStart, dayEnd time.Time) *Insight {
+	clashed := make([]int64, 0)
+	for _, item := range open {
+		if item.Task.DueAt == nil {
+			continue
+		}
+		due := item.Task.DueAt.In(dayStart.Location())
+		if due.Before(dayStart) || !due.Before(dayEnd) {
+			continue
+		}
+		for _, ev := range events {
+			starts := ev.Event.StartsAt.In(dayStart.Location())
+			ends := ev.Event.EndsAt.In(dayStart.Location())
+			if due.After(starts.Add(-meetingOverlapTolerance)) && due.Before(ends.Add(meetingOverlapTolerance)) {
+				clashed = append(clashed, item.Task.ID)
+				break
+			}
+		}
+	}
+	if len(clashed) == 0 {
+		return nil
+	}
+	return &Insight{
+		Key:      "task-event-clash",
+		Kind:     "task-event-clash",
+		Severity: SeverityWarning,
+		Title:    "Дедлайн попадает на встречу",
+		Detail:   fmt.Sprintf("%d задач(и) должны быть готовы прямо во время встречи", len(clashed)),
+		Count:    len(clashed),
+		TaskIDs:  limitIDs(clashed, 10),
+		Proposal: "Перенести дедлайн или встречу заранее",
+	}
+}
+
+// busyDayInsight warns when meetings consume most of the working day while
+// tasks still expect it.
+func busyDayInsight(events []appevents.EventWithVersion, dueToday int, dayStart time.Time) *Insight {
+	if len(events) == 0 || dueToday == 0 {
+		return nil
+	}
+	meetingMinutes := 0
+	for _, ev := range events {
+		minutes := int(ev.Event.EndsAt.Sub(ev.Event.StartsAt).Minutes())
+		if minutes > 0 {
+			meetingMinutes += minutes
+		}
+	}
+	if meetingMinutes < int(busyDayMeetingHours.Minutes()) {
+		return nil
+	}
+	return &Insight{
+		Key:      "busy-day",
+		Kind:     "busy-day",
+		Severity: SeverityWarning,
+		Title:    "День занят встречами",
+		Detail:   fmt.Sprintf("Встречи занимают около %s, а на сегодня ещё есть задачи", humanHours(meetingMinutes)),
+		Count:    len(events),
+		Proposal: "Оставить на сегодня только обязательное, остальное перенести",
+	}
+}
+
+// freeCapacityInsight spots an honest opportunity: a day with a real free
+// window and tomorrow's work that could move into it today.
+func freeCapacityInsight(open []tasks.TaskWithVersion, events []appevents.EventWithVersion, now, dayStart, dayEnd time.Time) *Insight {
+	meetingMinutes := 0
+	for _, ev := range events {
+		if ev.Event.EndsAt.Before(now) {
+			continue
+		}
+		minutes := int(ev.Event.EndsAt.Sub(ev.Event.StartsAt).Minutes())
+		if minutes > 0 {
+			meetingMinutes += minutes
+		}
+	}
+	if meetingMinutes > int(busyDayMeetingHours.Minutes()) {
+		return nil
+	}
+	// The opportunity is only real when there is future work that could use
+	// the window: tasks due within the next two days that are not due today.
+	tomorrowEnd := dayEnd.AddDate(0, 0, 1)
+	ready := make([]int64, 0)
+	for _, item := range open {
+		if item.Task.DueAt == nil {
+			continue
+		}
+		due := item.Task.DueAt.In(dayStart.Location())
+		if !due.Before(dayEnd) && due.Before(tomorrowEnd) {
+			ready = append(ready, item.Task.ID)
+		}
+	}
+	if len(ready) == 0 {
+		return nil
+	}
+	return &Insight{
+		Key:      "free-capacity",
+		Kind:     "free-capacity",
+		Severity: SeverityInfo,
+		Title:    "Есть свободное время сегодня",
+		Detail:   fmt.Sprintf("Завтра дедлайн у %d задач(и), а сегодня для них есть свободное окно", len(ready)),
+		Count:    len(ready),
+		TaskIDs:  limitIDs(ready, 10),
+		Proposal: "Заранее разобрать часть завтрашних задач сегодня",
+	}
+}
+
+// dueTomorrowInsight nudges preparation: high-priority work becomes much
+// harder to rescue the morning it is due.
+func dueTomorrowInsight(open []tasks.TaskWithVersion, dayEnd time.Time) *Insight {
+	ids := make([]int64, 0)
+	for _, item := range open {
+		if item.Task.Priority != task.PriorityHigh {
+			continue
+		}
+		if item.Task.DueAt != nil {
+			due := item.Task.DueAt.In(dayEnd.Location())
+			if !due.Before(dayEnd) && due.Before(dayEnd.AddDate(0, 0, 1)) {
+				ids = append(ids, item.Task.ID)
+			}
+			continue
+		}
+		if item.Task.DueDate != nil && !item.Task.DueDate.IsZero() {
+			day := item.Task.DueDate.Time(dayEnd.Location()).Truncate(24 * time.Hour)
+			if day.Equal(dayEnd.Truncate(24 * time.Hour)) {
+				ids = append(ids, item.Task.ID)
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	return &Insight{
+		Key:      "due-tomorrow",
+		Kind:     "due-tomorrow",
+		Severity: SeverityInfo,
+		Title:    "Важный дедлайн завтра",
+		Detail:   fmt.Sprintf("%d важных задач(и) со сроком завтра — стоит подготовиться сегодня", len(ids)),
+		Count:    len(ids),
+		TaskIDs:  limitIDs(ids, 10),
+		Proposal: "Запланировать время на них сегодня",
+	}
+}
+
+// forgottenAgreementAfter is how long an agreement may sit untouched before
+// "maybe it is still valid" turns into "probably forgotten".
+const forgottenAgreementAfter = 14 * 24 * time.Hour
+
+// forgottenAgreementsInsight surfaces durable agreements nobody has touched
+// for weeks — forgotten obligations, not tracked by any task.
+func forgottenAgreementsInsight(agreements []Agreement, now time.Time) *Insight {
+	stale := make([]Agreement, 0)
+	for _, entry := range agreements {
+		if now.Sub(entry.UpdatedAt) >= forgottenAgreementAfter {
+			stale = append(stale, entry)
+		}
+	}
+	if len(stale) == 0 {
+		return nil
+	}
+	return &Insight{
+		Key:      "forgotten-agreements",
+		Kind:     "forgotten-agreements",
+		Severity: SeverityWarning,
+		Title:    "Договорённости без движения",
+		Detail:   fmt.Sprintf("%d договорённост(и) в памяти не упоминались две недели и дольше", len(stale)),
+		Count:    len(stale),
+		Proposal: "Проверить, актуальны ли они, и превратить живые в задачи",
+	}
+}
+
+// deadlineRiskInsights turns lagging goal deadlines into one insight each;
+// at most three surface so a crowded plan cannot drown the day's signals.
+func (s *Service) deadlineRiskInsights(ctx context.Context) []Insight {
+	risks, err := s.deadlineRisks.DeadlineRisks(ctx)
+	if err != nil {
+		return nil
+	}
+	insights := make([]Insight, 0, min(len(risks), 3))
+	for _, risk := range risks {
+		if len(insights) >= 3 {
+			break
+		}
+		insights = append(insights, Insight{
+			Key:      fmt.Sprintf("goal-deadline-risk-%d", risk.Goal.ID),
+			Kind:     "goal-deadline-risk",
+			Severity: SeverityWarning,
+			Title:    fmt.Sprintf("Цель «%s»: до срока %d дн., движения нет %d дн.", risk.Goal.Title, risk.DaysLeft, risk.IdleDays),
+			Detail:   "Срок приближается быстрее, чем движется работа по цели",
+			Count:    1,
+			Proposal: "Обсудить план цели: ускорить, переоценить срок или сократить объём",
+		})
+	}
 	return insights
 }
 
@@ -395,6 +698,19 @@ func limitIDs(ids []int64, limit int) []int64 {
 		return ids
 	}
 	return ids[:limit]
+}
+
+// humanHours renders a minute count in Russian-friendly short form.
+func humanHours(minutes int) string {
+	hours := minutes / 60
+	remainder := minutes % 60
+	if remainder == 0 {
+		return fmt.Sprintf("%d ч", hours)
+	}
+	if hours == 0 {
+		return fmt.Sprintf("%d мин", remainder)
+	}
+	return fmt.Sprintf("%d ч %d мин", hours, remainder)
 }
 
 func severityRank(severity Severity) int {

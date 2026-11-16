@@ -3,8 +3,10 @@ package httptransport
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -214,16 +216,18 @@ func sseSeqs(body string) []uint64 {
 
 // TestEventsResyncCursorSkipsEventsItAccountsFor is the review's race: events
 // published around the moment the handler resolves a stale position end up in
-// the subscriber channel, and the resync cursor already accounts for them. After
-// the resync, every delivered event must have an id above that cursor —
+// the subscriber channel, and the resync cursor already accounts for them.
+// After the resync, every delivered event must have an id above that cursor —
 // otherwise the browser's Last-Event-ID would move backwards and the next
 // reconnect would resync again for nothing.
 //
-// The handler resolves the position before Subscribe, so the window the review
-// described no longer exists structurally; this test still hammers the seam
-// from both sides (publish right after the response headers arrive, which is
-// always after Subscribe on the server, and publish right after the resync is
-// read) and asserts the invariant for every attempt.
+// The handler subscribes first and reads the head right after the headers are
+// flushed, so the seam between Subscribe and the head read is narrow: this test
+// hammers it by publishing the moment the response headers arrive. The
+// deterministic halves of the same contract are pinned by
+// TestResolveStalePositionAnchorsTheLiveCursor and
+// TestLiveEventDropsEventsTheCursorAlreadyCovers; this test checks that the
+// wiring composes them correctly end to end.
 func TestEventsResyncCursorSkipsEventsItAccountsFor(t *testing.T) {
 	handler, cleanup := setupTestHandler(t)
 	defer cleanup()
@@ -238,7 +242,8 @@ func TestEventsResyncCursorSkipsEventsItAccountsFor(t *testing.T) {
 	server := httptest.NewServer(handler.Routes())
 	defer server.Close()
 
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := 0; attempt < 25; attempt++ {
+		first, second, third := attempt*3+1, attempt*3+2, attempt*3+3
 		request, err := http.NewRequest(http.MethodGet, server.URL+"/api/v1/events", nil)
 		if err != nil {
 			t.Fatalf("build request: %v", err)
@@ -252,38 +257,85 @@ func TestEventsResyncCursorSkipsEventsItAccountsFor(t *testing.T) {
 		reader := bufio.NewReader(response.Body)
 
 		// The response headers have arrived, which means the server has already
-		// resolved the stale position: the resync cursor is on the wire. Publish
-		// immediately — this is the closest an outside observer can get to the
-		// seam the review described.
-		broker.Publish("task.updated", map[string]any{"n": attempt*3 + 1})
+		// subscribed: the resync cursor is on the wire. Publish immediately —
+		// the closest an outside observer can get to the seam.
+		broker.Publish("task.updated", map[string]any{"n": first})
 
 		head := readUntil(t, reader, "missed_after", 2*time.Second)
 		if !strings.Contains(head, "event: resync") {
 			t.Fatalf("attempt %d: no resync: %s", attempt, head)
 		}
+		if strings.Count(head, "event: resync") != 1 {
+			t.Fatalf("attempt %d: more than one resync frame: %s", attempt, head)
+		}
 		cursor := firstIDString(head)
 		_, headSeq := parseEventID(cursor)
 
-		// Publish two more events after the resync was read: they must arrive,
-		// and nothing at or below the cursor may appear after it.
-		broker.Publish("task.updated", map[string]any{"n": attempt*3 + 2})
-		broker.Publish("task.updated", map[string]any{"n": attempt*3 + 3})
-		tail := readUntil(t, reader, "event: task.updated", 2*time.Second)
-		tail += readUntil(t, reader, "event: task.updated", 2*time.Second)
+		// Publish two more events after the resync was read: they must arrive.
+		broker.Publish("task.updated", map[string]any{"n": second})
+		broker.Publish("task.updated", map[string]any{"n": third})
+		// Read by payload, so each frame is read complete: a marker on the
+		// event line would stop before the frame's data line.
+		tail := readUntil(t, reader, "\"n\":"+strconv.Itoa(second), 2*time.Second)
+		tail += readUntil(t, reader, "\"n\":"+strconv.Itoa(third), 2*time.Second)
 
 		if strings.Contains(tail, "event: resync") {
 			t.Fatalf("attempt %d: a second resync was sent: %s", attempt, tail)
 		}
-		for _, id := range sseIDs(tail) {
+		ids := sseSeqs(tail)
+		// Every delivered id is above the announced cursor, contiguous and
+		// without duplicates. The seam event (first) either landed before the
+		// head read — the cursor covers it and it must not appear — or after it
+		// and leads the delivery; the other two always follow.
+		for i, id := range ids {
 			if id <= headSeq {
 				t.Fatalf("attempt %d: event %d arrived after a resync whose cursor is %d", attempt, id, headSeq)
 			}
+			if i > 0 && id != ids[i-1]+1 {
+				t.Fatalf("attempt %d: ids %v are not contiguous", attempt, ids)
+			}
 		}
-		if ids := sseSeqs(tail); len(ids) != 2 || ids[0] != headSeq+1 {
-			t.Fatalf("attempt %d: events after resync = %v, want %d,%d", attempt, ids, headSeq+1, headSeq+2)
+		// Payload check: the events published after the resync are delivered
+		// exactly once, and nothing outside this attempt's three events
+		// appears.
+		payloads := payloadsIn(tail)
+		if len(payloads) < 2 || len(payloads) > 3 {
+			t.Fatalf("attempt %d: payloads %v, want the two post-resync events and optionally the seam event", attempt, payloads)
+		}
+		allowed := map[int]bool{first: true, second: true, third: true}
+		seen := map[int]bool{}
+		for _, n := range payloads {
+			if !allowed[n] {
+				t.Fatalf("attempt %d: unexpected payload %d", attempt, n)
+			}
+			if seen[n] {
+				t.Fatalf("attempt %d: payload %d delivered twice", attempt, n)
+			}
+			seen[n] = true
+		}
+		if !seen[second] || !seen[third] {
+			t.Fatalf("attempt %d: the two events published after the resync were not delivered: %v", attempt, payloads)
 		}
 		response.Body.Close()
 	}
+}
+
+// payloadsIn extracts the "n" field of every task.updated frame in body.
+func payloadsIn(body string) []int {
+	var out []int
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var payload struct {
+			N int `json:"n"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimSpace(line[len("data: "):])), &payload); err == nil {
+			out = append(out, payload.N)
+		}
+	}
+	return out
 }
 
 // TestBrokerHeadMatchesEpochAndID pins the atomic head read: the pair returned
@@ -317,5 +369,108 @@ func TestBrokerHeadMatchesEpochAndID(t *testing.T) {
 	}
 	if id != 3 {
 		t.Fatalf("Head id = %d, want 3", id)
+	}
+}
+
+// TestResolveStalePositionAnchorsTheLiveCursor pins the deterministic half of
+// the resync-cursor contract: the function returns exactly the cursor it
+// announced, so the caller can anchor its live loop to it without a race.
+func TestResolveStalePositionAnchorsTheLiveCursor(t *testing.T) {
+	reserve := &fixedReserve{epoch: 42, next: 1, block: 1 << 20}
+	broker, err := events.NewBrokerReserved(events.DefaultReplaySize, 1<<20, reserve.reserve)
+	if err != nil {
+		t.Fatalf("build broker: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := broker.Publish("task.updated", map[string]any{"i": i}); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+	}
+
+	// A stale position: the resync announces the head, and the returned cursor
+	// is that same head — the value the live loop must anchor to.
+	recorder := httptest.NewRecorder()
+	sent, err := resolveReconnect(recorder, recorder, broker, "7.9999")
+	if err != nil {
+		t.Fatalf("resolveReconnect: %v", err)
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, "id: 42.2") || !strings.Contains(body, "event: resync") {
+		t.Fatalf("resync frame = %q, want cursor 42.2", body)
+	}
+	if sent != 2 {
+		t.Fatalf("resolveReconnect returned %d, want the announced cursor 2", sent)
+	}
+
+	// A matching position replays and returns the head as well.
+	recorder = httptest.NewRecorder()
+	sent, err = resolveReconnect(recorder, recorder, broker, "42.1")
+	if err != nil {
+		t.Fatalf("resolveReconnect matching: %v", err)
+	}
+	if strings.Contains(recorder.Body.String(), "event: resync") {
+		t.Fatalf("matching epoch triggered a resync: %s", recorder.Body.String())
+	}
+	if sent != 2 {
+		t.Fatalf("resolveReconnect matching returned %d, want the head 2", sent)
+	}
+}
+
+// TestLiveEventDropsEventsTheCursorAlreadyCovers pins the deterministic half of
+// the live-loop contract: whatever the announced cursor already covers is never
+// delivered, and whatever is above it is delivered exactly once.
+func TestLiveEventDropsEventsTheCursorAlreadyCovers(t *testing.T) {
+	reserve := &fixedReserve{epoch: 42, next: 1, block: 1 << 20}
+	broker, err := events.NewBrokerReserved(events.DefaultReplaySize, 1<<20, reserve.reserve)
+	if err != nil {
+		t.Fatalf("build broker: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		if err := broker.Publish("task.updated", map[string]any{"i": i}); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+	}
+
+	recorder := httptest.NewRecorder()
+	lastSent := uint64(2) // the resync announced 42.2
+
+	// An event that landed in the channel during the seam between Subscribe
+	// and the head read: its id is inside the cursor, it must not be sent.
+	stale := events.Event{Epoch: 42, ID: 2, Type: "task.updated", Data: map[string]any{"i": 1}}
+	if err := writeLiveEvent(recorder, recorder, broker, stale, &lastSent); err != nil {
+		t.Fatalf("stale event: %v", err)
+	}
+	if recorder.Body.Len() != 0 {
+		t.Fatalf("a covered event was delivered: %q", recorder.Body.String())
+	}
+	if lastSent != 2 {
+		t.Fatalf("lastSent moved to %d on a covered event", lastSent)
+	}
+
+	// An event above the cursor is delivered and moves the cursor.
+	fresh := events.Event{Epoch: 42, ID: 3, Type: "task.updated", Data: map[string]any{"i": 2}}
+	if err := writeLiveEvent(recorder, recorder, broker, fresh, &lastSent); err != nil {
+		t.Fatalf("fresh event: %v", err)
+	}
+	if !strings.Contains(recorder.Body.String(), "id: 42.3") {
+		t.Fatalf("the event above the cursor was not delivered: %q", recorder.Body.String())
+	}
+	if lastSent != 3 {
+		t.Fatalf("lastSent = %d, want 3", lastSent)
+	}
+
+	// A burst drop is repaired from the ring: the cursor jumps over the gap and
+	// the skipped event is not delivered twice.
+	recorder = httptest.NewRecorder()
+	dropped := events.Event{Epoch: 42, ID: 5, Type: "task.updated", Data: map[string]any{"i": 4}}
+	if err := writeLiveEvent(recorder, recorder, broker, dropped, &lastSent); err != nil {
+		t.Fatalf("gap event: %v", err)
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, "id: 42.4") || !strings.Contains(body, "id: 42.5") {
+		t.Fatalf("the gap was not closed from the ring: %q", body)
+	}
+	if lastSent != 5 {
+		t.Fatalf("lastSent = %d after the gap repair, want 5", lastSent)
 	}
 }

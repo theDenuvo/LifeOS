@@ -54,33 +54,15 @@ func (h *Handler) streamEvents(w http.ResponseWriter, r *http.Request) {
 	stream := broker.Subscribe(r.Context())
 	lastSent := uint64(0)
 
-	// A stale position is resolved here, after Subscribe: the head read and the
-	// cursor belong to one atomic broker read, and everything the cursor covers
-	// is either in the ring or already in the channel, never in between.
+	// The position is resolved after Subscribe: the head read and the cursor
+	// belong to one atomic broker read, and everything the cursor covers is
+	// either in the ring or already in the channel, never in between.
 	if raw := strings.TrimSpace(r.Header.Get("Last-Event-ID")); raw != "" {
-		epoch, seq := parseEventID(raw)
-		current, head := broker.Head()
-		switch {
-		case epoch != current:
-			// The ids the client holds come from another database state — a
-			// restored older copy, or unknown provenance. Numbers cannot be
-			// trusted across that boundary, so order a full resynchronisation.
-			if err := writeResync(w, current, head, seq, 0, 0); err != nil {
-				return
-			}
-			flusher.Flush()
-			// The cursor just handed to the client already accounts for
-			// everything up to head. Without this, events that reached the
-			// channel between Subscribe and this read would be delivered after
-			// the resync and would move the browser's cursor backwards.
-			lastSent = head
-		default:
-			sent, err := catchUp(w, broker, flusher, seq)
-			if err != nil {
-				return
-			}
-			lastSent = sent
+		sent, err := resolveReconnect(w, flusher, broker, raw)
+		if err != nil {
+			return
 		}
+		lastSent = sent
 	}
 
 	heartbeat := time.NewTicker(15 * time.Second)
@@ -94,25 +76,9 @@ func (h *Handler) streamEvents(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			// A subscriber channel is deliberately non-blocking, so a burst can
-			// drop an event. When the next delivered event skips an id, catch up
-			// from the ring before continuing.
-			if lastSent > 0 && event.ID > lastSent+1 {
-				caughtUp, err := catchUp(w, broker, flusher, lastSent)
-				if err != nil {
-					return
-				}
-				lastSent = caughtUp
-			}
-			// catchUp already sent this event from the buffer when it could.
-			if event.ID <= lastSent {
-				continue
-			}
-			if err := writeSSE(w, event); err != nil {
+			if err := writeLiveEvent(w, flusher, broker, event, &lastSent); err != nil {
 				return
 			}
-			lastSent = event.ID
-			flusher.Flush()
 		case <-heartbeat.C:
 			if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
 				return
@@ -120,6 +86,60 @@ func (h *Handler) streamEvents(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+// resolveReconnect turns a reconnecting client's Last-Event-ID into the position
+// the stream continues from.
+//
+// It runs after Subscribe: events published between Subscribe and the atomic
+// head read are inside the cursor this function announces, and the returned
+// cursor is what makes the live loop drop them as already accounted for. Events
+// published after the head read reach the channel with higher ids and are
+// delivered normally.
+func resolveReconnect(w http.ResponseWriter, flusher http.Flusher, broker *events.Broker, raw string) (uint64, error) {
+	epoch, seq := parseEventID(raw)
+	current, head := broker.Head()
+	if epoch == current {
+		return catchUp(w, broker, flusher, seq)
+	}
+	// The ids the client holds come from another database state — a restored
+	// older copy, or unknown provenance. Numbers cannot be trusted across that
+	// boundary, so order a full resynchronisation.
+	if err := writeResync(w, current, head, seq, 0, 0); err != nil {
+		return 0, err
+	}
+	flusher.Flush()
+	// The cursor just handed to the client already accounts for everything up
+	// to head. Without moving the live cursor here, events that reached the
+	// channel between Subscribe and the head read would be delivered after the
+	// resync and would move the browser's cursor backwards.
+	return head, nil
+}
+
+// writeLiveEvent sends one broker event downstream and moves the live cursor.
+//
+// A subscriber channel is deliberately non-blocking, so a burst can drop an
+// event: when the next delivered event skips an id, catch up from the ring
+// before continuing. What the cursor already covers is skipped, which is what
+// keeps a resync from being followed by the events it just accounted for.
+func writeLiveEvent(w http.ResponseWriter, flusher http.Flusher, broker *events.Broker, event events.Event, lastSent *uint64) error {
+	if *lastSent > 0 && event.ID > *lastSent+1 {
+		caughtUp, err := catchUp(w, broker, flusher, *lastSent)
+		if err != nil {
+			return err
+		}
+		*lastSent = caughtUp
+	}
+	// catchUp or a resync already sent this event from the buffer when it could.
+	if event.ID <= *lastSent {
+		return nil
+	}
+	if err := writeSSE(w, event); err != nil {
+		return err
+	}
+	*lastSent = event.ID
+	flusher.Flush()
+	return nil
 }
 
 // resyncType is a client signal, not a domain event to store: it says that the

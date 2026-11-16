@@ -90,10 +90,19 @@ func TestMainChatPromptKeepsRoutingWithWorkspaces(t *testing.T) {
 // report_result; one without a route warns the model instead of promising a
 // delivery that cannot happen.
 func TestProjectPromptReflectsReturnRoute(t *testing.T) {
-	probe := func(t *testing.T, sourceID *int64, title string) string {
+	probe := func(t *testing.T, bindRoute bool, title string) string {
 		t.Helper()
 		provider := &capturingProvider{}
 		service, _ := newServiceWithOptions(t, provider, &fakeTools{})
+		// A real main chat must exist before the workspace can bind to it.
+		main, err := service.SendMessageWithInteraction(context.Background(), 0, "Привет", assistant.InteractionContext{})
+		if err != nil {
+			t.Fatalf("send message in main chat: %v", err)
+		}
+		var sourceID *int64
+		if bindRoute {
+			sourceID = &main.ConversationID
+		}
 		workspace, err := service.CreateWorkspace(context.Background(), title, "тема", sourceID)
 		if err != nil {
 			t.Fatalf("CreateWorkspace: %v", err)
@@ -104,13 +113,12 @@ func TestProjectPromptReflectsReturnRoute(t *testing.T) {
 		return provider.systemPrompt()
 	}
 
-	source := int64(7)
-	route := probe(t, &source, "С маршрутом")
+	route := probe(t, true, "С маршрутом")
 	if !strings.Contains(route, "report_result") {
 		t.Fatalf("bound workspace prompt must advertise report_result:\n%s", route)
 	}
 
-	noRoute := probe(t, nil, "Без маршрута")
+	noRoute := probe(t, false, "Без маршрута")
 	if strings.Contains(noRoute, "report_result с кратким итогом") {
 		t.Fatalf("unbound workspace prompt must not promise report_result delivery:\n%s", noRoute)
 	}

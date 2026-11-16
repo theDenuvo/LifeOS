@@ -63,11 +63,34 @@ func TestConversationSourceMustReferenceMainChat(t *testing.T) {
 		t.Fatal("binding a route to a project conversation must fail")
 	}
 
+	// A route pointing at a conversation that does not exist must abort as
+	// well: the NOT EXISTS check rejects both project and missing sources.
+	err = uow.Do(ctx, func(ctx context.Context, tx assistant.Transaction) error {
+		workspace, err := domainassistant.NewWorkspace("С висячим маршрутом", "", nil, now)
+		if err != nil {
+			return err
+		}
+		workspaceID, err := tx.Assistant().CreateConversation(ctx, workspace)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Assistant().BindSourceConversation(ctx, workspaceID, 98765)
+		return err
+	})
+	if err == nil {
+		t.Fatal("binding a route to a non-existent conversation must fail")
+	}
+
 	// A plain UPDATE bypassing the repository must abort as well.
 	if _, err := db.ExecContext(ctx,
 		`UPDATE conversations SET source_conversation_id = ? WHERE id = ?`,
 		projectID, mainID); err == nil {
 		t.Fatal("raw update must refuse a project conversation as source")
+	}
+	if _, err := db.ExecContext(ctx,
+		`UPDATE conversations SET source_conversation_id = ? WHERE id = ?`,
+		98765, mainID); err == nil {
+		t.Fatal("raw update must refuse a non-existent conversation as source")
 	}
 
 	// A workspace without a route stays untouched by the guard.

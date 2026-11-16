@@ -13,6 +13,10 @@
 		getTask,
 		listConversations,
 		listTasks,
+		listOutreach,
+		acknowledgeOutreach,
+		dismissOutreach,
+		snoozeOutreach,
 		rejectPendingAction,
 		sendAssistantMessage,
 		uploadDocument,
@@ -21,6 +25,7 @@
 		type PendingAction,
 		type Attachment,
 		type DocumentTask,
+		type Outreach,
 		type Summary,
 		type SystemStatus,
 		type UploadedDocument,
@@ -89,6 +94,9 @@
 	let conversationPurpose = '';
 	let messages: AssistantMessage[] = [];
 	let pending: PendingAction[] = [];
+	// Roadmap stage 5: outreach records keyed by their chat message, so the
+	// initiative message can offer the reaction buttons with the real outcome.
+	let outreachRecords: Record<number, Outreach> = {};
 	let input = '';
 	let loading = true;
 	let sending = false;
@@ -720,6 +728,41 @@
 		conversationKind = view.kind ?? 'main';
 		conversationTitle = view.title ?? '';
 		conversationPurpose = view.purpose ?? '';
+		void loadOutreachRecords();
+	}
+
+	// Roadmap stage 5: the initiative history, so a self-started message can
+	// carry its reaction controls. Failures are silent: the buttons disappear,
+	// the conversation itself is unaffected.
+	async function loadOutreachRecords() {
+		try {
+			const { data } = await listOutreach(100);
+			const records: Record<number, Outreach> = {};
+			for (const item of data) records[item.message_id] = item;
+			outreachRecords = records;
+		} catch {
+			outreachRecords = {};
+		}
+	}
+
+	async function reactOutreach(id: number, action: 'ack' | 'snooze' | 'dismiss') {
+		const record = outreachRecords[id];
+		if (!record || record.outcome !== 'pending') return;
+		try {
+			if (action === 'ack') {
+				await acknowledgeOutreach(id);
+				outreachRecords = { ...outreachRecords, [id]: { ...record, outcome: 'acknowledged', decided_at: new Date().toISOString() } };
+			} else if (action === 'snooze') {
+				await snoozeOutreach(id);
+				outreachRecords = { ...outreachRecords, [id]: { ...record, outcome: 'snoozed', decided_at: new Date().toISOString() } };
+			} else {
+				await dismissOutreach(id);
+				outreachRecords = { ...outreachRecords, [id]: { ...record, outcome: 'dismissed', decided_at: new Date().toISOString() } };
+			}
+		} catch {
+			// A failed reaction stays pending on the server; the next reload
+			// shows the true state.
+		}
 	}
 
 	async function loadContext() {
@@ -1439,10 +1482,30 @@
 										</div>
 									{/if}
 									{#if row.turn.outreach}
-										<div class="outreach-badge" title="LifeOS начал этот диалог сам — реакция учитывается при следующих инициативах">
-											<Sparkles size={12} strokeWidth={1.8} aria-hidden="true" />
-											<span>Инициатива LifeOS</span>
-										</div>
+										{@const record = outreachRecords[row.turn.id]}
+										{#if record && record.outcome === 'pending'}
+											<div class="outreach-badge" title="LifeOS начал этот диалог сам — реакция учитывается при следующих инициативах">
+												<Sparkles size={12} strokeWidth={1.8} aria-hidden="true" />
+												<span>Инициатива LifeOS</span>
+												<button type="button" class="outreach-react" on:click={() => reactOutreach(record.id, 'ack')}>Принято</button>
+												<button type="button" class="outreach-react" on:click={() => reactOutreach(record.id, 'snooze')}>Не сейчас</button>
+												<button type="button" class="outreach-react" on:click={() => reactOutreach(record.id, 'dismiss')}>Скрыть</button>
+											</div>
+										{:else}
+											<div class="outreach-badge" title="LifeOS начал этот диалог сам — реакция учитывается при следующих инициативах">
+												<Sparkles size={12} strokeWidth={1.8} aria-hidden="true" />
+												<span>Инициатива LifeOS</span>
+												{#if record}
+													<span class="outreach-outcome">
+														{record.outcome === 'acknowledged'
+															? 'принято'
+															: record.outcome === 'dismissed'
+																? 'скрыто'
+																: 'отложено'}
+													</span>
+												{/if}
+											</div>
+										{/if}
 									{/if}
 									<div class="turn-text">{@html renderMessage(row.turn.content)}</div>
 
@@ -2388,6 +2451,25 @@
 		color: var(--accent-bright);
 		font-size: var(--text-xs);
 		width: fit-content;
+	}
+
+	.outreach-react {
+		padding: 3px 9px;
+		border: none;
+		border-radius: 6px;
+		background: transparent;
+		color: inherit;
+		font: inherit;
+		font-size: var(--text-xs);
+		cursor: pointer;
+	}
+
+	.outreach-react:hover {
+		background: rgba(255, 255, 255, 0.08);
+	}
+
+	.outreach-outcome {
+		color: var(--fg-muted);
 	}
 
 	.workspace-chip {

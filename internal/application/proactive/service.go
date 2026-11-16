@@ -502,20 +502,66 @@ func busyDayInsight(events []appevents.EventWithVersion, dueToday int, dayStart 
 	}
 }
 
-// freeCapacityInsight spots an honest opportunity: a day with a real free
-// window and tomorrow's work that could move into it today.
-func freeCapacityInsight(open []tasks.TaskWithVersion, events []appevents.EventWithVersion, now, dayStart, dayEnd time.Time) *Insight {
-	meetingMinutes := 0
+// freeCapacityDayEndHour is the local hour after which pulling tomorrow's
+// work into today stops being an opportunity: the user is off the clock.
+const freeCapacityDayEndHour = 21
+
+// largestFreeWindow computes the longest gap with no meetings between now and
+// the usable end of the day. Meetings are merged first: overlapping or
+// adjacent entries must not manufacture a gap out of arithmetic between them.
+func largestFreeWindow(events []appevents.EventWithVersion, now, usableEnd time.Time) time.Duration {
+	if !now.Before(usableEnd) {
+		return 0
+	}
+	starts := make([]appevents.EventWithVersion, 0, len(events))
 	for _, ev := range events {
-		if ev.Event.EndsAt.Before(now) {
-			continue
-		}
-		minutes := int(ev.Event.EndsAt.Sub(ev.Event.StartsAt).Minutes())
-		if minutes > 0 {
-			meetingMinutes += minutes
+		if ev.Event.EndsAt.After(now) {
+			starts = append(starts, ev)
 		}
 	}
-	if meetingMinutes > int(busyDayMeetingHours.Minutes()) {
+	sort.SliceStable(starts, func(i, j int) bool {
+		return starts[i].Event.StartsAt.Before(starts[j].Event.StartsAt)
+	})
+
+	var best time.Duration
+	cursor := now
+	for _, ev := range starts {
+		from := ev.Event.StartsAt
+		to := ev.Event.EndsAt
+		if from.Before(cursor) {
+			from = cursor
+		}
+		if to.Before(cursor) {
+			to = cursor
+		}
+		if gap := from.Sub(cursor); gap > best {
+			best = gap
+		}
+		if to.After(cursor) {
+			cursor = to
+		}
+		if !cursor.Before(usableEnd) {
+			return best
+		}
+	}
+	if gap := usableEnd.Sub(cursor); gap > best {
+		best = gap
+	}
+	return best
+}
+
+// freeCapacityInsight spots an honest opportunity: a real continuous free
+// window between now and the end of the usable day, and tomorrow's work that
+// could move into it. A day cut into fragments by meetings offers no window,
+// whatever the total meeting load is.
+func freeCapacityInsight(open []tasks.TaskWithVersion, events []appevents.EventWithVersion, now, dayStart, dayEnd time.Time) *Insight {
+	loc := dayStart.Location()
+	usableEnd := time.Date(dayStart.Year(), dayStart.Month(), dayStart.Day(), freeCapacityDayEndHour, 0, 0, 0, loc)
+	if !now.Before(usableEnd) {
+		return nil
+	}
+	window := largestFreeWindow(events, now, usableEnd)
+	if window < freeCapacityWindow {
 		return nil
 	}
 	// The opportunity is only real when there is future work that could use
@@ -526,7 +572,7 @@ func freeCapacityInsight(open []tasks.TaskWithVersion, events []appevents.EventW
 		if item.Task.DueAt == nil {
 			continue
 		}
-		due := item.Task.DueAt.In(dayStart.Location())
+		due := item.Task.DueAt.In(loc)
 		if !due.Before(dayEnd) && due.Before(tomorrowEnd) {
 			ready = append(ready, item.Task.ID)
 		}
@@ -539,7 +585,7 @@ func freeCapacityInsight(open []tasks.TaskWithVersion, events []appevents.EventW
 		Kind:     "free-capacity",
 		Severity: SeverityInfo,
 		Title:    "Есть свободное время сегодня",
-		Detail:   fmt.Sprintf("Завтра дедлайн у %d задач(и), а сегодня для них есть свободное окно", len(ready)),
+		Detail:   fmt.Sprintf("Завтра дедлайн у %d задач(и), а сегодня до %s есть свободное окно около %s", len(ready), humanClock(usableEnd), humanHours(int(window.Minutes()))),
 		Count:    len(ready),
 		TaskIDs:  limitIDs(ready, 10),
 		Proposal: "Заранее разобрать часть завтрашних задач сегодня",
@@ -722,4 +768,9 @@ func severityRank(severity Severity) int {
 	default:
 		return 2
 	}
+}
+
+// humanClock renders a local time as HH:MM.
+func humanClock(t time.Time) string {
+	return t.Format("15:04")
 }

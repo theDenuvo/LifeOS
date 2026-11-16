@@ -4,6 +4,7 @@ package proactive_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/theDenuvo/LifeOS/internal/application/assistant"
 	appevents "github.com/theDenuvo/LifeOS/internal/application/events"
 	appgoals "github.com/theDenuvo/LifeOS/internal/application/goals"
 	"github.com/theDenuvo/LifeOS/internal/application/proactive"
@@ -48,11 +50,11 @@ func (c *mutableClock) Add(d time.Duration) {
 
 // stage5Fixture owns one migrated database and the shared fakes.
 type stage5Fixture struct {
+	db        *sql.DB
 	clock     *mutableClock
 	tasks     *tasks.Service
 	inbox     *fakeInbox
 	uow       *sqlite.InsightUnitOfWork
-	assistant *fakeAssistant
 	publisher *recordingOutreachPublisher
 }
 
@@ -79,15 +81,14 @@ func newFixture(t *testing.T) *stage5Fixture {
 	}
 	// 2026-11-12 12:00 UTC is 15:00 in Moscow — an ordinary working hour.
 	clock := &mutableClock{now: time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)}
-	fixture := &stage5Fixture{
+	return &stage5Fixture{
+		db:        db,
 		clock:     clock,
 		tasks:     tasks.NewService(sqlite.NewTaskUnitOfWork(db), clock, tasks.WithDefaultTimezone("Europe/Moscow")),
 		inbox:     &fakeInbox{},
 		uow:       sqlite.NewInsightUnitOfWork(db),
-		assistant: &fakeAssistant{},
 		publisher: &recordingOutreachPublisher{},
 	}
-	return fixture
 }
 
 func (f *stage5Fixture) service(opts ...proactive.Option) *proactive.Service {
@@ -95,7 +96,7 @@ func (f *stage5Fixture) service(opts ...proactive.Option) *proactive.Service {
 }
 
 func (f *stage5Fixture) outreach(opts ...proactive.OutreachOption) *proactive.OutreachService {
-	return proactive.NewOutreachService(f.uow, f.assistant, f.publisher, f.clock, "Europe/Moscow", opts...)
+	return proactive.NewOutreachService(f.uow, sqlite.NewOutreachAssistant(f.db), f.publisher, f.clock, "Europe/Moscow", opts...)
 }
 
 // --- detector fakes ---
@@ -218,22 +219,25 @@ func TestComputeBusyDay(t *testing.T) {
 	}
 }
 
+func tomorrowTask(t *testing.T, fixture *stage5Fixture, high bool) {
+	t.Helper()
+	// 2026-11-13 09:00 UTC is 12:00 Moscow time on the next day.
+	tomorrow := time.Date(2026, 11, 13, 9, 0, 0, 0, time.UTC)
+	input := tasks.CreateTaskInput{Title: "Важное завтра", DueAt: tasks.Some(tomorrow)}
+	if high {
+		input.Priority = tasks.Some(task.PriorityHigh)
+	}
+	if _, err := fixture.tasks.CreateTask(context.Background(), input, task.ActorUser); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+}
+
 func TestComputeFreeCapacityAndDueTomorrow(t *testing.T) {
 	calendar := &fakeCalendar{}
 	fixture := newFixture(t)
-	ctx := context.Background()
+	tomorrowTask(t, fixture, true)
 
-	// 2026-11-13 09:00 UTC is 12:00 Moscow time on the next day.
-	tomorrow := time.Date(2026, 11, 13, 9, 0, 0, 0, time.UTC)
-	if _, err := fixture.tasks.CreateTask(ctx, tasks.CreateTaskInput{
-		Title:    "Важное завтра",
-		DueAt:    tasks.Some(tomorrow),
-		Priority: tasks.Some(task.PriorityHigh),
-	}, task.ActorUser); err != nil {
-		t.Fatalf("create task: %v", err)
-	}
-
-	insights, err := fixture.service(proactive.WithCalendar(calendar)).Compute(ctx)
+	insights, err := fixture.service(proactive.WithCalendar(calendar)).Compute(context.Background())
 	if err != nil {
 		t.Fatalf("compute: %v", err)
 	}
@@ -242,6 +246,51 @@ func TestComputeFreeCapacityAndDueTomorrow(t *testing.T) {
 		if !found[want] {
 			t.Errorf("missing %q insight, got %v", want, found)
 		}
+	}
+}
+
+func TestFreeCapacityRejectsFragmentedDay(t *testing.T) {
+	// Meetings from 15:15 to 20:15 local cut the afternoon into 15-minute
+	// fragments: there is no continuous window, so there is no opportunity,
+	// whatever the total meeting time is.
+	base := time.Date(2026, 11, 12, 12, 15, 0, 0, time.UTC)
+	events := make([]appevents.EventWithVersion, 0, 7)
+	for i := 0; i < 7; i++ {
+		from := base.Add(time.Duration(i*45) * time.Minute)
+		events = append(events, meeting("Встреча", from, from.Add(30*time.Minute)))
+	}
+	calendar := &fakeCalendar{events: events}
+
+	fixture := newFixture(t)
+	tomorrowTask(t, fixture, false)
+
+	insights, err := fixture.service(proactive.WithCalendar(calendar)).Compute(context.Background())
+	if err != nil {
+		t.Fatalf("compute: %v", err)
+	}
+	if insight := find(insights, "free-capacity"); insight != nil {
+		t.Fatalf("a fragmented day must not promise a free window, got %+v", insight)
+	}
+}
+
+func TestFreeCapacityRequiresOneContinuousWindow(t *testing.T) {
+	// A morning meeting plus two short meetings later still leave one real
+	// two-hour window between 14:00 and 18:00 local — the opportunity stands.
+	base := time.Date(2026, 11, 12, 9, 0, 0, 0, time.UTC)
+	calendar := &fakeCalendar{events: []appevents.EventWithVersion{
+		meeting("Утро", base, base.Add(2*time.Hour)),
+		meeting("Короткая", base.Add(5*time.Hour), base.Add(5*time.Hour+30*time.Minute)),
+	}}
+
+	fixture := newFixture(t)
+	tomorrowTask(t, fixture, false)
+
+	insights, err := fixture.service(proactive.WithCalendar(calendar)).Compute(context.Background())
+	if err != nil {
+		t.Fatalf("compute: %v", err)
+	}
+	if find(insights, "free-capacity") == nil {
+		t.Fatalf("a real free window must surface the opportunity, got %v", keys(insights))
 	}
 }
 
@@ -280,106 +329,57 @@ func TestComputeGoalDeadlineRisk(t *testing.T) {
 	}
 }
 
-// --- fake assistant storage ---
+// --- sqlite-backed conversation helpers ---
 
-type fakeAssistant struct {
-	mu            sync.Mutex
-	conversations []*domainassistant.Conversation
-	messages      []*domainassistant.Message
-	nextID        int64
-}
-
-func (f *fakeAssistant) Do(_ context.Context, fn func(ctx context.Context, tx proactive.AssistantTx) error) error {
-	return fn(context.Background(), f)
-}
-
-func (f *fakeAssistant) CreateConversation(_ context.Context, conversation *domainassistant.Conversation) (int64, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.nextID++
-	conversation.ID = f.nextID
-	f.conversations = append(f.conversations, conversation)
-	return conversation.ID, nil
-}
-
-func (f *fakeAssistant) GetConversation(_ context.Context, id int64) (*domainassistant.Conversation, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for _, conversation := range f.conversations {
-		if conversation.ID == id {
-			return conversation, nil
+// messages lists everything the main chat holds so far, through the real
+// storage the engine writes into.
+func (f *stage5Fixture) messages() ([]*domainassistant.Message, error) {
+	var messages []*domainassistant.Message
+	err := sqlite.NewAssistantUnitOfWork(f.db).Do(context.Background(), func(ctx context.Context, tx assistant.Transaction) error {
+		found, err := tx.Assistant().ListMessages(ctx, 1, 500)
+		if err != nil {
+			return err
 		}
-	}
-	return nil, errors.New("conversation not found")
+		messages = found
+		return nil
+	})
+	return messages, err
 }
 
-func (f *fakeAssistant) ListConversations(_ context.Context, limit, offset int, kind *domainassistant.Kind) ([]*domainassistant.Conversation, int, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	result := make([]*domainassistant.Conversation, 0, len(f.conversations))
-	for _, conversation := range f.conversations {
-		if kind != nil && conversation.Kind != *kind {
-			continue
+// addOutreachConversation seeds the main chat the way a user's first message
+// would, so the engine has an existing conversation to write into.
+func (f *stage5Fixture) addOutreachConversation(t *testing.T) int64 {
+	t.Helper()
+	var id int64
+	err := sqlite.NewAssistantUnitOfWork(f.db).Do(context.Background(), func(ctx context.Context, tx assistant.Transaction) error {
+		created, err := tx.Assistant().CreateConversation(ctx, domainassistant.NewConversation("Главный чат", f.clock.Now()))
+		if err != nil {
+			return err
 		}
-		result = append(result, conversation)
+		id = created
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed conversation: %v", err)
 	}
-	total := len(result)
-	if offset < total {
-		result = result[offset:]
-	} else {
-		result = nil
-	}
-	if limit > 0 && len(result) > limit {
-		result = result[:limit]
-	}
-	return result, total, nil
+	return id
 }
 
-func (f *fakeAssistant) TouchConversation(_ context.Context, id int64, at time.Time) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for _, conversation := range f.conversations {
-		if conversation.ID == id {
-			conversation.UpdatedAt = at
+// addUserReply posts the user's answer into the conversation after the
+// outreach message, the way a real reply would land.
+func (f *stage5Fixture) addUserReply(t *testing.T, conversationID int64, content string) {
+	t.Helper()
+	err := sqlite.NewAssistantUnitOfWork(f.db).Do(context.Background(), func(ctx context.Context, tx assistant.Transaction) error {
+		message, err := domainassistant.NewMessage(conversationID, domainassistant.RoleUser, content, f.clock.Now())
+		if err != nil {
+			return err
 		}
+		_, err = tx.Assistant().InsertMessage(ctx, message)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("add reply: %v", err)
 	}
-	return nil
-}
-
-func (f *fakeAssistant) InsertMessage(_ context.Context, message *domainassistant.Message) (int64, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.nextID++
-	message.ID = f.nextID
-	f.messages = append(f.messages, message)
-	return message.ID, nil
-}
-
-func (f *fakeAssistant) ListMessages(_ context.Context, conversationID int64, limit int) ([]*domainassistant.Message, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	result := make([]*domainassistant.Message, 0, len(f.messages))
-	for _, message := range f.messages {
-		if message.ConversationID == conversationID {
-			result = append(result, message)
-		}
-	}
-	if limit > 0 && len(result) > limit {
-		result = result[len(result)-limit:]
-	}
-	return result, nil
-}
-
-func (f *fakeAssistant) userMessages() []*domainassistant.Message {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	result := make([]*domainassistant.Message, 0)
-	for _, message := range f.messages {
-		if message.Role == domainassistant.RoleUser {
-			result = append(result, message)
-		}
-	}
-	return result
 }
 
 // --- outreach gate tests ---
@@ -405,12 +405,16 @@ func (s fakeSettings) Get(_ context.Context, key string) (json.RawMessage, error
 
 func TestOutreachStartsDialogueOnOwnInitiative(t *testing.T) {
 	fixture := newFixture(t)
+	fixture.addOutreachConversation(t)
 	insights := overdueInsight(t, fixture)
 	outreach := fixture.outreach()
 
 	outreach.Evaluate(context.Background(), insights)
 
-	messages := fixture.assistant.messages
+	messages, err := fixture.messages()
+	if err != nil {
+		t.Fatalf("messages: %v", err)
+	}
 	if len(messages) != 1 {
 		t.Fatalf("expected one self-initiated message, got %d", len(messages))
 	}
@@ -460,8 +464,12 @@ func TestOutreachRespectsQuietHours(t *testing.T) {
 
 	outreach.Evaluate(context.Background(), insights)
 
-	if len(fixture.assistant.messages) != 0 {
-		t.Errorf("nobody should be contacted at night, got %d messages", len(fixture.assistant.messages))
+	messages, err := fixture.messages()
+	if err != nil {
+		t.Fatalf("messages: %v", err)
+	}
+	if len(messages) != 0 {
+		t.Errorf("nobody should be contacted at night, got %d messages", len(messages))
 	}
 }
 
@@ -476,8 +484,12 @@ func TestOutreachWaitsWhileUserIsBusy(t *testing.T) {
 
 	outreach.Evaluate(context.Background(), insights)
 
-	if len(fixture.assistant.messages) != 0 {
-		t.Errorf("an initiative must not interrupt a meeting, got %d messages", len(fixture.assistant.messages))
+	messages, err := fixture.messages()
+	if err != nil {
+		t.Fatalf("messages: %v", err)
+	}
+	if len(messages) != 0 {
+		t.Errorf("an initiative must not interrupt a meeting, got %d messages", len(messages))
 	}
 }
 
@@ -495,35 +507,52 @@ func TestOutreachSkipsInfoInsights(t *testing.T) {
 
 	outreach.Evaluate(context.Background(), insights)
 
-	if len(fixture.assistant.messages) != 0 {
-		t.Errorf("informational observations stay in the panel, got %d messages", len(fixture.assistant.messages))
+	messages, err := fixture.messages()
+	if err != nil {
+		t.Fatalf("messages: %v", err)
+	}
+	if len(messages) != 0 {
+		t.Errorf("informational observations stay in the panel, got %d messages", len(messages))
 	}
 }
 
 func TestOutreachHonorsMinIntervalAndKindCooldown(t *testing.T) {
 	fixture := newFixture(t)
+	fixture.addOutreachConversation(t)
 	insights := overdueInsight(t, fixture)
 	outreach := fixture.outreach()
 	ctx := context.Background()
 
 	outreach.Evaluate(ctx, insights)
-	if len(fixture.assistant.messages) != 1 {
-		t.Fatalf("first insight must reach out, got %d messages", len(fixture.assistant.messages))
+	messages, err := fixture.messages()
+	if err != nil {
+		t.Fatalf("messages: %v", err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("first insight must reach out, got %d messages", len(messages))
 	}
 
 	// Ten minutes later the same situation is old news, not a second contact.
 	fixture.clock.Add(10 * time.Minute)
 	outreach.Evaluate(ctx, insights)
-	if len(fixture.assistant.messages) != 1 {
-		t.Fatalf("the gate must absorb repeats inside the interval, got %d messages", len(fixture.assistant.messages))
+	messages, err = fixture.messages()
+	if err != nil {
+		t.Fatalf("messages: %v", err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("the gate must absorb repeats inside the interval, got %d messages", len(messages))
 	}
 
 	// Two hours later the interval has passed, but the kind has not: the
 	// overdue insight has already been said once today.
 	fixture.clock.Add(2 * time.Hour)
 	outreach.Evaluate(ctx, insights)
-	if len(fixture.assistant.messages) != 1 {
-		t.Fatalf("the same kind must wait out its cooldown, got %d messages", len(fixture.assistant.messages))
+	messages, err = fixture.messages()
+	if err != nil {
+		t.Fatalf("messages: %v", err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("the same kind must wait out its cooldown, got %d messages", len(messages))
 	}
 
 	// A different kind is allowed through as soon as the interval clears.
@@ -538,13 +567,18 @@ func TestOutreachHonorsMinIntervalAndKindCooldown(t *testing.T) {
 		t.Fatalf("compute: %v", err)
 	}
 	outreach.Evaluate(ctx, goalInsights)
-	if len(fixture.assistant.messages) != 2 {
-		t.Fatalf("a different kind may start a dialogue, got %d messages", len(fixture.assistant.messages))
+	messages, err = fixture.messages()
+	if err != nil {
+		t.Fatalf("messages: %v", err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("a different kind may start a dialogue, got %d messages", len(messages))
 	}
 }
 
 func TestOutreachDemotesKindAfterRepeatedDismissals(t *testing.T) {
 	fixture := newFixture(t)
+	fixture.addOutreachConversation(t)
 	outreach := fixture.outreach()
 	ctx := context.Background()
 
@@ -578,6 +612,55 @@ func TestOutreachDemotesKindAfterRepeatedDismissals(t *testing.T) {
 	}
 }
 
+func TestOutreachSnoozeHoldsUntilTheSetTime(t *testing.T) {
+	fixture := newFixture(t)
+	fixture.addOutreachConversation(t)
+	insights := overdueInsight(t, fixture)
+	// Short cooldowns so the re-evaluation after the snooze expires is not
+	// blocked by anything but the snooze itself.
+	cfg := proactive.OutreachConfig{
+		MinInterval:      time.Minute,
+		KindCooldown:     time.Hour,
+		CriticalCooldown: time.Hour,
+	}
+	outreach := fixture.outreach(proactive.WithOutreachConfig(cfg))
+	ctx := context.Background()
+
+	outreach.Evaluate(ctx, insights)
+	items, _, err := outreach.List(ctx, 10, 0)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	id := items[0].ID
+
+	if err := outreach.Snooze(ctx, id, fixture.clock.Now().Add(4*time.Hour)); err != nil {
+		t.Fatalf("snooze: %v", err)
+	}
+
+	// Two hours later the ordinary cooldowns have passed, but the snooze has
+	// not: the topic must stay silent until the promised time.
+	fixture.clock.Add(2 * time.Hour)
+	outreach.Evaluate(ctx, insights)
+	messages, err := fixture.messages()
+	if err != nil {
+		t.Fatalf("messages: %v", err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("a snoozed topic must wait out the promised time, got %d messages", len(messages))
+	}
+
+	// After the snooze expires the same insight may start a dialogue again.
+	fixture.clock.Add(3 * time.Hour)
+	outreach.Evaluate(ctx, insights)
+	messages, err = fixture.messages()
+	if err != nil {
+		t.Fatalf("messages: %v", err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("after the snooze expires the initiative may return, got %d messages", len(messages))
+	}
+}
+
 func TestOutreachDisabledBySetting(t *testing.T) {
 	fixture := newFixture(t)
 	insights := overdueInsight(t, fixture)
@@ -588,29 +671,31 @@ func TestOutreachDisabledBySetting(t *testing.T) {
 
 	outreach.Evaluate(context.Background(), insights)
 
-	if len(fixture.assistant.messages) != 0 {
-		t.Errorf("the user's off switch must silence the initiative, got %d messages", len(fixture.assistant.messages))
+	messages, err := fixture.messages()
+	if err != nil {
+		t.Fatalf("messages: %v", err)
+	}
+	if len(messages) != 0 {
+		t.Errorf("the user's off switch must silence the initiative, got %d messages", len(messages))
 	}
 }
 
 func TestOutreachReplyIsAcknowledgedAutomatically(t *testing.T) {
 	fixture := newFixture(t)
+	fixture.addOutreachConversation(t)
 	insights := overdueInsight(t, fixture)
 	outreach := fixture.outreach()
 	ctx := context.Background()
 
 	outreach.Evaluate(ctx, insights)
-	outreachMessage := fixture.assistant.messages[0]
+	messages, err := fixture.messages()
+	if err != nil {
+		t.Fatalf("messages: %v", err)
+	}
+	outreachMessage := messages[0]
 
 	// The user answers the initiative in the chat.
-	if _, err := fixture.assistant.InsertMessage(ctx, &domainassistant.Message{
-		ConversationID: outreachMessage.ConversationID,
-		Role:           domainassistant.RoleUser,
-		Content:        "Да, давай разберём",
-		CreatedAt:      fixture.clock.Now(),
-	}); err != nil {
-		t.Fatalf("reply: %v", err)
-	}
+	fixture.addUserReply(t, outreachMessage.ConversationID, "Да, давай разберём")
 
 	outreach.AcknowledgeReplies(ctx)
 
@@ -619,12 +704,70 @@ func TestOutreachReplyIsAcknowledgedAutomatically(t *testing.T) {
 		t.Fatalf("list: %v", err)
 	}
 	if len(items) != 1 || items[0].Outcome != proactive.OutreachAcknowledged {
-		t.Fatalf("a reply is the strongest reaction, got %+v", items)
+		t.Fatalf("consent must be recorded as acknowledged, got %+v", items)
+	}
+}
+
+func TestOutreachReplyNotNowIsSnoozedNotAcknowledged(t *testing.T) {
+	fixture := newFixture(t)
+	fixture.addOutreachConversation(t)
+	insights := overdueInsight(t, fixture)
+	outreach := fixture.outreach()
+	ctx := context.Background()
+
+	outreach.Evaluate(ctx, insights)
+	messages, err := fixture.messages()
+	if err != nil {
+		t.Fatalf("messages: %v", err)
+	}
+	outreachMessage := messages[0]
+
+	// The message itself invites "не сейчас": the reply must count as a
+	// deferral, not as agreement.
+	fixture.addUserReply(t, outreachMessage.ConversationID, "Не сейчас, вернусь к этому позже")
+	outreach.AcknowledgeReplies(ctx)
+
+	items, _, err := outreach.List(ctx, 10, 0)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(items) != 1 || items[0].Outcome != proactive.OutreachSnoozed {
+		t.Fatalf("a deferral must be recorded as snoozed, got %+v", items)
+	}
+	if items[0].SnoozedUntil == nil || !items[0].SnoozedUntil.After(fixture.clock.Now()) {
+		t.Fatalf("the deferral must hold into the future, got %+v", items[0])
+	}
+}
+
+func TestOutreachReplyRefusalIsDismissed(t *testing.T) {
+	fixture := newFixture(t)
+	fixture.addOutreachConversation(t)
+	insights := overdueInsight(t, fixture)
+	outreach := fixture.outreach()
+	ctx := context.Background()
+
+	outreach.Evaluate(ctx, insights)
+	messages, err := fixture.messages()
+	if err != nil {
+		t.Fatalf("messages: %v", err)
+	}
+	outreachMessage := messages[0]
+
+	fixture.addUserReply(t, outreachMessage.ConversationID, "Нет, не надо этим заниматься")
+	outreach.AcknowledgeReplies(ctx)
+
+	items, _, err := outreach.List(ctx, 10, 0)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(items) != 1 || items[0].Outcome != proactive.OutreachDismissed {
+		t.Fatalf("a refusal must be recorded as dismissed, got %+v", items)
 	}
 }
 
 func TestOutreachReactionsUpdateOutcome(t *testing.T) {
 	fixture := newFixture(t)
+	fixture.addOutreachConversation(t)
 	insights := overdueInsight(t, fixture)
 	outreach := fixture.outreach()
 	ctx := context.Background()
@@ -650,5 +793,58 @@ func TestOutreachReactionsUpdateOutcome(t *testing.T) {
 	// A decided outreach does not change its mind through a second decision.
 	if err := outreach.Acknowledge(ctx, id); err == nil {
 		t.Fatal("a decided outreach must not be decided twice")
+	}
+}
+
+func TestOutreachAtomicWriteLeavesNothingBehind(t *testing.T) {
+	fixture := newFixture(t)
+
+	// The message and the outreach record must commit together: a failure
+	// after the message insert rolls the whole contact back, so the next
+	// pass cannot double the initiative.
+	err := sqlite.NewOutreachAssistant(fixture.db).Do(context.Background(), func(ctx context.Context, tx proactive.AssistantTx) error {
+		conversation := domainassistant.NewConversation("Главный чат", fixture.clock.Now())
+		if _, err := tx.CreateConversation(ctx, conversation); err != nil {
+			return err
+		}
+		message, err := domainassistant.NewMessage(conversation.ID, domainassistant.RoleAssistant, "Проверка", fixture.clock.Now())
+		if err != nil {
+			return err
+		}
+		if _, err := tx.InsertMessage(ctx, message); err != nil {
+			return err
+		}
+		if _, err := tx.CreateOutreach(ctx, &proactive.Outreach{
+			ConversationID: conversation.ID,
+			MessageID:      message.ID,
+			InsightKey:     "overdue",
+			Kind:           "overdue",
+			Severity:       proactive.SeverityCritical,
+			Title:          "Проверка",
+			CreatedAt:      fixture.clock.Now(),
+			Outcome:        proactive.OutreachPending,
+		}); err != nil {
+			return err
+		}
+		return errors.New("simulated failure after both writes")
+	})
+	if err == nil {
+		t.Fatal("expected the simulated failure to surface")
+	}
+
+	messages, err := fixture.messages()
+	if err != nil {
+		t.Fatalf("messages: %v", err)
+	}
+	if len(messages) != 0 {
+		t.Fatalf("a failed contact must not leave the message behind, got %d messages", len(messages))
+	}
+	outreach := fixture.outreach()
+	items, total, err := outreach.List(context.Background(), 10, 0)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if total != 0 || len(items) != 0 {
+		t.Fatalf("a failed contact must not leave a history entry, got %+v", items)
 	}
 }

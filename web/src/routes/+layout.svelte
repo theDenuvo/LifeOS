@@ -12,7 +12,7 @@
 		bumpConversations
 	} from '$lib/live';
 	import { goto } from '$app/navigation';
-	import { listConversations, createWorkspace, type Conversation } from '$lib/api';
+	import { listConversations, createWorkspace, snoozeOutreach, type Conversation } from '$lib/api';
 	import { profile, loadProfile, calendarSources } from '$lib/profile';
 	import { selectedCalendars, toggleCalendar } from '$lib/calendarFilter';
 	import {
@@ -297,15 +297,26 @@
 			<div class="reminder-body">
 				<span class="reminder-kind">Инициатива LifeOS</span>
 				<span class="reminder-title">{$outreachNotice.title}</span>
-				<button
-					class="outreach-open"
-					on:click={() => {
-						dismissOutreachNotice();
-						goto('/');
-					}}
-				>
-					Открыть чат
-				</button>
+				<div class="outreach-toast-actions">
+					<button
+						class="outreach-open"
+						on:click={() => {
+							dismissOutreachNotice();
+							goto('/');
+						}}
+					>
+						Открыть чат
+					</button>
+					<button
+						class="outreach-later"
+						on:click={() => {
+							void snoozeOutreach($outreachNotice.id);
+							dismissOutreachNotice();
+						}}
+					>
+						Не сейчас
+					</button>
+				</div>
 			</div>
 			<button class="reminder-close" on:click={dismissOutreachNotice} aria-label="Скрыть обращение">×</button>
 		</aside>
@@ -851,6 +862,27 @@
 
 	.outreach-open:hover {
 		filter: brightness(1.1);
+	}
+
+	.outreach-toast-actions {
+		display: flex;
+		gap: var(--space-2);
+		margin-top: var(--space-2);
+	}
+
+	.outreach-later {
+		margin-top: var(--space-2);
+		padding: var(--space-2) var(--space-4);
+		border: 1px solid var(--border);
+		border-radius: var(--radius-sm);
+		background: transparent;
+		color: var(--fg-muted);
+		font-size: var(--text-xs);
+		cursor: pointer;
+	}
+
+	.outreach-later:hover {
+		color: var(--fg-primary);
 	}
 
 	.shell.collapsed {

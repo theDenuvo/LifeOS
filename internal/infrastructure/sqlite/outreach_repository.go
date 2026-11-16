@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/theDenuvo/LifeOS/internal/application/proactive"
+	domainassistant "github.com/theDenuvo/LifeOS/internal/domain/assistant"
 )
 
 // outreachRepository is the SQLite implementation of proactive.OutreachRepository.
@@ -166,9 +167,48 @@ func NewOutreachAssistant(db *sql.DB) *OutreachAssistant {
 	return &OutreachAssistant{db: db}
 }
 
-// Do runs fn inside one transaction bound to the assistant repository.
+// Do runs fn inside one transaction bound to the assistant repository and the
+// outreach repository: the chat message and its history entry commit together
+// or not at all.
 func (a *OutreachAssistant) Do(ctx context.Context, fn func(ctx context.Context, tx proactive.AssistantTx) error) error {
 	return runInTransaction(ctx, a.db, func(tx *sql.Tx) error {
-		return fn(ctx, &assistantRepository{tx: tx})
+		return fn(ctx, outreachAssistantTx{
+			assistant: &assistantRepository{tx: tx},
+			outreach:  &outreachRepository{tx: tx},
+		})
 	})
+}
+
+// outreachAssistantTx exposes both repositories to one transaction.
+type outreachAssistantTx struct {
+	assistant *assistantRepository
+	outreach  *outreachRepository
+}
+
+func (t outreachAssistantTx) CreateConversation(ctx context.Context, conversation *domainassistant.Conversation) (int64, error) {
+	return t.assistant.CreateConversation(ctx, conversation)
+}
+
+func (t outreachAssistantTx) GetConversation(ctx context.Context, id int64) (*domainassistant.Conversation, error) {
+	return t.assistant.GetConversation(ctx, id)
+}
+
+func (t outreachAssistantTx) ListConversations(ctx context.Context, limit, offset int, kind *domainassistant.Kind) ([]*domainassistant.Conversation, int, error) {
+	return t.assistant.ListConversations(ctx, limit, offset, kind)
+}
+
+func (t outreachAssistantTx) TouchConversation(ctx context.Context, id int64, at time.Time) error {
+	return t.assistant.TouchConversation(ctx, id, at)
+}
+
+func (t outreachAssistantTx) InsertMessage(ctx context.Context, message *domainassistant.Message) (int64, error) {
+	return t.assistant.InsertMessage(ctx, message)
+}
+
+func (t outreachAssistantTx) ListMessages(ctx context.Context, conversationID int64, limit int) ([]*domainassistant.Message, error) {
+	return t.assistant.ListMessages(ctx, conversationID, limit)
+}
+
+func (t outreachAssistantTx) CreateOutreach(ctx context.Context, outreach *proactive.Outreach) (int64, error) {
+	return t.outreach.Create(ctx, outreach)
 }

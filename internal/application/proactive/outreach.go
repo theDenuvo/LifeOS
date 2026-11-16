@@ -156,9 +156,10 @@ type OutreachService struct {
 }
 
 // AssistantTx is the minimal assistant surface the outreach engine uses:
-// find the main chat, write one message and read replies. It is an interface
-// instead of a direct dependency because the assistant application package
-// already imports proactive for the context snapshot.
+// find the main chat, write one message, read replies and record the outreach
+// in the same transaction. It is an interface instead of a direct dependency
+// because the assistant application package already imports proactive for the
+// context snapshot.
 type AssistantTx interface {
 	CreateConversation(ctx context.Context, conversation *domainassistant.Conversation) (int64, error)
 	GetConversation(ctx context.Context, id int64) (*domainassistant.Conversation, error)
@@ -166,6 +167,7 @@ type AssistantTx interface {
 	TouchConversation(ctx context.Context, id int64, at time.Time) error
 	InsertMessage(ctx context.Context, message *domainassistant.Message) (int64, error)
 	ListMessages(ctx context.Context, conversationID int64, limit int) ([]*domainassistant.Message, error)
+	CreateOutreach(ctx context.Context, outreach *Outreach) (int64, error)
 }
 
 // assistantUnitOfWork adapts the assistant storage to the outreach needs.
@@ -323,6 +325,8 @@ func (s *OutreachService) pick(insights []Insight, history []Outreach, now time.
 	var lastAt time.Time
 	kindLast := make(map[string]time.Time)
 	keyLast := make(map[string]time.Time)
+	// A snooze is a promise: this concrete topic stays silent until then.
+	keyBlockedUntil := make(map[string]time.Time)
 	dismissals := make(map[string][]time.Time)
 	pendingKeys := make(map[string]bool)
 	for _, item := range history {
@@ -334,6 +338,11 @@ func (s *OutreachService) pick(insights []Insight, history []Outreach, now time.
 		}
 		if item.CreatedAt.After(keyLast[item.InsightKey]) {
 			keyLast[item.InsightKey] = item.CreatedAt
+		}
+		if item.Outcome == OutreachSnoozed && item.SnoozedUntil != nil && item.SnoozedUntil.After(now) {
+			if item.SnoozedUntil.After(keyBlockedUntil[item.InsightKey]) {
+				keyBlockedUntil[item.InsightKey] = *item.SnoozedUntil
+			}
 		}
 		if item.Outcome == OutreachDismissed && item.DecidedAt != nil {
 			dismissals[item.Kind] = append(dismissals[item.Kind], *item.DecidedAt)
@@ -349,18 +358,13 @@ func (s *OutreachService) pick(insights []Insight, history []Outreach, now time.
 	demoted := make(map[string]bool)
 	for kind, times := range dismissals {
 		recent := 0
-		var lastDismissal time.Time
 		for _, at := range times {
 			if now.Sub(at) <= s.cfg.Lookback {
 				recent++
-				if at.After(lastDismissal) {
-					lastDismissal = at
-				}
 			}
 		}
 		if recent >= s.cfg.DemoteThreshold {
 			demoted[kind] = true
-			_ = lastDismissal // Cooldown is handled by the dismissal times themselves.
 		}
 	}
 
@@ -373,6 +377,11 @@ func (s *OutreachService) pick(insights []Insight, history []Outreach, now time.
 			continue
 		}
 		if pendingKeys[insight.Key] {
+			continue
+		}
+		// The user said "not now until X": the gate honours X, not just the
+		// ordinary cooldown.
+		if blocked, ok := keyBlockedUntil[insight.Key]; ok && now.Before(blocked) {
 			continue
 		}
 		if demoted[insight.Kind] {
@@ -395,29 +404,40 @@ func (s *OutreachService) pick(insights []Insight, history []Outreach, now time.
 	return best
 }
 
-// start writes the assistant message into the main chat and records the
-// outreach, so the reaction can be traced later.
+// start writes the assistant message and the outreach record in ONE
+// transaction, so a crash or a failed write cannot leave an initiative in the
+// chat without its history entry — the entry is what prevents a repeat on the
+// next pass. The live event goes out only after the commit.
 func (s *OutreachService) start(ctx context.Context, insight Insight, now time.Time) error {
-	var conversationID, messageID int64
-	err := s.assistant.Do(ctx, func(ctx context.Context, repo AssistantTx) error {
+	outreach := &Outreach{
+		InsightKey: insight.Key,
+		Kind:       insight.Kind,
+		Severity:   insight.Severity,
+		Title:      insight.Title,
+		Reason:     insight.Detail,
+		Proposal:   insight.Proposal,
+		CreatedAt:  now,
+		Outcome:    OutreachPending,
+	}
+	err := s.assistant.Do(ctx, func(ctx context.Context, tx AssistantTx) error {
 		kind := domainassistant.KindMain
-		conversations, _, err := repo.ListConversations(ctx, 1, 0, &kind)
+		conversations, _, err := tx.ListConversations(ctx, 1, 0, &kind)
 		if err != nil {
 			return err
 		}
 		if len(conversations) == 0 {
 			conversation := domainassistant.NewConversation("Главный чат", now)
-			id, err := repo.CreateConversation(ctx, conversation)
+			id, err := tx.CreateConversation(ctx, conversation)
 			if err != nil {
 				return err
 			}
-			conversationID = id
+			outreach.ConversationID = id
 		} else {
-			conversationID = conversations[0].ID
+			outreach.ConversationID = conversations[0].ID
 		}
 
 		content := s.compose(insight)
-		message, err := domainassistant.NewMessage(conversationID, domainassistant.RoleAssistant, content, now)
+		message, err := domainassistant.NewMessage(outreach.ConversationID, domainassistant.RoleAssistant, content, now)
 		if err != nil {
 			return err
 		}
@@ -431,35 +451,15 @@ func (s *OutreachService) start(ctx context.Context, insight Insight, now time.T
 		if err != nil {
 			return err
 		}
-		messageID, err = repo.InsertMessage(ctx, message)
+		outreach.MessageID, err = tx.InsertMessage(ctx, message)
 		if err != nil {
 			return err
 		}
-		return repo.TouchConversation(ctx, conversationID, now)
-	})
-	if err != nil {
+		if err := tx.TouchConversation(ctx, outreach.ConversationID, now); err != nil {
+			return err
+		}
+		outreach.ID, err = tx.CreateOutreach(ctx, outreach)
 		return err
-	}
-
-	outreach := &Outreach{
-		ConversationID: conversationID,
-		MessageID:      messageID,
-		InsightKey:     insight.Key,
-		Kind:           insight.Kind,
-		Severity:       insight.Severity,
-		Title:          insight.Title,
-		Reason:         insight.Detail,
-		Proposal:       insight.Proposal,
-		CreatedAt:      now,
-		Outcome:        OutreachPending,
-	}
-	err = s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
-		id, err := tx.Outreach().Create(ctx, outreach)
-		if err != nil {
-			return err
-		}
-		outreach.ID = id
-		return nil
 	})
 	if err != nil {
 		return err
@@ -615,9 +615,10 @@ func (s *OutreachService) decide(ctx context.Context, id int64, outcome Outreach
 	})
 }
 
-// AcknowledgeReplies closes pending outreaches whose conversation has a user
-// message newer than the outreach itself. A reply is the strongest possible
-// reaction, so it counts even if the user never pressed a button.
+// AcknowledgeReplies reads the user's first reply to each pending outreach
+// and records what it actually said. The message itself invites a "не сейчас",
+// so a reply must not silently become agreement: explicit refusals become
+// dismissals, deferrals become snoozes, everything else counts as accepted.
 func (s *OutreachService) AcknowledgeReplies(ctx context.Context) {
 	if err := s.acknowledgeReplies(ctx); err != nil {
 		slog.Warn("outreach: acknowledge replies failed", "error", err)
@@ -642,27 +643,38 @@ func (s *OutreachService) acknowledgeReplies(ctx context.Context) error {
 		if item.Outcome != OutreachPending {
 			continue
 		}
-		replied, err := s.conversationReplied(ctx, item)
+		reply, err := s.firstReply(ctx, item)
 		if err != nil {
 			continue
 		}
-		if replied {
-			if err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
-				return tx.Outreach().SetOutcome(ctx, item.ID, OutreachAcknowledged, now)
-			}); err != nil {
-				return err
+		if reply == nil {
+			continue
+		}
+		outcome := classifyReply(reply.Content)
+		err = s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
+			if outcome == OutreachSnoozed {
+				return tx.Outreach().Snooze(ctx, item.ID, now.Add(24*time.Hour), now)
 			}
+			return tx.Outreach().SetOutcome(ctx, item.ID, outcome, now)
+		})
+		if err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-// conversationReplied reports whether a user message exists in the
-// conversation after the outreach message.
-func (s *OutreachService) conversationReplied(ctx context.Context, item Outreach) (bool, error) {
-	var replied bool
+// replyScanDepth is how much of the recent conversation the reply check
+// reads. The scan takes the tail, so an early reply survives long later
+// conversations.
+const replyScanDepth = 500
+
+// firstReply returns the first user message posted after the outreach's own
+// message, or nil when the user has not answered yet.
+func (s *OutreachService) firstReply(ctx context.Context, item Outreach) (*domainassistant.Message, error) {
+	var reply *domainassistant.Message
 	err := s.assistant.Do(ctx, func(ctx context.Context, tx AssistantTx) error {
-		messages, err := tx.ListMessages(ctx, item.ConversationID, 50)
+		messages, err := tx.ListMessages(ctx, item.ConversationID, replyScanDepth)
 		if err != nil {
 			return err
 		}
@@ -671,11 +683,36 @@ func (s *OutreachService) conversationReplied(ctx context.Context, item Outreach
 				continue
 			}
 			if message.ID > item.MessageID {
-				replied = true
+				reply = message
 				break
 			}
 		}
 		return nil
 	})
-	return replied, err
+	return reply, err
+}
+
+// classifyReply maps the user's wording onto an outcome. The message invites
+// "не сейчас", so deferrals and refusals must be distinguished from consent.
+func classifyReply(text string) OutreachOutcome {
+	normalized := strings.Join(strings.Fields(strings.ToLower(text)), " ")
+	hardRefusal := []string{
+		"не надо", "не нужно", "не стоит", "не беспоко", "не обращай",
+		"хватит", "отмен", "забудь", "не хочу", "no", "don't", "stop",
+	}
+	for _, marker := range hardRefusal {
+		if strings.Contains(normalized, marker) {
+			return OutreachDismissed
+		}
+	}
+	deferral := []string{
+		"не сейчас", "позже", "потом", "не сегодня", "завтра", "вечером",
+		"после", "сначала", "later", "not now",
+	}
+	for _, marker := range deferral {
+		if strings.Contains(normalized, marker) {
+			return OutreachSnoozed
+		}
+	}
+	return OutreachAcknowledged
 }

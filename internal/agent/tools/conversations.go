@@ -114,6 +114,13 @@ func registerConversationTools(registry *Registry, hub *WorkspaceHub) {
 			if err := decodeArgs(raw, &args); err != nil {
 				return nil, err
 			}
+			// A workspace created from inside another workspace would bind its
+			// route to a project chat and report_result could deliver results
+			// there instead of the main chat. Spaces are created from the main
+			// chat (or the interface) only.
+			if assistant.ToolContextFrom(ctx).Kind == domainassistant.KindProject {
+				return nil, fmt.Errorf("создание пространства доступно только из главного чата")
+			}
 			source := sourceConversationID(ctx)
 			conversation, err := hub.create(ctx, args.Title, args.Purpose, source)
 			if err != nil {
@@ -137,8 +144,17 @@ func registerConversationTools(registry *Registry, hub *WorkspaceHub) {
 			}, "task")),
 		Direct: true,
 		Execute: func(ctx context.Context, raw json.RawMessage) (any, error) {
-			if assistant.ToolContextFrom(ctx).Depth > 0 {
+			// Depth 0 does not mean the user is in the main chat: a workspace
+			// opened directly also runs its turn at depth 0. Delegation must
+			// originate in a main conversation, otherwise the source binding
+			// would point at a project chat and report_result could deliver
+			// results to the wrong place.
+			toolContext := assistant.ToolContextFrom(ctx)
+			if toolContext.Depth > 0 {
 				return nil, fmt.Errorf("делегирование недоступно внутри рабочего пространства")
+			}
+			if toolContext.ConversationID == 0 || toolContext.Kind != domainassistant.KindMain {
+				return nil, fmt.Errorf("делегирование доступно только из главного чата")
 			}
 			var args struct {
 				WorkspaceID int64  `json:"workspace_id"`

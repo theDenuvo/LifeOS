@@ -21,6 +21,11 @@ type Event struct {
 	ID    uint64
 	Type  string
 	Data  any
+	// At is the wall-clock moment the event was published. The automation
+	// runner uses it to attribute an event to the run whose execution
+	// published it, which is what bounds self-triggering chains; other
+	// consumers may ignore it.
+	At time.Time
 }
 
 // Publisher is the write side used by application services. An error means the
@@ -157,7 +162,7 @@ func (b *Broker) Publish(eventType string, data any) error {
 		}
 	}
 	b.nextID++
-	event := Event{Epoch: b.epoch, ID: b.nextID, Type: eventType, Data: data}
+	event := Event{Epoch: b.epoch, ID: b.nextID, Type: eventType, Data: data, At: time.Now().UTC()}
 	b.ring = append(b.ring, event)
 	if len(b.ring) > b.ringSize {
 		b.ring = b.ring[len(b.ring)-b.ringSize:]

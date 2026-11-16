@@ -105,6 +105,19 @@ type Repository interface {
 	FinishRun(ctx context.Context, run *domainautomation.Run) error
 	GetRun(ctx context.Context, automationID, runID int64) (*domainautomation.Run, error)
 	ListRuns(ctx context.Context, automationID int64, limit, offset int) ([]*domainautomation.Run, int, error)
+	// FailRun marks a reserved run failed without a step journal. It is the
+	// best-effort cleanup when the normal finish failed: a reserved run must
+	// not hold the automation hostage until the next restart.
+	FailRun(ctx context.Context, runID int64, reason string, at time.Time) error
+	// RecoverRunning releases the reservations a crashed process left
+	// behind. LifeOS is single-process, so at startup every running run is
+	// stale by definition; they are recorded as failed with the reason.
+	RecoverRunning(ctx context.Context, at time.Time) (int64, error)
+	// RecordSkipped stores a visible journal entry for a launch that was
+	// refused before any step ran: chain-depth limit, an overlapping run or
+	// a full dispatch queue. Lost work stays in the journal instead of
+	// disappearing silently.
+	RecordSkipped(ctx context.Context, automationID int64, trigger, reason string, at time.Time) (int64, error)
 }
 
 // Transaction exposes one transactional automation repository.
@@ -144,3 +157,10 @@ type ObserveResult struct {
 	Matched int
 	Runs    int
 }
+
+// maxChainDepth bounds chains of automations triggering automations. An event
+// published while an automation run executes may be caused by that run; a run
+// started from it is one hop deeper. From depth maxChainDepth event-triggered
+// runs are refused and recorded as skipped, so no cycle — including the
+// automation reacting to its own effects — can sustain itself.
+const maxChainDepth = 3

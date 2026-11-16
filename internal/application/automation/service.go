@@ -489,32 +489,109 @@ func (s *Service) Tick(ctx context.Context, now time.Time) TickResult {
 	return result
 }
 
-// Observe feeds one LifeOS event to the event-triggered automations.
+// Observe feeds one LifeOS event to the event-triggered automations
+// synchronously, as a direct (depth-zero) cause. The runner uses
+// MatchedEvents plus RunFromEvent to dispatch runs asynchronously with chain
+// depth tracking.
 func (s *Service) Observe(ctx context.Context, eventType string, payload map[string]any, now time.Time) ObserveResult {
 	result := ObserveResult{}
-	matched, err := s.eventAutomations(ctx, eventType)
+	matched, err := s.MatchedEvents(ctx, eventType, payload)
 	if err != nil {
 		if ctx.Err() == nil {
 			slog.Warn("automation: event query failed", "error", err)
 		}
 		return result
 	}
+	result.Matched = len(matched)
+	for _, item := range matched {
+		result.Runs++
+		if _, err := s.execute(ctx, item, "event", now); err != nil {
+			result.Runs--
+			if errors.Is(err, ErrAlreadyRunning) {
+				s.recordSkipped(ctx, item.ID, "event", "предыдущий запуск ещё выполняется", now)
+				continue
+			}
+			slog.Error("automation: event run failed to start", "id", item.ID, "event", eventType, "error", err)
+		}
+	}
+	return result
+}
+
+// MatchedEvents returns the active event-triggered automations the event
+// should run: trigger name matches and every payload filter entry matches.
+func (s *Service) MatchedEvents(ctx context.Context, eventType string, payload map[string]any) ([]*domainautomation.Automation, error) {
+	matched, err := s.eventAutomations(ctx, eventType)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]*domainautomation.Automation, 0, len(matched))
 	for _, item := range matched {
 		if item.Trigger.Event == nil || !item.Trigger.Event.MatchesPayload(payload) {
 			continue
 		}
-		result.Matched++
-		if _, err := s.execute(ctx, item, "event", now); err != nil {
-			if errors.Is(err, ErrAlreadyRunning) {
-				result.Runs++
-				continue
-			}
-			slog.Error("automation: event run failed to start", "id", item.ID, "event", eventType, "error", err)
-			continue
-		}
-		result.Runs++
+		result = append(result, item)
 	}
-	return result
+	return result, nil
+}
+
+// RunFromEvent executes one event-matched automation with the chain-depth
+// guard. A run deeper than maxChainDepth is refused and stays in the journal
+// as skipped with the reason, so no cycle — including an automation reacting
+// to its own effects — can sustain itself.
+func (s *Service) RunFromEvent(ctx context.Context, id int64, depth int, now time.Time) error {
+	if depth >= maxChainDepth {
+		reason := fmt.Sprintf("превышена глубина цепочки автоматизаций (%d): событие, вероятно, вызвано работой самой автоматизации", maxChainDepth)
+		s.recordSkipped(ctx, id, "event", reason, now)
+		slog.Warn("automation: chain depth limit reached", "automation_id", id, "depth", depth)
+		return nil
+	}
+	view, err := s.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if !view.Automation.Active() {
+		return fmt.Errorf("%w: статус %s", ErrNotExecutable, view.Automation.Status)
+	}
+	if _, err := s.execute(ctx, view.Automation, "event", now); err != nil {
+		if errors.Is(err, ErrAlreadyRunning) {
+			s.recordSkipped(ctx, id, "event", "предыдущий запуск ещё выполняется", now)
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// recordSkipped writes a visible journal entry for a launch that never ran.
+func (s *Service) recordSkipped(ctx context.Context, automationID int64, trigger, reason string, now time.Time) {
+	err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
+		_, err := tx.Automations().RecordSkipped(ctx, automationID, trigger, reason, now)
+		return err
+	})
+	if err != nil {
+		slog.Error("automation: skipped-run record failed", "automation_id", automationID, "error", err)
+	}
+}
+
+// RecoverStaleRuns releases reservations a crashed process left behind.
+// LifeOS is single-process, so at startup every run still marked running is
+// stale by definition: the process that held it is gone. They become failed
+// runs with the reason, and the automation is free to run again — schedule
+// moments recompute from the last known point and catch up as usual.
+func (s *Service) RecoverStaleRuns(ctx context.Context) (int64, error) {
+	var released int64
+	err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
+		count, err := tx.Automations().RecoverRunning(ctx, s.clock.Now().UTC())
+		released = count
+		return err
+	})
+	if err != nil {
+		return 0, err
+	}
+	if released > 0 {
+		slog.Warn("automation: recovered runs left running by an earlier process", "count", released)
+	}
+	return released, nil
 }
 
 // dueSchedule loads the schedule automations whose moment has come. A
@@ -602,7 +679,13 @@ func (s *Service) execute(ctx context.Context, item *domainautomation.Automation
 	if s.tools == nil {
 		return nil, fmt.Errorf("инструменты не подключены: сценарий нельзя выполнить")
 	}
-	var run *domainautomation.Run
+	var (
+		run *domainautomation.Run
+		// scenario is the configuration the reservation saw. Executing it —
+		// not the possibly stale listing copy — is what makes a pause-and-edit
+		// between the listing and the reservation win.
+		scenario *domainautomation.Automation
+	)
 	err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
 		// Re-read inside the transaction: the status may have changed between
 		// the listing and this moment, and pausing must win over executing.
@@ -621,6 +704,7 @@ func (s *Service) execute(ctx context.Context, item *domainautomation.Automation
 			return ErrAlreadyRunning
 		}
 		run = created
+		scenario = current
 		return nil
 	})
 	if err != nil {
@@ -631,10 +715,10 @@ func (s *Service) execute(ctx context.Context, item *domainautomation.Automation
 		"automation_id": item.ID, "run_id": run.ID, "trigger": trigger,
 	})
 
-	steps := make([]domainautomation.RunStep, 0, len(item.Steps))
+	steps := make([]domainautomation.RunStep, 0, len(scenario.Steps))
 	status := domainautomation.RunSucceeded
 	var failure string
-	for i, step := range item.Steps {
+	for i, step := range scenario.Steps {
 		if failure != "" {
 			steps = append(steps, domainautomation.RunStep{
 				Name: step.Name, Status: domainautomation.StepSkipped,
@@ -690,10 +774,16 @@ func (s *Service) execute(ctx context.Context, item *domainautomation.Automation
 		return err
 	})
 	if err != nil {
-		// The steps did run; only the journal write failed. The run stays
-		// visible in the started event and the next pass re-runs the scenario
-		// — honest about the risk, unlike silently swallowing the error.
+		// The steps did run; only the journal write failed. Without the finish
+		// the run would hold the reservation until the next restart, so the
+		// failed write is retried best-effort as a plain failure record; the
+		// startup recovery is the second line of defence.
 		slog.Error("automation: run journal write failed", "automation_id", item.ID, "run_id", run.ID, "error", err)
+		if fallbackErr := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
+			return tx.Automations().FailRun(ctx, run.ID, "журнал запуска не записан: "+err.Error(), finished)
+		}); fallbackErr != nil {
+			slog.Error("automation: run reservation release failed", "automation_id", item.ID, "run_id", run.ID, "error", fallbackErr)
+		}
 		return run, nil
 	}
 

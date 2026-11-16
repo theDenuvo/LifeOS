@@ -197,3 +197,91 @@ func TestAutomationRunReservationAndJournal(t *testing.T) {
 		t.Fatalf("schedule due: %v", err)
 	}
 }
+
+func TestAutomationRunRecoveryAndSkipped(t *testing.T) {
+	uow := setupAutomationDB(t)
+	ctx := context.Background()
+	var id int64
+	err := uow.Do(ctx, func(ctx context.Context, tx appautomation.Transaction) error {
+		var err error
+		id, err = tx.Automations().Insert(ctx, &domainautomation.Automation{
+			Title: "Восстановление", Status: domainautomation.StatusActive,
+			Trigger: automationTrigger(), Steps: automationSteps(),
+			CreatedAt: time.Unix(1700000000, 0).UTC(), UpdatedAt: time.Unix(1700000000, 0).UTC(),
+			Version: 1,
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	// A crashed process leaves the running reservation behind.
+	started := time.Unix(1700000600, 0).UTC()
+	var run *domainautomation.Run
+	err = uow.Do(ctx, func(ctx context.Context, tx appautomation.Transaction) error {
+		var err error
+		run, err = tx.Automations().StartRun(ctx, id, "schedule", started)
+		return err
+	})
+	if err != nil || run == nil {
+		t.Fatalf("start run: run=%v err=%v", run, err)
+	}
+
+	// Startup recovery releases it as failed with the reason.
+	var released int64
+	err = uow.Do(ctx, func(ctx context.Context, tx appautomation.Transaction) error {
+		var err error
+		released, err = tx.Automations().RecoverRunning(ctx, started.Add(time.Hour))
+		return err
+	})
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if released != 1 {
+		t.Fatalf("released = %d, want 1", released)
+	}
+	err = uow.Do(ctx, func(ctx context.Context, tx appautomation.Transaction) error {
+		read, err := tx.Automations().GetRun(ctx, id, run.ID)
+		if err != nil {
+			return err
+		}
+		if read.Status != domainautomation.RunFailed || read.Error == "" || read.FinishedAt == nil {
+			t.Fatalf("recovered run = %+v", read)
+		}
+		// The reservation is gone: a new run can start.
+		second, err := tx.Automations().StartRun(ctx, id, "schedule", started.Add(2*time.Hour))
+		if err != nil {
+			return err
+		}
+		if second == nil {
+			t.Fatalf("recovery must free the reservation")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("post-recovery: %v", err)
+	}
+
+	// A refused launch is visible in the journal as skipped with a reason.
+	err = uow.Do(ctx, func(ctx context.Context, tx appautomation.Transaction) error {
+		_, err := tx.Automations().RecordSkipped(ctx, id, "event", "превышена глубина цепочки автоматизаций", started.Add(3*time.Hour))
+		return err
+	})
+	if err != nil {
+		t.Fatalf("record skipped: %v", err)
+	}
+	err = uow.Do(ctx, func(ctx context.Context, tx appautomation.Transaction) error {
+		runs, _, err := tx.Automations().ListRuns(ctx, id, 10, 0)
+		if err != nil {
+			return err
+		}
+		if len(runs) != 3 || runs[0].Status != domainautomation.RunSkipped || runs[0].Error == "" {
+			t.Fatalf("runs = %+v", runs)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("skipped read: %v", err)
+	}
+}

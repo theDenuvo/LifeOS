@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -224,6 +226,9 @@ func (r *fakeRepo) ListRuns(_ context.Context, automationID int64, limit, offset
 			found = append(found, run)
 		}
 	}
+	// Newest first, matching the SQL ordering: random map iteration would
+	// make journal assertions flaky.
+	sort.Slice(found, func(i, j int) bool { return found[i].ID > found[j].ID })
 	total := len(found)
 	if offset > total {
 		offset = total
@@ -233,6 +238,41 @@ func (r *fakeRepo) ListRuns(_ context.Context, automationID int64, limit, offset
 		end = total
 	}
 	return found[offset:end], total, nil
+}
+
+func (r *fakeRepo) FailRun(_ context.Context, runID int64, reason string, at time.Time) error {
+	stored, ok := r.runs[runID]
+	if !ok || stored.Status != domainautomation.RunRunning {
+		return appautomation.ErrRunNotFound
+	}
+	stored.Status = domainautomation.RunFailed
+	stored.Error = reason
+	stored.FinishedAt = &at
+	return nil
+}
+
+func (r *fakeRepo) RecoverRunning(_ context.Context, at time.Time) (int64, error) {
+	var released int64
+	for _, run := range r.runs {
+		if run.Status != domainautomation.RunRunning {
+			continue
+		}
+		run.Status = domainautomation.RunFailed
+		run.Error = "выполнение прервано: LifeOS был перезапущен во время работы сценария"
+		run.FinishedAt = &at
+		released++
+	}
+	return released, nil
+}
+
+func (r *fakeRepo) RecordSkipped(_ context.Context, automationID int64, trigger, reason string, at time.Time) (int64, error) {
+	id := r.next()
+	r.runs[id] = &domainautomation.Run{
+		ID: id, AutomationID: automationID, Trigger: trigger,
+		Status: domainautomation.RunSkipped, Summary: "Запуск не выполнен",
+		Error: reason, StartedAt: at, FinishedAt: &at,
+	}
+	return id, nil
 }
 
 type fakeUoW struct{ repo *fakeRepo }
@@ -260,7 +300,7 @@ func sampleSteps() []domainautomation.Step {
 	}
 }
 
-func newTestService(clock *stepClock, repo *fakeRepo, tools *fakeTools, publisher events.Publisher) *appautomation.Service {
+func newTestService(clock *stepClock, repo *fakeRepo, tools appautomation.ToolExecutor, publisher events.Publisher) *appautomation.Service {
 	return appautomation.NewService(
 		fakeUoW{repo: repo},
 		clock,
@@ -591,5 +631,164 @@ func TestNextRunScheduleArithmetic(t *testing.T) {
 
 	if domainautomation.NextRun(domainautomation.Trigger{Kind: domainautomation.TriggerEvent}, time.Now(), loc) != nil {
 		t.Fatalf("event trigger has no schedule")
+	}
+}
+
+func TestChainDepthRefusesSelfSustainedEvents(t *testing.T) {
+	clock := testClock()
+	repo := newFakeRepo()
+	tools := &fakeTools{}
+	service := newTestService(clock, repo, tools, &recordedPublisher{})
+	view := mustCreate(t, service, domainautomation.Trigger{
+		Kind:  domainautomation.TriggerEvent,
+		Event: &domainautomation.EventTrigger{Name: "task.created"},
+	})
+	if _, err := service.Approve(context.Background(), view.Automation.ID); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	// A direct human action is depth zero and runs.
+	if err := service.RunFromEvent(context.Background(), view.Automation.ID, 0, clock.Now()); err != nil {
+		t.Fatalf("depth 0 run: %v", err)
+	}
+	runs, total, err := service.Runs(context.Background(), view.Automation.ID, 10, 0)
+	if err != nil || total != 1 {
+		t.Fatalf("runs after depth-0 event: %d, total %d, err %v", len(runs), total, err)
+	}
+
+	// An event published while the automation itself was running is depth
+	// maxChainDepth after enough hops: it must not run and must leave a
+	// visible skipped entry with the reason instead.
+	err = service.RunFromEvent(context.Background(), view.Automation.ID, maxChainDepthTest, clock.Now())
+	if err != nil {
+		t.Fatalf("depth-cap run: %v", err)
+	}
+	runs, total, err = service.Runs(context.Background(), view.Automation.ID, 10, 0)
+	if err != nil {
+		t.Fatalf("runs: %v", err)
+	}
+	if total != 2 {
+		t.Fatalf("total runs = %d, want 1 real + 1 skipped", total)
+	}
+	skipped := runs[0]
+	if skipped.Status != domainautomation.RunSkipped || skipped.Error == "" {
+		t.Fatalf("refused run must be a skipped journal entry with a reason: %+v", skipped)
+	}
+	if len(tools.calls) != len(sampleSteps()) {
+		t.Fatalf("refused run executed steps: %v", tools.calls)
+	}
+}
+
+// maxChainDepthTest mirrors the service's own limit; the test asserts the
+// refused depth rather than an arbitrary number.
+const maxChainDepthTest = 3
+
+func TestRecoverStaleRunsReleasesReservation(t *testing.T) {
+	clock := testClock()
+	repo := newFakeRepo()
+	tools := &fakeTools{}
+	service := newTestService(clock, repo, tools, &recordedPublisher{})
+	view := mustCreate(t, service, scheduleTrigger(9, 30))
+	if _, err := service.Approve(context.Background(), view.Automation.ID); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	// Simulate a crash mid-run: a running reservation without a finish.
+	if _, err := repo.StartRun(context.Background(), view.Automation.ID, "schedule", clock.Now()); err != nil {
+		t.Fatalf("simulate crash: %v", err)
+	}
+
+	// While the stale reservation holds, the due moment cannot run again.
+	clock.at = time.Date(2026, 11, 16, 9, 31, 0, 0, time.UTC)
+	result := service.Tick(context.Background(), clock.Now())
+	if result.ScheduleRuns != 0 {
+		t.Fatalf("a stale reservation must block re-running, got %d", result.ScheduleRuns)
+	}
+
+	// Startup recovery releases it as a failed run with the reason.
+	released, err := service.RecoverStaleRuns(context.Background())
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if released != 1 {
+		t.Fatalf("released = %d, want 1", released)
+	}
+	runs, _, err := service.Runs(context.Background(), view.Automation.ID, 10, 0)
+	if err != nil {
+		t.Fatalf("runs: %v", err)
+	}
+	if runs[0].Status != domainautomation.RunFailed || runs[0].Error == "" {
+		t.Fatalf("recovered run must be failed with a reason: %+v", runs[0])
+	}
+
+	// The next pass runs the due schedule again.
+	clock.at = time.Date(2026, 11, 16, 9, 40, 0, 0, time.UTC)
+	result = service.Tick(context.Background(), clock.Now())
+	if result.ScheduleRuns != 1 {
+		t.Fatalf("schedule must run again after recovery, got %d", result.ScheduleRuns)
+	}
+}
+
+// blockingTools holds the first step until the test releases it, which is
+// what keeps a run reservation open across two observes.
+type blockingTools struct {
+	release chan struct{}
+	calls   []string
+	mu      sync.Mutex
+}
+
+func (t *blockingTools) Execute(_ context.Context, name string, _ json.RawMessage) (any, error) {
+	t.mu.Lock()
+	t.calls = append(t.calls, name)
+	t.mu.Unlock()
+	if name == "list_tasks" {
+		<-t.release
+	}
+	return map[string]any{"ok": true}, nil
+}
+
+func TestEventTriggerOverlappingRunRecordedAsSkipped(t *testing.T) {
+	clock := testClock()
+	repo := newFakeRepo()
+	release := make(chan struct{})
+	tools := &blockingTools{release: release}
+	service := newTestService(clock, repo, tools, &recordedPublisher{})
+	view := mustCreate(t, service, domainautomation.Trigger{
+		Kind:  domainautomation.TriggerEvent,
+		Event: &domainautomation.EventTrigger{Name: "task.completed"},
+	})
+	if _, err := service.Approve(context.Background(), view.Automation.ID); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		service.Observe(context.Background(), "task.completed", map[string]any{}, clock.Now())
+	}()
+	// The first run holds the reservation on its first step.
+	time.Sleep(50 * time.Millisecond)
+
+	// A second event while the first run holds the reservation is refused
+	// with a visible journal entry, not a silent log line.
+	service.Observe(context.Background(), "task.completed", map[string]any{}, clock.Now())
+	close(release)
+	<-done
+
+	runs, total, err := service.Runs(context.Background(), view.Automation.ID, 10, 0)
+	if err != nil {
+		t.Fatalf("runs: %v", err)
+	}
+	if total != 2 {
+		t.Fatalf("total runs = %d, want executed + skipped", total)
+	}
+	if runs[0].Status != domainautomation.RunSkipped || runs[0].Error == "" {
+		t.Fatalf("overlapping run must be skipped with a reason: %+v", runs[0])
+	}
+	tools.mu.Lock()
+	count := len(tools.calls)
+	tools.mu.Unlock()
+	if count != len(sampleSteps()) {
+		t.Fatalf("the second event must not execute steps: %d calls", count)
 	}
 }

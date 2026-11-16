@@ -380,6 +380,67 @@ func (r *automationRepository) FinishRun(ctx context.Context, run *domainautomat
 	return nil
 }
 
+// FailRun closes a reserved run as failed without a step journal. It is the
+// best-effort release when the normal finish write failed: the reservation
+// must not outlive the process because of one failed update.
+func (r *automationRepository) FailRun(ctx context.Context, runID int64, reason string, at time.Time) error {
+	result, err := r.tx.ExecContext(ctx, `
+		UPDATE automation_runs SET status = 'failed', error = ?, finished_at = ?
+		WHERE id = ? AND status = 'running'`,
+		reason, unixSeconds(at), runID,
+	)
+	if err != nil {
+		return fmt.Errorf("fail automation run %d: %w", runID, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("fail automation run %d: %w", runID, err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("fail automation run %d: %w", runID, appautomation.ErrRunNotFound)
+	}
+	return nil
+}
+
+// RecoverRunning releases every reservation left running by an earlier
+// process. Single-process LifeOS means all of them are stale at startup.
+func (r *automationRepository) RecoverRunning(ctx context.Context, at time.Time) (int64, error) {
+	result, err := r.tx.ExecContext(ctx, `
+		UPDATE automation_runs
+		SET status = 'failed',
+		    error = 'выполнение прервано: LifeOS был перезапущен во время работы сценария',
+		    finished_at = ?
+		WHERE status = 'running'`,
+		unixSeconds(at),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("recover automation runs: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("recover automation runs: %w", err)
+	}
+	return affected, nil
+}
+
+// RecordSkipped stores a terminal journal entry for a launch that was
+// refused before any step ran.
+func (r *automationRepository) RecordSkipped(ctx context.Context, automationID int64, trigger, reason string, at time.Time) (int64, error) {
+	result, err := r.tx.ExecContext(ctx, `
+		INSERT INTO automation_runs (automation_id, trigger, status, summary, error, started_at, finished_at)
+		VALUES (?, ?, 'skipped', ?, ?, ?, ?)`,
+		automationID, trigger, "Запуск не выполнен", reason, unixSeconds(at), unixSeconds(at),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("record skipped automation run: %w", err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("record skipped automation run: read id: %w", err)
+	}
+	return id, nil
+}
+
 func (r *automationRepository) GetRun(ctx context.Context, automationID, runID int64) (*domainautomation.Run, error) {
 	row := r.tx.QueryRowContext(ctx,
 		`SELECT `+runColumns+` FROM automation_runs WHERE id = ? AND automation_id = ?`, runID, automationID)

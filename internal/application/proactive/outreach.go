@@ -68,6 +68,9 @@ type OutreachRepository interface {
 	Get(ctx context.Context, id int64) (*Outreach, error)
 	// Recent returns outreaches created after the given instant, oldest last.
 	Recent(ctx context.Context, since time.Time) ([]Outreach, error)
+	// Snoozed returns every currently snoozed outreach, however old it is:
+	// the promised hold must not expire with the statistics window.
+	Snoozed(ctx context.Context) ([]Outreach, error)
 	SetOutcome(ctx context.Context, id int64, outcome OutreachOutcome, decidedAt time.Time) error
 	Snooze(ctx context.Context, id int64, until, decidedAt time.Time) error
 	List(ctx context.Context, limit, offset int) ([]Outreach, int, error)
@@ -520,6 +523,21 @@ func (s *OutreachService) recent(ctx context.Context, now time.Time) ([]Outreach
 			return err
 		}
 		history = found
+		// Snoozes are promises about a topic, not statistics: they are read
+		// beyond the lookback window so a long hold survives it.
+		snoozed, err := tx.Outreach().Snoozed(ctx)
+		if err != nil {
+			return err
+		}
+		seen := make(map[int64]bool, len(history))
+		for _, item := range history {
+			seen[item.ID] = true
+		}
+		for _, item := range snoozed {
+			if !seen[item.ID] {
+				history = append(history, item)
+			}
+		}
 		return nil
 	})
 	return history, err
@@ -650,7 +668,12 @@ func (s *OutreachService) acknowledgeReplies(ctx context.Context) error {
 		if reply == nil {
 			continue
 		}
-		outcome := classifyReply(reply.Content)
+		outcome, decided := classifyReply(reply.Content)
+		if !decided {
+			// A question or an unrelated message is not a decision; the
+			// outreach stays pending until an explicit reaction.
+			continue
+		}
 		err = s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
 			if outcome == OutreachSnoozed {
 				return tx.Outreach().Snooze(ctx, item.ID, now.Add(24*time.Hour), now)
@@ -694,25 +717,59 @@ func (s *OutreachService) firstReply(ctx context.Context, item Outreach) (*domai
 
 // classifyReply maps the user's wording onto an outcome. The message invites
 // "не сейчас", so deferrals and refusals must be distinguished from consent.
-func classifyReply(text string) OutreachOutcome {
-	normalized := strings.Join(strings.Fields(strings.ToLower(text)), " ")
+// A reply that is neither a deferral nor a refusal is not a decision: it stays
+// pending until the user reacts explicitly through the buttons.
+func classifyReply(text string) (OutreachOutcome, bool) {
+	words := tokenize(text)
+	joined := strings.Join(words, " ")
+
+	// Hard refusals: multi-word markers that cannot appear inside a deferral.
 	hardRefusal := []string{
 		"не надо", "не нужно", "не стоит", "не беспоко", "не обращай",
-		"хватит", "отмен", "забудь", "не хочу", "no", "don't", "stop",
+		"не хочу", "хватит", "отмен", "забудь", "don't", "do not", "stop it",
 	}
 	for _, marker := range hardRefusal {
-		if strings.Contains(normalized, marker) {
-			return OutreachDismissed
+		if strings.Contains(joined, marker) {
+			return OutreachDismissed, true
 		}
 	}
+
+	// Deferrals. "not now" and "no" overlap as substrings, so the word check
+	// for single-word refusals happens only after the deferral markers.
 	deferral := []string{
 		"не сейчас", "позже", "потом", "не сегодня", "завтра", "вечером",
-		"после", "сначала", "later", "not now",
+		"нет времени", "занят", "later", "not now",
 	}
 	for _, marker := range deferral {
-		if strings.Contains(normalized, marker) {
-			return OutreachSnoozed
+		if strings.Contains(joined, marker) {
+			return OutreachSnoozed, true
 		}
 	}
-	return OutreachAcknowledged
+
+	// Bare refusals are single words: they must not match inside other
+	// words ("not now" contains "no").
+	for _, word := range words {
+		switch word {
+		case "нет", "no", "nope":
+			return OutreachDismissed, true
+		}
+	}
+
+	// Explicit consent is a real decision too; it is checked last so
+	// refusals and deferrals win when the wording mixes them.
+	for _, word := range words {
+		switch word {
+		case "да", "давай", "давайте", "ок", "хорошо", "конечно", "ага",
+			"yes", "yeah", "sure", "ok", "okay":
+			return OutreachAcknowledged, true
+		}
+	}
+
+	return "", false
+}
+
+// tokenize lowercases the text, drops punctuation and returns the words.
+func tokenize(text string) []string {
+	replacer := strings.NewReplacer(",", " ", ".", " ", "!", " ", "?", " ", ":", " ", ";", " ", "-", " ", "\n", " ")
+	return strings.Fields(strings.ToLower(replacer.Replace(text)))
 }

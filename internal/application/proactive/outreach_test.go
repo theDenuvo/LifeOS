@@ -848,3 +848,139 @@ func TestOutreachAtomicWriteLeavesNothingBehind(t *testing.T) {
 		t.Fatalf("a failed contact must not leave a history entry, got %+v", items)
 	}
 }
+
+func TestFreeCapacityIgnoresMeetingsAfterUsableDay(t *testing.T) {
+	// It is 20:00 local, the usable day ends at 21:00, and the next meeting
+	// starts at 23:00: only the hour that remains is free, whatever the
+	// unclamped arithmetic between now and the meeting says.
+	late := time.Date(2026, 11, 12, 20, 0, 0, 0, time.UTC) // 23:00 Moscow
+	calendar := &fakeCalendar{events: []appevents.EventWithVersion{
+		meeting("Ночная встреча", late, late.Add(30*time.Minute)),
+	}}
+
+	fixture := newFixture(t)
+	// 17:00 UTC is 20:00 in Moscow.
+	fixture.clock.Set(time.Date(2026, 11, 12, 17, 0, 0, 0, time.UTC))
+	tomorrowTask(t, fixture, false)
+
+	insights, err := fixture.service(proactive.WithCalendar(calendar)).Compute(context.Background())
+	if err != nil {
+		t.Fatalf("compute: %v", err)
+	}
+	if insight := find(insights, "free-capacity"); insight != nil {
+		t.Fatalf("time beyond the usable day is not a free window, got %+v", insight)
+	}
+}
+
+func TestOutreachReplyNotNowEnglishIsSnoozed(t *testing.T) {
+	fixture := newFixture(t)
+	fixture.addOutreachConversation(t)
+	insights := overdueInsight(t, fixture)
+	outreach := fixture.outreach()
+	ctx := context.Background()
+
+	outreach.Evaluate(ctx, insights)
+	messages, err := fixture.messages()
+	if err != nil {
+		t.Fatalf("messages: %v", err)
+	}
+	outreachMessage := messages[0]
+
+	// "not now" contains "no" as a substring: the reply must still be a
+	// deferral, not a refusal.
+	fixture.addUserReply(t, outreachMessage.ConversationID, "Not now, I am busy")
+	outreach.AcknowledgeReplies(ctx)
+
+	items, _, err := outreach.List(ctx, 10, 0)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(items) != 1 || items[0].Outcome != proactive.OutreachSnoozed {
+		t.Fatalf("an English deferral must be snoozed, got %+v", items)
+	}
+}
+
+func TestOutreachReplyBareNoIsDismissed(t *testing.T) {
+	fixture := newFixture(t)
+	fixture.addOutreachConversation(t)
+	insights := overdueInsight(t, fixture)
+	outreach := fixture.outreach()
+	ctx := context.Background()
+
+	outreach.Evaluate(ctx, insights)
+	messages, err := fixture.messages()
+	if err != nil {
+		t.Fatalf("messages: %v", err)
+	}
+	outreachMessage := messages[0]
+
+	fixture.addUserReply(t, outreachMessage.ConversationID, "Нет")
+	outreach.AcknowledgeReplies(ctx)
+
+	items, _, err := outreach.List(ctx, 10, 0)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(items) != 1 || items[0].Outcome != proactive.OutreachDismissed {
+		t.Fatalf("a bare no must be dismissed, got %+v", items)
+	}
+}
+
+func TestOutreachReplyQuestionStaysPending(t *testing.T) {
+	fixture := newFixture(t)
+	fixture.addOutreachConversation(t)
+	insights := overdueInsight(t, fixture)
+	outreach := fixture.outreach()
+	ctx := context.Background()
+
+	outreach.Evaluate(ctx, insights)
+	messages, err := fixture.messages()
+	if err != nil {
+		t.Fatalf("messages: %v", err)
+	}
+	outreachMessage := messages[0]
+
+	// A question or an unrelated message is not a decision: the outreach
+	// stays pending instead of being silently accepted.
+	fixture.addUserReply(t, outreachMessage.ConversationID, "Что ты имеешь в виду?")
+	outreach.AcknowledgeReplies(ctx)
+
+	items, _, err := outreach.List(ctx, 10, 0)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(items) != 1 || items[0].Outcome != proactive.OutreachPending {
+		t.Fatalf("an unrecognized reply must not count as agreement, got %+v", items)
+	}
+}
+
+func TestOutreachLongSnoozeOutlivesLookback(t *testing.T) {
+	fixture := newFixture(t)
+	fixture.addOutreachConversation(t)
+	insights := overdueInsight(t, fixture)
+	outreach := fixture.outreach()
+	ctx := context.Background()
+
+	outreach.Evaluate(ctx, insights)
+	items, _, err := outreach.List(ctx, 10, 0)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	id := items[0].ID
+
+	// The user pushes the topic a month away; the statistics window is a
+	// week. The hold must outlive the window.
+	if err := outreach.Snooze(ctx, id, fixture.clock.Now().Add(30*24*time.Hour)); err != nil {
+		t.Fatalf("snooze: %v", err)
+	}
+	fixture.clock.Add(8 * 24 * time.Hour)
+
+	outreach.Evaluate(ctx, insights)
+	messages, err := fixture.messages()
+	if err != nil {
+		t.Fatalf("messages: %v", err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("a month-long snooze must outlive the week lookback, got %d messages", len(messages))
+	}
+}

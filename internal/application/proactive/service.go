@@ -531,6 +531,11 @@ func largestFreeWindow(events []appevents.EventWithVersion, now, usableEnd time.
 		if from.Before(cursor) {
 			from = cursor
 		}
+		// A meeting after the usable end of the day does not extend it: the
+		// gap it leaves is capped at usableEnd, not at the meeting's start.
+		if from.After(usableEnd) {
+			from = usableEnd
+		}
 		if to.Before(cursor) {
 			to = cursor
 		}

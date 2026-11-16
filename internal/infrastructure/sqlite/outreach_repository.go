@@ -57,6 +57,18 @@ func (r *outreachRepository) Recent(ctx context.Context, since time.Time) ([]pro
 	return collectOutreach(rows)
 }
 
+// Snoozed returns every snoozed outreach whose hold is still recorded,
+// regardless of when it was created: a snooze promised for a month must
+// outlive the statistics window that feeds repetition suppression.
+func (r *outreachRepository) Snoozed(ctx context.Context) ([]proactive.Outreach, error) {
+	rows, err := r.tx.QueryContext(ctx, outreachSelect+`WHERE outcome = 'snoozed' AND snoozed_until IS NOT NULL ORDER BY created_at ASC, id ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("list snoozed outreach: %w", err)
+	}
+	defer rows.Close()
+	return collectOutreach(rows)
+}
+
 // SetOutcome records the user's reaction.
 func (r *outreachRepository) SetOutcome(ctx context.Context, id int64, outcome proactive.OutreachOutcome, decidedAt time.Time) error {
 	result, err := r.tx.ExecContext(ctx,

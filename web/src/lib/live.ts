@@ -137,6 +137,13 @@ const eventTypes = [
 	'memory.deleted',
 	'memory.conflict.detected',
 	'memory.conflict.resolved',
+	// Автоматизации меняются и ассистентом, и планировщиком; без этих событий
+	// страницы, подписанные на liveRevision, показывали бы устаревшее состояние.
+	'automation.created',
+	'automation.updated',
+	'automation.deleted',
+	'automation.run.started',
+	'automation.run.finished',
 	// Sources and links change what an entry shows even though the entry
 	// itself is not edited, so they need the same refresh.
 	'memory.source.added',

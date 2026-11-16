@@ -66,8 +66,14 @@ LifeOS — персональная операционная система дл
   «не сейчас», «скрыть»), «не сейчас» на уведомлении или ответ в чате —
   согласие засчитывается как принято, «не сейчас» и «не надо» — как отложено
   и отклонено, и не превращаются в согласие.
-- **Realtime**: SSE-поток `task.*`, `inbox.*`, `assistant.*`, `pending_action.*`,
-  `insight.detected`, `outreach.created`, `memory.*` с replay по `Last-Event-ID`.
+- **Автоматизации**: ассистент превращает повторяющийся процесс в сценарий —
+  триггер (время, событие LifeOS или наблюдение-условие), шаги из инструментов
+  LifeOS, ожидаемый результат и последствия. Выполнение включается только после
+  утверждения; каждый запуск пошагово журналируется, сценарий можно
+  приостановить, изменить или отправить в архив. Раздел «Автоматизации»
+  показывает всё это целиком.
+- **Цели**: долгосрочные намерения с планом по этапам, утверждением,
+  предложениями по изменению плана и фактическим прогрессом.
 - **MCP**: tools-only сервер поверх Streamable HTTP; по умолчанию read-only.
 - **Настройки и поиск**: JSON key-value настройки, общий поиск по задачам и
   входящим.
@@ -88,7 +94,8 @@ Transport (HTTP, SSE, MCP) → Application → Domain
 - `internal/domain` — Task, InboxItem, TaskEvent, Conversation, Message,
   PendingAction, MemoryEntry; без внешних зависимостей.
 - `internal/application` — use cases: tasks, inbox, summary, assistant,
-  proactive, planning, documents, completion, memory, search, settings.
+  proactive, planning, documents, completion, memory, search, settings, goals,
+  automation.
 - `internal/infrastructure/sqlite` — репозитории, Unit of Work, миграции.
 - `internal/transport` — REST/SSE, MCP-адаптер.
 - `internal/agent` — OpenAI-совместимый провайдер и реестр инструментов.

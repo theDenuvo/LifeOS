@@ -9,7 +9,9 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
+	"unicode"
 
 	appevents "github.com/theDenuvo/LifeOS/internal/application/events"
 	appgoals "github.com/theDenuvo/LifeOS/internal/application/goals"
@@ -218,6 +220,10 @@ func (s *Service) Compute(ctx context.Context) ([]Insight, error) {
 	if s.deadlineRisks != nil {
 		insights = append(insights, s.deadlineRiskInsights(ctx)...)
 	}
+	// Roadmap stage 6: repeated work is an automation opportunity. The
+	// detector runs last and tolerates its own failure: an empty result just
+	// means no opportunity was visible today.
+	insights = append(insights, s.automationOpportunityInsights(ctx, now)...)
 	if len(insights) == 0 {
 		return []Insight{}, nil
 	}
@@ -709,6 +715,96 @@ func (s *Service) stalledGoalInsights(ctx context.Context) []Insight {
 		})
 	}
 	return insights
+}
+
+// automationOpportunityInsights detects repeated processes worth turning into
+// an automation (roadmap stage 6). The signal is deliberately conservative:
+// tasks sharing a tag, created over the lookback window, whose titles repeat
+// the same opening word. That catches "Оплата: ..." weekly invoices and
+// "Ревью: ..." sprint chores without firing on a coincidental pair.
+func (s *Service) automationOpportunityInsights(ctx context.Context, now time.Time) []Insight {
+	const (
+		automationLookback = 30 * 24 * time.Hour
+		minTasksPerTag     = 3
+		minSharedTitles    = 2
+	)
+	recent, err := s.listAll(ctx, tasks.TaskFilter{})
+	if err != nil {
+		// The opportunity detector must never erase the day's task insights.
+		return nil
+	}
+	cutoff := now.Add(-automationLookback)
+	type bucket struct {
+		ids    []int64
+		titles []string
+	}
+	byTag := map[string]*bucket{}
+	for _, item := range recent {
+		value := item.Task
+		if value.CreatedAt.Before(cutoff) || len(value.Tags) == 0 {
+			continue
+		}
+		for _, tag := range value.Tags {
+			found := byTag[tag]
+			if found == nil {
+				found = &bucket{}
+				byTag[tag] = found
+			}
+			found.ids = append(found.ids, value.ID)
+			found.titles = append(found.titles, value.Title)
+		}
+	}
+	insights := make([]Insight, 0, len(byTag))
+	for tag, found := range byTag {
+		if len(found.ids) < minTasksPerTag {
+			continue
+		}
+		openings := map[string]int{}
+		for _, title := range found.titles {
+			openings[firstWord(title)]++
+		}
+		best, count := "", 0
+		for word, seen := range openings {
+			if word != "" && seen > count {
+				best, count = word, seen
+			}
+		}
+		if count < minSharedTitles {
+			continue
+		}
+		insights = append(insights, Insight{
+			Key:      fmt.Sprintf("automation-opportunity-%s", tag),
+			Kind:     "automation-opportunity",
+			Severity: SeverityInfo,
+			Title:    fmt.Sprintf("Похоже на повторяющийся процесс: «%s»", tag),
+			Detail: fmt.Sprintf("%d задач(и) с тегом «%s» за 30 дней, у %d одинаковое начало («%s …»).",
+				len(found.ids), tag, count, best),
+			Count:    len(found.ids),
+			TaskIDs:  limitIDs(found.ids, 10),
+			Proposal: "Попросите ассистента спроектировать автоматизацию: «сделай из этого автоматизацию» — сценарий покажут на согласование.",
+		})
+	}
+	sort.SliceStable(insights, func(i, j int) bool { return insights[i].Key < insights[j].Key })
+	return insights
+}
+
+// firstWord returns the normalised opening word of a title, or "" when the
+// title has no suitable word (too short, or with symbols inside).
+func firstWord(title string) string {
+	fields := strings.Fields(strings.TrimSpace(strings.ToLower(title)))
+	if len(fields) == 0 {
+		return ""
+	}
+	word := strings.Trim(fields[0], ".,;:!?\"'«»()—–")
+	if len([]rune(word)) < 3 {
+		return ""
+	}
+	for _, symbol := range word {
+		if !unicode.IsLetter(symbol) && !unicode.IsDigit(symbol) {
+			return ""
+		}
+	}
+	return word
 }
 
 func (s *Service) listAll(ctx context.Context, filter tasks.TaskFilter) ([]tasks.TaskWithVersion, error) {

@@ -1,0 +1,595 @@
+package automation_test
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	appautomation "github.com/theDenuvo/LifeOS/internal/application/automation"
+	domainautomation "github.com/theDenuvo/LifeOS/internal/domain/automation"
+	"github.com/theDenuvo/LifeOS/internal/events"
+)
+
+// stepClock is a controllable clock.
+type stepClock struct{ at time.Time }
+
+func (c *stepClock) Now() time.Time { return c.at }
+
+func (c *stepClock) add(d time.Duration) { c.at = c.at.Add(d) }
+
+func testClock() *stepClock {
+	return &stepClock{at: time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)}
+}
+
+// recordedPublisher remembers what the service announced live.
+type recordedPublisher struct {
+	events.Broker
+	published []string
+}
+
+func (p *recordedPublisher) Publish(eventType string, _ any) error {
+	p.published = append(p.published, eventType)
+	return nil
+}
+
+// fakeTools records executed steps and answers with canned results.
+type fakeTools struct {
+	results map[string]any
+	calls   []string
+	failFor map[string]bool
+}
+
+func (t *fakeTools) Execute(_ context.Context, name string, _ json.RawMessage) (any, error) {
+	t.calls = append(t.calls, name)
+	if t.failFor[name] {
+		return nil, errors.New("шаг сломался")
+	}
+	if result, ok := t.results[name]; ok {
+		return result, nil
+	}
+	return map[string]any{"ok": true}, nil
+}
+
+type fakeValidator struct{ known map[string]bool }
+
+func (v fakeValidator) AllowedForAutomation(name string) (bool, string) {
+	if v.known[name] {
+		return true, ""
+	}
+	return false, "инструмент не зарегистрирован"
+}
+
+type fakeConditions struct{ keys map[string]struct{} }
+
+func (c fakeConditions) CurrentInsightKeys(context.Context) (map[string]struct{}, error) {
+	return c.keys, nil
+}
+
+// fakeRepo mirrors the SQLite semantics: versioned writes, a single running
+// run reservation and a durable run journal.
+type fakeRepo struct {
+	automations map[int64]*domainautomation.Automation
+	runs        map[int64]*domainautomation.Run
+	nextID      int64
+}
+
+func newFakeRepo() *fakeRepo {
+	return &fakeRepo{
+		automations: map[int64]*domainautomation.Automation{},
+		runs:        map[int64]*domainautomation.Run{},
+	}
+}
+
+func (r *fakeRepo) next() int64 {
+	r.nextID++
+	return r.nextID
+}
+
+func (r *fakeRepo) Insert(_ context.Context, automation *domainautomation.Automation) (int64, error) {
+	if err := automation.Validate(); err != nil {
+		return 0, err
+	}
+	id := r.next()
+	stored := *automation
+	stored.ID = id
+	r.automations[id] = &stored
+	return id, nil
+}
+
+func (r *fakeRepo) Get(_ context.Context, id int64) (*domainautomation.Automation, error) {
+	stored, ok := r.automations[id]
+	if !ok {
+		return nil, appautomation.ErrNotFound
+	}
+	return stored, nil
+}
+
+func (r *fakeRepo) List(_ context.Context, filter appautomation.Filter) ([]*domainautomation.Automation, int, error) {
+	found := make([]*domainautomation.Automation, 0)
+	for _, item := range r.automations {
+		if filter.Status != nil && item.Status != *filter.Status {
+			continue
+		}
+		if filter.Query != "" && !strings.Contains(item.Title, filter.Query) {
+			continue
+		}
+		found = append(found, item)
+	}
+	return found, len(found), nil
+}
+
+func (r *fakeRepo) Update(_ context.Context, id int64, expectedVersion int, automation *domainautomation.Automation) (*domainautomation.Automation, error) {
+	if err := automation.Validate(); err != nil {
+		return nil, err
+	}
+	stored, ok := r.automations[id]
+	if !ok {
+		return nil, appautomation.ErrNotFound
+	}
+	if stored.Version != expectedVersion {
+		return nil, appautomation.ErrVersionConflict
+	}
+	storedCopy := *automation
+	storedCopy.ID = id
+	storedCopy.Version = stored.Version + 1
+	r.automations[id] = &storedCopy
+	return r.automations[id], nil
+}
+
+func (r *fakeRepo) Delete(_ context.Context, id int64) error {
+	if _, ok := r.automations[id]; !ok {
+		return appautomation.ErrNotFound
+	}
+	delete(r.automations, id)
+	for runID, run := range r.runs {
+		if run.AutomationID == id {
+			delete(r.runs, runID)
+		}
+	}
+	return nil
+}
+
+func (r *fakeRepo) ScheduleDue(_ context.Context, now time.Time) ([]*domainautomation.Automation, error) {
+	found := make([]*domainautomation.Automation, 0)
+	for _, item := range r.automations {
+		if item.Status != domainautomation.StatusActive || item.Trigger.Kind != domainautomation.TriggerSchedule {
+			continue
+		}
+		if item.NextRunAt == nil || !item.NextRunAt.After(now) {
+			found = append(found, item)
+		}
+	}
+	return found, nil
+}
+
+func (r *fakeRepo) ListByTrigger(_ context.Context, kind domainautomation.TriggerKind) ([]*domainautomation.Automation, error) {
+	found := make([]*domainautomation.Automation, 0)
+	for _, item := range r.automations {
+		if item.Status == domainautomation.StatusActive && item.Trigger.Kind == kind {
+			found = append(found, item)
+		}
+	}
+	return found, nil
+}
+
+func (r *fakeRepo) StartRun(_ context.Context, automationID int64, trigger string, startedAt time.Time) (*domainautomation.Run, error) {
+	for _, run := range r.runs {
+		if run.AutomationID == automationID && run.Status == domainautomation.RunRunning {
+			return nil, nil
+		}
+	}
+	run := &domainautomation.Run{
+		ID: r.next(), AutomationID: automationID, Trigger: trigger,
+		Status: domainautomation.RunRunning, StartedAt: startedAt,
+	}
+	// The store keeps its own copy: the service mutates the returned value
+	// while building the journal, and FinishRun must observe the stored
+	// state, not the caller's working copy.
+	r.runs[run.ID] = &domainautomation.Run{
+		ID: run.ID, AutomationID: run.AutomationID, Trigger: run.Trigger,
+		Status: run.Status, StartedAt: run.StartedAt,
+	}
+	return run, nil
+}
+
+func (r *fakeRepo) FinishRun(_ context.Context, run *domainautomation.Run) error {
+	stored, ok := r.runs[run.ID]
+	if !ok || stored.Status != domainautomation.RunRunning {
+		return appautomation.ErrRunNotFound
+	}
+	stored.Status = run.Status
+	stored.Steps = run.Steps
+	stored.Summary = run.Summary
+	stored.Error = run.Error
+	stored.FinishedAt = run.FinishedAt
+	return nil
+}
+
+func (r *fakeRepo) GetRun(_ context.Context, automationID, runID int64) (*domainautomation.Run, error) {
+	run, ok := r.runs[runID]
+	if !ok || run.AutomationID != automationID {
+		return nil, appautomation.ErrRunNotFound
+	}
+	return run, nil
+}
+
+func (r *fakeRepo) ListRuns(_ context.Context, automationID int64, limit, offset int) ([]*domainautomation.Run, int, error) {
+	found := make([]*domainautomation.Run, 0)
+	for _, run := range r.runs {
+		if run.AutomationID == automationID {
+			found = append(found, run)
+		}
+	}
+	total := len(found)
+	if offset > total {
+		offset = total
+	}
+	end := offset + limit
+	if limit <= 0 || end > total {
+		end = total
+	}
+	return found[offset:end], total, nil
+}
+
+type fakeUoW struct{ repo *fakeRepo }
+
+func (u fakeUoW) Do(ctx context.Context, fn func(context.Context, appautomation.Transaction) error) error {
+	return fn(ctx, u.repo)
+}
+
+func (r *fakeRepo) Automations() appautomation.Repository { return r }
+
+func scheduleTrigger(hour, minute int) domainautomation.Trigger {
+	return domainautomation.Trigger{
+		Kind: domainautomation.TriggerSchedule,
+		Schedule: &domainautomation.Schedule{
+			Frequency: domainautomation.FrequencyDaily,
+			Time:      fmt.Sprintf("%02d:%02d", hour, minute),
+		},
+	}
+}
+
+func sampleSteps() []domainautomation.Step {
+	return []domainautomation.Step{
+		{Name: "list_tasks", Arguments: json.RawMessage(`{"status":"open"}`), Description: "Открытые задачи"},
+		{Name: "capture_inbox", Arguments: json.RawMessage(`{"text":"Проверка"}`), Description: "Напоминание во входящие"},
+	}
+}
+
+func newTestService(clock *stepClock, repo *fakeRepo, tools *fakeTools, publisher events.Publisher) *appautomation.Service {
+	return appautomation.NewService(
+		fakeUoW{repo: repo},
+		clock,
+		appautomation.WithPublisher(publisher),
+		appautomation.WithTools(tools),
+		appautomation.WithValidator(fakeValidator{known: map[string]bool{"list_tasks": true, "capture_inbox": true}}),
+		appautomation.WithConditions(fakeConditions{keys: map[string]struct{}{"overdue": {}}}),
+		appautomation.WithTimezone("UTC"),
+	)
+}
+
+func mustCreate(t *testing.T, service *appautomation.Service, trigger domainautomation.Trigger) *appautomation.View {
+	t.Helper()
+	view, err := service.Create(context.Background(), appautomation.CreateInput{
+		Title: "Проверка", Trigger: trigger, Steps: sampleSteps(),
+		ExpectedResult: "Напоминание во входящих",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	return view
+}
+
+func TestCreateStartsProposedAndWaitsForApproval(t *testing.T) {
+	clock := testClock()
+	repo := newFakeRepo()
+	tools := &fakeTools{}
+	service := newTestService(clock, repo, tools, &recordedPublisher{})
+
+	view := mustCreate(t, service, scheduleTrigger(10, 0))
+	if view.Automation.Status != domainautomation.StatusProposed {
+		t.Fatalf("status = %s, want proposed", view.Automation.Status)
+	}
+	if len(tools.calls) != 0 {
+		t.Fatalf("designing must not execute steps, got %v", tools.calls)
+	}
+
+	// An approved automation gets a schedule bookmark computed from now.
+	active, err := service.Approve(context.Background(), view.Automation.ID)
+	if err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if active.Automation.Status != domainautomation.StatusActive {
+		t.Fatalf("status = %s, want active", active.Automation.Status)
+	}
+	if active.Automation.NextRunAt == nil {
+		t.Fatalf("approval must compute the next schedule moment")
+	}
+	if !active.Automation.NextRunAt.After(clock.Now()) {
+		t.Fatalf("next run %v must be after now %v", active.Automation.NextRunAt, clock.Now())
+	}
+}
+
+func TestRefusesScenarioWithUnknownTool(t *testing.T) {
+	service := newTestService(testClock(), newFakeRepo(), &fakeTools{}, &recordedPublisher{})
+	_, err := service.Create(context.Background(), appautomation.CreateInput{
+		Title: "Сломанный сценарий",
+		Trigger: domainautomation.Trigger{
+			Kind:  domainautomation.TriggerEvent,
+			Event: &domainautomation.EventTrigger{Name: "task.completed"},
+		},
+		Steps: []domainautomation.Step{{Name: "not_registered"}},
+	})
+	if !errors.Is(err, appautomation.ErrStepNotAllowed) {
+		t.Fatalf("err = %v, want ErrStepNotAllowed", err)
+	}
+}
+
+func TestTickRunsDueScheduleAndJournalsSteps(t *testing.T) {
+	clock := testClock()
+	repo := newFakeRepo()
+	tools := &fakeTools{results: map[string]any{"list_tasks": map[string]any{"total": 2}}}
+	service := newTestService(clock, repo, tools, &recordedPublisher{})
+	view := mustCreate(t, service, scheduleTrigger(9, 30))
+	if _, err := service.Approve(context.Background(), view.Automation.ID); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	// Not due yet: 10:00 pass, the moment is 9:30.
+	result := service.Tick(context.Background(), clock.Now())
+	if result.ScheduleRuns != 0 {
+		t.Fatalf("runs = %d, want 0 before the moment", result.ScheduleRuns)
+	}
+
+	clock.at = time.Date(2026, 11, 16, 9, 30, 5, 0, time.UTC)
+	result = service.Tick(context.Background(), clock.Now())
+	if result.ScheduleRuns != 1 {
+		t.Fatalf("runs = %d, want 1", result.ScheduleRuns)
+	}
+	if len(tools.calls) != len(sampleSteps()) {
+		t.Fatalf("executed %v, want every step once", tools.calls)
+	}
+	runs, total, err := service.Runs(context.Background(), view.Automation.ID, 10, 0)
+	if err != nil || total != 1 {
+		t.Fatalf("runs: %d, total %d, err %v", len(runs), total, err)
+	}
+	if runs[0].Status != domainautomation.RunSucceeded {
+		t.Fatalf("run status = %s", runs[0].Status)
+	}
+	for i, step := range runs[0].Steps {
+		if step.Status != domainautomation.StepSucceeded {
+			t.Fatalf("step %d status = %s", i, step.Status)
+		}
+	}
+
+	// The bookmark moved to tomorrow, so the next pass does not re-run.
+	next := service.Tick(context.Background(), clock.Now())
+	if next.ScheduleRuns != 0 {
+		t.Fatalf("double run on the same pass cycle, got %d", next.ScheduleRuns)
+	}
+
+	// A missed moment is caught up exactly once after a restart gap.
+	clock.at = time.Date(2026, 11, 18, 15, 0, 0, 0, time.UTC)
+	result = service.Tick(context.Background(), clock.Now())
+	if result.ScheduleRuns != 1 || result.OverdueCatchups != 1 {
+		t.Fatalf("catch-up: runs %d, catchups %d", result.ScheduleRuns, result.OverdueCatchups)
+	}
+}
+
+func TestFailingStepStopsScenarioAndRecordsSkip(t *testing.T) {
+	clock := testClock()
+	repo := newFakeRepo()
+	tools := &fakeTools{failFor: map[string]bool{"list_tasks": true}}
+	service := newTestService(clock, repo, tools, &recordedPublisher{})
+	view := mustCreate(t, service, domainautomation.Trigger{
+		Kind:  domainautomation.TriggerEvent,
+		Event: &domainautomation.EventTrigger{Name: "task.completed"},
+	})
+	if _, err := service.Approve(context.Background(), view.Automation.ID); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	service.Observe(context.Background(), "task.completed", map[string]any{"id": 5}, clock.Now())
+	runs, _, err := service.Runs(context.Background(), view.Automation.ID, 10, 0)
+	if err != nil {
+		t.Fatalf("runs: %v", err)
+	}
+	if runs[0].Status != domainautomation.RunFailed {
+		t.Fatalf("status = %s, want failed", runs[0].Status)
+	}
+	if runs[0].Steps[0].Status != domainautomation.StepFailed || runs[0].Steps[0].Error == "" {
+		t.Fatalf("failing step must carry the error, got %+v", runs[0].Steps[0])
+	}
+	if runs[0].Steps[1].Status != domainautomation.StepSkipped {
+		t.Fatalf("step after failure must be skipped, got %s", runs[0].Steps[1].Status)
+	}
+	if !strings.Contains(runs[0].Error, "шаг 1") {
+		t.Fatalf("run error must name the failing step, got %q", runs[0].Error)
+	}
+}
+
+func TestEventTriggerMatchesPayload(t *testing.T) {
+	clock := testClock()
+	repo := newFakeRepo()
+	tools := &fakeTools{}
+	service := newTestService(clock, repo, tools, &recordedPublisher{})
+	view := mustCreate(t, service, domainautomation.Trigger{
+		Kind: domainautomation.TriggerEvent,
+		Event: &domainautomation.EventTrigger{
+			Name:  "task.completed",
+			Match: map[string]string{"source": "assistant"},
+		},
+	})
+	if _, err := service.Approve(context.Background(), view.Automation.ID); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	// Wrong payload field: no run.
+	service.Observe(context.Background(), "task.completed", map[string]any{"source": "user"}, clock.Now())
+	runs, _, err := service.Runs(context.Background(), view.Automation.ID, 10, 0)
+	if err != nil {
+		t.Fatalf("runs: %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("matched a payload it must not: %d runs", len(runs))
+	}
+
+	// Nested payload paths match by string form.
+	service.Observe(context.Background(), "task.completed", map[string]any{
+		"task": map[string]any{"id": 5},
+	}, clock.Now())
+	runs, _, _ = service.Runs(context.Background(), view.Automation.ID, 10, 0)
+	if len(runs) != 0 {
+		t.Fatalf("a non-matching payload ran the scenario: %d", len(runs))
+	}
+
+	service.Observe(context.Background(), "task.completed", map[string]any{"source": "assistant"}, clock.Now())
+	runs, _, _ = service.Runs(context.Background(), view.Automation.ID, 10, 0)
+	if len(runs) != 1 || runs[0].Trigger != "event" {
+		t.Fatalf("matching payload must run once, got %+v", runs)
+	}
+}
+
+func TestConditionRunsOnInsightWithCooldown(t *testing.T) {
+	clock := testClock()
+	repo := newFakeRepo()
+	tools := &fakeTools{}
+	service := newTestService(clock, repo, tools, &recordedPublisher{})
+	view := mustCreate(t, service, domainautomation.Trigger{
+		Kind: domainautomation.TriggerCondition,
+		Condition: &domainautomation.ConditionTrigger{
+			Insight: "overdue", CooldownMinutes: 60,
+		},
+	})
+	if _, err := service.Approve(context.Background(), view.Automation.ID); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	result := service.Tick(context.Background(), clock.Now())
+	if result.ConditionRuns != 1 {
+		t.Fatalf("runs = %d, want 1 while the condition holds", result.ConditionRuns)
+	}
+
+	// The cooldown suppresses an immediate refire.
+	result = service.Tick(context.Background(), clock.Now())
+	if result.ConditionRuns != 0 {
+		t.Fatalf("cooldown did not hold, got %d runs", result.ConditionRuns)
+	}
+
+	clock.at = clock.Now().Add(2 * time.Hour)
+	result = service.Tick(context.Background(), clock.Now())
+	if result.ConditionRuns != 1 {
+		t.Fatalf("runs after cooldown = %d, want 1", result.ConditionRuns)
+	}
+
+	// A paused automation never runs, whatever the insight says.
+	if _, err := service.SetStatus(context.Background(), view.Automation.ID, domainautomation.StatusPaused); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	clock.at = clock.Now().Add(2 * time.Hour)
+	result = service.Tick(context.Background(), clock.Now())
+	if result.ConditionRuns != 0 {
+		t.Fatalf("paused automation ran: %d", result.ConditionRuns)
+	}
+}
+
+func TestActiveScenarioChangesRequirePause(t *testing.T) {
+	clock := testClock()
+	repo := newFakeRepo()
+	tools := &fakeTools{}
+	service := newTestService(clock, repo, tools, &recordedPublisher{})
+	view := mustCreate(t, service, scheduleTrigger(10, 0))
+	active, err := service.Approve(context.Background(), view.Automation.ID)
+	if err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	title := "Переименовал"
+	if _, err := service.Update(context.Background(), view.Automation.ID, active.Automation.Version, appautomation.UpdateInput{Title: &title}); err != nil {
+		t.Fatalf("text edit on active automation: %v", err)
+	}
+	trigger := scheduleTrigger(11, 0)
+	current, err := service.Get(context.Background(), view.Automation.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if _, err := service.Update(context.Background(), view.Automation.ID, current.Automation.Version, appautomation.UpdateInput{Trigger: &trigger}); !errors.Is(err, appautomation.ErrInvalidTransition) {
+		t.Fatalf("trigger edit on active automation: %v", err)
+	}
+
+	if _, err := service.SetStatus(context.Background(), view.Automation.ID, domainautomation.StatusPaused); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	current, err = service.Get(context.Background(), view.Automation.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if _, err := service.Update(context.Background(), view.Automation.ID, current.Automation.Version, appautomation.UpdateInput{Trigger: &trigger}); err != nil {
+		t.Fatalf("trigger edit while paused: %v", err)
+	}
+}
+
+func TestManualRunRequiresApproval(t *testing.T) {
+	clock := testClock()
+	repo := newFakeRepo()
+	tools := &fakeTools{}
+	service := newTestService(clock, repo, tools, &recordedPublisher{})
+	view := mustCreate(t, service, scheduleTrigger(10, 0))
+	if _, err := service.RunNow(context.Background(), view.Automation.ID); !errors.Is(err, appautomation.ErrNotExecutable) {
+		t.Fatalf("proposed automation must refuse a manual run, got %v", err)
+	}
+	if len(tools.calls) != 0 {
+		t.Fatalf("nothing must execute, got %v", tools.calls)
+	}
+}
+
+func TestNextRunScheduleArithmetic(t *testing.T) {
+	loc := time.UTC
+	daily := scheduleTrigger(9, 30)
+	next := domainautomation.NextRun(daily, time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC), loc)
+	if next == nil || next.Format("2006-01-02 15:04") != "2026-11-17 09:30" {
+		t.Fatalf("daily next = %v", next)
+	}
+
+	weekly := domainautomation.Trigger{
+		Kind: domainautomation.TriggerSchedule,
+		Schedule: &domainautomation.Schedule{
+			Frequency: domainautomation.FrequencyWeekly, Time: "08:00",
+			Weekdays: []int{1, 3}, // Monday, Wednesday
+		},
+	}
+	next = domainautomation.NextRun(weekly, time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC), loc) // Monday after 08:00
+	if next == nil || next.Format("2006-01-02 15:04") != "2026-11-18 08:00" {
+		t.Fatalf("weekly next = %v", next)
+	}
+
+	monthly := domainautomation.Trigger{
+		Kind: domainautomation.TriggerSchedule,
+		Schedule: &domainautomation.Schedule{
+			Frequency: domainautomation.FrequencyMonthly, Time: "12:00", DayOfMonth: 31,
+		},
+	}
+	next = domainautomation.NextRun(monthly, time.Date(2026, 11, 16, 13, 0, 0, 0, time.UTC), loc)
+	if next == nil || next.Format("2006-01-02 15:04") != "2026-12-31 12:00" {
+		t.Fatalf("monthly next = %v (November has no 31st)", next)
+	}
+
+	monthlyLast := domainautomation.Trigger{
+		Kind: domainautomation.TriggerSchedule,
+		Schedule: &domainautomation.Schedule{
+			Frequency: domainautomation.FrequencyMonthly, Time: "12:00", DayOfMonth: 0,
+		},
+	}
+	next = domainautomation.NextRun(monthlyLast, time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC), loc)
+	if next == nil || next.Format("2006-01-02 15:04") != "2026-02-28 12:00" {
+		t.Fatalf("last-day monthly next = %v", next)
+	}
+
+	if domainautomation.NextRun(domainautomation.Trigger{Kind: domainautomation.TriggerEvent}, time.Now(), loc) != nil {
+		t.Fatalf("event trigger has no schedule")
+	}
+}

@@ -41,6 +41,12 @@ func (r *Registry) Register(tool Tool) {
 	r.tools[tool.Spec.Name] = tool
 }
 
+// Has reports whether a tool with this name is registered.
+func (r *Registry) Has(name string) bool {
+	_, ok := r.tools[name]
+	return ok
+}
+
 // Specs returns the tool descriptions in registration order.
 func (r *Registry) Specs() []assistant.ToolSpec {
 	specs := make([]assistant.ToolSpec, 0, len(r.order))

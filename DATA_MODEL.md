@@ -535,6 +535,48 @@
 
 `goal_proposals`: `summary` (объяснение от ассистента), `payload` (JSON: title, description, target_date, add/complete/skip/reopen/remove milestones), `status` (`pending`, `applied`, `rejected`), `created_at`, `decided_at`. Применение выполняется атомарно одной транзакцией; одновременно может быть только одно `pending`-предложение на цель.
 
+## Автоматизации
+
+### 12. Automation (Автоматизация)
+
+| Поле | Тип | Правила |
+|---|---|---|
+| `id` | int64 | PK |
+| `title` | string | 1–200 символов |
+| `description` | string | ≤ 5000 символов |
+| `status` | string | `proposed`, `active`, `paused`, `archived`; `archived` терминален |
+| `trigger_kind` | string | `schedule`, `event`, `condition` |
+| `trigger_json` | JSON | тело триггера того же вида, что и в API (см. `API_CONTRACT.md` 8.3) |
+| `steps_json` | JSON | сценарий: шаги `name` + `arguments` (JSON) + `description`; 1–20 шагов |
+| `expected_result` | string | что должен производить запуск |
+| `consequences` | string | эффекты и риски, названные при проектировании |
+| `approved_at` | timestamp? | момент включения выполнения |
+| `last_run_at` | timestamp? | последний фактический запуск |
+| `next_run_at` | timestamp? | durable-закладка расписания; `NULL` для event/condition и как маркер «пересчитать» |
+| `created_at`, `updated_at`, `version` | | как у задач, optimistic locking |
+
+Таблица `automations` (миграция 026). Сценарий выполняется только в статусе
+`active`; правка триггера/шагов включённой автоматизации запрещена на уровне
+Application (сначала пауза).
+
+### 12.1 AutomationRun (Запуск автоматизации)
+
+| Поле | Тип | Правила |
+|---|---|---|
+| `id` | int64 | PK |
+| `automation_id` | int64 | FK → automations, cascade |
+| `trigger` | string | источник запуска: `schedule`, `event`, `condition`, `manual` |
+| `status` | string | `running` → `succeeded` / `failed` / `skipped` |
+| `steps_json` | JSON | пошаговый журнал: статус шага, вывод (обрезан до 4000 символов), ошибка, длительность |
+| `summary` | string | краткий итог по-человечески |
+| `error` | string | причина остановки сценария с номером шага |
+| `started_at` | timestamp | момент создания запуска |
+| `finished_at` | timestamp? | только у завершённого запуска |
+
+Таблица `automation_runs` (миграция 026). Один незавершённый запуск на
+автоматизацию: вставка running-строки атомарно отказывается, если такой уже
+есть, поэтому два прохода раннера не выполняют сценарий параллельно.
+
 ## Работа с датами и часовыми поясами
 
 ### Правила (критично)
@@ -616,6 +658,7 @@ Goal 1 ──< GoalMilestone
 Goal 1 ──< GoalLink >── Conversation / Task / Event / Document / Memory / InboxItem
 Goal 1 ──< GoalProgress
 Goal 1 ──< GoalProposal
+Automation 1 ──< AutomationRun
 ```
 
 ---
@@ -639,6 +682,9 @@ Goal 1 ──< GoalProposal
 | 020 | Долгосрочные цели: `goals`, `goal_milestones`, `goal_links`, `goal_progress`, `goal_proposals` с CHECK-ограничениями статусов и каскадным удалением |
 | 021 | `event_sequence`: долговечный счётчик ID событий SSE, резервируемый блоками |
 | 022 | Колонка `event_sequence.epoch`: эпоха диапазона ID |
+| 023 | Инициатива: `outreach` с исходами реакции и окном тишины |
+| 024–025 | Маршрутизация источников рабочих пространств и её восстановление |
+| 026 | Автоматизации: `automations`, `automation_runs` с CHECK-ограничениями статусов, частичным индексом running-запусков и каскадным удалением |
 
 ### Идентификаторы событий
 

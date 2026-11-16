@@ -14,6 +14,7 @@ import (
 	"github.com/theDenuvo/LifeOS/internal/agent"
 	"github.com/theDenuvo/LifeOS/internal/agent/tools"
 	"github.com/theDenuvo/LifeOS/internal/application/assistant"
+	"github.com/theDenuvo/LifeOS/internal/application/automation"
 	appcalendar "github.com/theDenuvo/LifeOS/internal/application/calendar"
 	"github.com/theDenuvo/LifeOS/internal/application/completion"
 	appdocuments "github.com/theDenuvo/LifeOS/internal/application/documents"
@@ -36,27 +37,28 @@ import (
 
 // Services groups the application services the HTTP transport exposes.
 type Services struct {
-	Tasks      *tasks.Service
-	Inbox      *inbox.Service
-	Summary    *summary.Service
-	Assistant  *assistant.Service
-	Proactive  *proactive.Service
-	Outreach   *proactive.OutreachService
-	Search     *search.Service
-	Settings   *settings.Service
-	Profile    *profile.Service
-	Events     *appevents.Service
-	Calendar   *appcalendar.Service
-	Documents  *appdocuments.Service
-	Planning   *planning.Service
-	Recurrence *recurrence.Service
-	Completion *completion.Service
-	Memory     *appmemory.Service
-	Goals      *goals.Service
-	Models     *agent.ModelCatalog
-	Tools      *tools.Registry
-	Broker     *events.Broker
-	Version    string
+	Tasks       *tasks.Service
+	Inbox       *inbox.Service
+	Summary     *summary.Service
+	Assistant   *assistant.Service
+	Proactive   *proactive.Service
+	Outreach    *proactive.OutreachService
+	Search      *search.Service
+	Settings    *settings.Service
+	Profile     *profile.Service
+	Events      *appevents.Service
+	Calendar    *appcalendar.Service
+	Documents   *appdocuments.Service
+	Planning    *planning.Service
+	Recurrence  *recurrence.Service
+	Completion  *completion.Service
+	Memory      *appmemory.Service
+	Goals       *goals.Service
+	Automations *automation.Service
+	Models      *agent.ModelCatalog
+	Tools       *tools.Registry
+	Broker      *events.Broker
+	Version     string
 }
 
 type Handler struct {
@@ -184,6 +186,16 @@ func (h *Handler) apiRoutes() http.Handler {
 	mux.HandleFunc("POST /goals/{id}/links", h.linkGoal)
 	mux.HandleFunc("DELETE /goals/{id}/links/{linkId}", h.unlinkGoal)
 	mux.HandleFunc("POST /goals/{id}/progress", h.recordGoalProgress)
+	mux.HandleFunc("GET /automations", h.listAutomations)
+	mux.HandleFunc("POST /automations", h.createAutomation)
+	mux.HandleFunc("GET /automations/{id}", h.getAutomation)
+	mux.HandleFunc("PATCH /automations/{id}", h.patchAutomation)
+	mux.HandleFunc("DELETE /automations/{id}", h.deleteAutomation)
+	mux.HandleFunc("POST /automations/{id}/approve", h.approveAutomation)
+	mux.HandleFunc("POST /automations/{id}/status", h.changeAutomationStatus)
+	mux.HandleFunc("POST /automations/{id}/run", h.runAutomationNow)
+	mux.HandleFunc("GET /automations/{id}/runs", h.listAutomationRuns)
+	mux.HandleFunc("GET /automations/{id}/runs/{runId}", h.getAutomationRun)
 	mux.HandleFunc("GET /settings", h.listSettings)
 	mux.HandleFunc("GET /settings/{key}", h.getSetting)
 	mux.HandleFunc("PUT /settings/{key}", h.putSetting)

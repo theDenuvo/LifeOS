@@ -18,6 +18,7 @@ import (
 	agentmemory "github.com/theDenuvo/LifeOS/internal/agent/memory"
 	"github.com/theDenuvo/LifeOS/internal/agent/tools"
 	"github.com/theDenuvo/LifeOS/internal/application/assistant"
+	"github.com/theDenuvo/LifeOS/internal/application/automation"
 	appcalendar "github.com/theDenuvo/LifeOS/internal/application/calendar"
 	"github.com/theDenuvo/LifeOS/internal/application/completion"
 	appdocuments "github.com/theDenuvo/LifeOS/internal/application/documents"
@@ -324,6 +325,22 @@ func main() {
 	)
 	workspaceHub.Bind(assistantService)
 
+	// Roadmap stage 6: user automations. The registry doubles as the step
+	// executor, so it is built first; the automation tools attach right after
+	// the service exists. Step validation refuses tools an unattended
+	// schedule may not run (infrastructure changes, workspace routing and the
+	// automation tools themselves).
+	automationService := automation.NewService(
+		sqlite.NewAutomationUnitOfWork(db),
+		clock,
+		automation.WithPublisher(broker),
+		automation.WithTools(registry),
+		automation.WithValidator(tools.AutomationStepValidator(registry)),
+		automation.WithConditions(automationInsights{service: proactiveService}),
+		automation.WithTimezone(cfg.Timezone),
+	)
+	tools.RegisterAutomationTools(registry, automationService)
+
 	// Roadmap stage 5: the initiative engine. It writes into the main chat on
 	// LifeOS's own behalf, so it is built after the assistant storage exists.
 	outreachConfig := proactive.OutreachConfig{
@@ -350,27 +367,28 @@ func main() {
 
 	// Create HTTP handler with all routes
 	handler := httptransport.NewHandler(db, cfg, dist.FS, httptransport.Services{
-		Tasks:      taskService,
-		Inbox:      inboxService,
-		Summary:    summaryService,
-		Assistant:  assistantService,
-		Proactive:  proactiveService,
-		Outreach:   outreachService,
-		Search:     searchService,
-		Settings:   settingsService,
-		Profile:    profileService,
-		Events:     eventService,
-		Calendar:   calendarService,
-		Documents:  documentService,
-		Planning:   planningService,
-		Recurrence: recurrenceService,
-		Completion: completionService,
-		Memory:     memoryService,
-		Goals:      goalsService,
-		Models:     modelCatalog,
-		Tools:      registry,
-		Broker:     broker,
-		Version:    version,
+		Tasks:       taskService,
+		Inbox:       inboxService,
+		Summary:     summaryService,
+		Assistant:   assistantService,
+		Proactive:   proactiveService,
+		Outreach:    outreachService,
+		Search:      searchService,
+		Settings:    settingsService,
+		Profile:     profileService,
+		Events:      eventService,
+		Calendar:    calendarService,
+		Documents:   documentService,
+		Planning:    planningService,
+		Recurrence:  recurrenceService,
+		Completion:  completionService,
+		Memory:      memoryService,
+		Goals:       goalsService,
+		Automations: automationService,
+		Models:      modelCatalog,
+		Tools:       registry,
+		Broker:      broker,
+		Version:     version,
 	}).Routes()
 
 	// HTTP Server
@@ -385,6 +403,21 @@ func main() {
 	// Graceful shutdown
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Roadmap stage 6: release the automation reservations a previous process
+	// left running BEFORE anything can start a new run. LifeOS is
+	// single-process, so every running run is stale at startup. This must
+	// happen before the HTTP server opens: a recovery that races a legitimate
+	// run would mark that run failed while its steps keep executing. A failed
+	// recovery leaves the reservation state unproven, so the application
+	// refuses to run rather than block or double-run automations.
+	recoveryCtx, recoveryCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if _, err := automationService.RecoverStaleRuns(recoveryCtx); err != nil {
+		recoveryCancel()
+		slog.Error("Could not recover automation runs from an earlier process; refusing to start on an unproven reservation state", "error", err)
+		os.Exit(1)
+	}
+	recoveryCancel()
 
 	go func() {
 		slog.Info("HTTP server listening", "addr", cfg.ListenAddr)
@@ -416,6 +449,17 @@ func main() {
 	})
 	go goals.NewReconciler(goalsService, goals.DefaultReconcileInterval).Run(ctx)
 
+	// Automation runner: schedule moments fire on a fixed cadence, LifeOS
+	// events are observed live through the broker, and condition triggers are
+	// checked on every pass. Both loops stop with the context, and Start
+	// returns only after the refusal journal has drained, so the wait below
+	// must complete before the database closes.
+	automationRunnerDone := make(chan struct{})
+	go func() {
+		automation.NewRunner(automationService, broker, 30*time.Second).Start(ctx)
+		close(automationRunnerDone)
+	}()
+
 	<-ctx.Done()
 	slog.Info("Shutting down...")
 
@@ -427,6 +471,37 @@ func main() {
 	} else {
 		slog.Info("Server stopped gracefully")
 	}
+
+	// The automation runner finishes its in-flight runs and flushes the
+	// refusal journal on shutdown; wait for it before returning — and before
+	// the deferred database close — so no write is cut off. Its worst case is
+	// 30 seconds: 10s grace for in-flight work, up to two 5s journal writes
+	// for the interrupted run and 10s for the refusal drain. The wait here is
+	// 35s, and the runner guarantees a real zero worker count rather than a
+	// bounded hop, so a shutdown that returns means the database is idle.
+	select {
+	case <-automationRunnerDone:
+	case <-time.After(35 * time.Second):
+		slog.Warn("Automation runner did not finish in time; continuing shutdown")
+	}
+}
+
+// automationInsights feeds condition triggers from the proactive service:
+// the keys of the insights visible right now.
+type automationInsights struct {
+	service *proactive.Service
+}
+
+func (a automationInsights) CurrentInsightKeys(ctx context.Context) (map[string]struct{}, error) {
+	insights, err := a.service.Compute(ctx)
+	if err != nil {
+		return nil, err
+	}
+	keys := make(map[string]struct{}, len(insights))
+	for _, insight := range insights {
+		keys[insight.Key] = struct{}{}
+	}
+	return keys, nil
 }
 
 // workingDirectory is the base for relative paths in the file tools.

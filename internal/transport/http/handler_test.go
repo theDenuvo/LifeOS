@@ -10,6 +10,7 @@ import (
 
 	"github.com/theDenuvo/LifeOS/internal/agent/tools"
 	"github.com/theDenuvo/LifeOS/internal/application/assistant"
+	"github.com/theDenuvo/LifeOS/internal/application/automation"
 	appcalendar "github.com/theDenuvo/LifeOS/internal/application/calendar"
 	appevents "github.com/theDenuvo/LifeOS/internal/application/events"
 	appgoals "github.com/theDenuvo/LifeOS/internal/application/goals"
@@ -79,20 +80,28 @@ func setupTestHandlerWithProvider(t *testing.T, provider assistant.Provider) (*H
 	memoryService := appmemory.NewService(sqlite.NewMemoryUnitOfWork(db), clock)
 	goalsService := appgoals.NewService(sqlite.NewGoalUnitOfWork(db), clock, appgoals.WithTaskProvider(appgoals.TaskEngineAdapter{Service: taskService}))
 	registry := tools.NewLifeOSTools(taskService, inboxService, summaryService, tools.WithMemoryService(memoryService), tools.WithGoalsService(goalsService))
+	automationService := automation.NewService(
+		sqlite.NewAutomationUnitOfWork(db), clock,
+		automation.WithPublisher(broker), automation.WithTools(registry),
+		automation.WithValidator(tools.AutomationStepValidator(registry)),
+		automation.WithTimezone(cfg.Timezone),
+	)
+	tools.RegisterAutomationTools(registry, automationService)
 	assistantService := assistant.NewService(sqlite.NewAssistantUnitOfWork(db), provider, registry, clock)
 	handler := NewHandler(db, cfg, testEmbedFS, Services{
-		Tasks:     taskService,
-		Inbox:     inboxService,
-		Summary:   summaryService,
-		Assistant: assistantService,
-		Settings:  settingsService,
-		Profile:   profileService,
-		Events:    eventService,
-		Calendar:  calendarService,
-		Memory:    memoryService,
-		Goals:     goalsService,
-		Broker:    broker,
-		Version:   "test",
+		Tasks:       taskService,
+		Inbox:       inboxService,
+		Summary:     summaryService,
+		Assistant:   assistantService,
+		Settings:    settingsService,
+		Profile:     profileService,
+		Events:      eventService,
+		Calendar:    calendarService,
+		Memory:      memoryService,
+		Goals:       goalsService,
+		Automations: automationService,
+		Broker:      broker,
+		Version:     "test",
 	})
 
 	cleanup := func() {
@@ -412,6 +421,13 @@ func TestHandlerServeFrontendWithRealEmbedFS(t *testing.T) {
 	memoryService := appmemory.NewService(sqlite.NewMemoryUnitOfWork(db), clock)
 	goalsService := appgoals.NewService(sqlite.NewGoalUnitOfWork(db), clock, appgoals.WithTaskProvider(appgoals.TaskEngineAdapter{Service: taskService}))
 	registry := tools.NewLifeOSTools(taskService, inboxService, summaryService, tools.WithMemoryService(memoryService), tools.WithGoalsService(goalsService))
+	automationService := automation.NewService(
+		sqlite.NewAutomationUnitOfWork(db), clock,
+		automation.WithPublisher(broker), automation.WithTools(registry),
+		automation.WithValidator(tools.AutomationStepValidator(registry)),
+		automation.WithTimezone(cfg.Timezone),
+	)
+	tools.RegisterAutomationTools(registry, automationService)
 	assistantService := assistant.NewService(sqlite.NewAssistantUnitOfWork(db), nil, registry, clock)
 	handler := NewHandler(db, cfg, dist.FS, Services{
 		Tasks:     taskService,

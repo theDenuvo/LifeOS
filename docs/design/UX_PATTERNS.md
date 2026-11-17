@@ -10,8 +10,10 @@ Primary navigation:
 4. **Tasks** (`/tasks`) — full task list, filters, inline actions.
 5. **Calendar** (`/calendar`) — month grid plus the selected day's tasks. Reached from primary navigation.
 6. **Memory** (`/memory`) — what LifeOS knows about the user and the accumulated knowledge base, with provenance. Reached from primary navigation.
+7. **Goals** (`/goals`) — long-term intentions, their plans and factual progress. Reached from primary navigation.
+8. **Automations** (`/automations`) — approved recurring scenarios: trigger, steps, expected result, consequences and the run journal. Reached from primary navigation.
 
-Future modules (goals, documents) become assistant capabilities and views, not disconnected mini-apps. They use the same header rhythm, tokens, and assistant integration.
+Future modules (documents) become assistant capabilities and views, not disconnected mini-apps. They use the same header rhythm, tokens, and assistant integration.
 
 ## App shell sidebar
 

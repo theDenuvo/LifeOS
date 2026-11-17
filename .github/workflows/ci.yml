@@ -16,6 +16,7 @@ on:
       - 'proactive/*'
       - 'ui/*'
       - 'feature/*'
+      - 'roadmap/*'
   pull_request:
     branches: [main, design/phase-0-concepts]
 

@@ -1163,3 +1163,158 @@ export function recordGoalProgress(
 ): Promise<Goal> {
 	return request<Goal>(`/api/v1/goals/${goalId}/progress`, { method: 'POST', body: JSON.stringify(input) });
 }
+
+// ─── Автоматизации (повторяющиеся процессы по сценарию) ─────────────────────
+
+export type AutomationStatus = 'proposed' | 'active' | 'paused' | 'archived';
+export type AutomationTriggerKind = 'schedule' | 'event' | 'condition';
+export type AutomationRunStatus = 'running' | 'succeeded' | 'failed' | 'skipped';
+export type AutomationStepStatus = 'succeeded' | 'failed' | 'skipped';
+
+export interface AutomationSchedule {
+	frequency: 'daily' | 'weekly' | 'monthly';
+	time: string;
+	weekdays?: number[];
+	day_of_month?: number;
+}
+
+export interface AutomationEvent {
+	name: string;
+	match?: Record<string, string>;
+}
+
+export interface AutomationCondition {
+	insight: string;
+	cooldown_minutes?: number;
+}
+
+export interface AutomationTrigger {
+	kind: AutomationTriggerKind;
+	schedule?: AutomationSchedule;
+	event?: AutomationEvent;
+	condition?: AutomationCondition;
+}
+
+export interface AutomationStep {
+	position: number;
+	name: string;
+	arguments?: Record<string, unknown>;
+	description: string;
+}
+
+export interface AutomationRunStep {
+	name: string;
+	status: AutomationStepStatus;
+	output?: string;
+	error?: string;
+	duration_ms: number;
+}
+
+export interface AutomationRun {
+	id: number;
+	trigger: 'schedule' | 'event' | 'condition' | 'manual';
+	status: AutomationRunStatus;
+	steps: AutomationRunStep[];
+	summary: string;
+	error?: string;
+	started_at: string;
+	finished_at?: string | null;
+}
+
+export interface Automation {
+	id: number;
+	title: string;
+	description: string;
+	status: AutomationStatus;
+	trigger: AutomationTrigger;
+	steps: AutomationStep[];
+	expected_result: string;
+	consequences: string;
+	approved_at?: string | null;
+	last_run_at?: string | null;
+	next_run_at?: string | null;
+	created_at: string;
+	updated_at: string;
+	version: number;
+	runs: AutomationRun[];
+}
+
+export interface AutomationList {
+	data: Automation[];
+	meta: { limit: number; offset: number; total: number };
+}
+
+export interface AutomationCreateInput {
+	title: string;
+	description?: string;
+	expected_result?: string;
+	consequences?: string;
+	trigger: AutomationTrigger;
+	steps: { name: string; arguments?: Record<string, unknown>; description?: string }[];
+}
+
+export interface AutomationUpdateInput {
+	title?: string;
+	description?: string;
+	expected_result?: string;
+	consequences?: string;
+	trigger?: AutomationTrigger;
+	steps?: { name: string; arguments?: Record<string, unknown>; description?: string }[];
+	expected_version: number;
+}
+
+export function listAutomations(
+	query: { status?: AutomationStatus; q?: string; limit?: number; offset?: number } = {}
+): Promise<AutomationList> {
+	const params = new URLSearchParams();
+	if (query.status) params.set('status', query.status);
+	if (query.q) params.set('q', query.q);
+	if (query.limit !== undefined) params.set('limit', String(query.limit));
+	if (query.offset !== undefined) params.set('offset', String(query.offset));
+	const suffix = params.toString();
+	return request<AutomationList>(`/api/v1/automations${suffix ? `?${suffix}` : ''}`);
+}
+
+export function getAutomation(id: number): Promise<Automation> {
+	return request<Automation>(`/api/v1/automations/${id}`);
+}
+
+export function createAutomation(input: AutomationCreateInput): Promise<Automation> {
+	return request<Automation>('/api/v1/automations', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export function updateAutomation(id: number, input: AutomationUpdateInput): Promise<Automation> {
+	return request<Automation>(`/api/v1/automations/${id}`, {
+		method: 'PATCH',
+		body: JSON.stringify(input)
+	});
+}
+
+export function deleteAutomation(id: number): Promise<void> {
+	return request<void>(`/api/v1/automations/${id}`, { method: 'DELETE' });
+}
+
+export function approveAutomation(id: number): Promise<Automation> {
+	return request<Automation>(`/api/v1/automations/${id}/approve`, { method: 'POST' });
+}
+
+export function changeAutomationStatus(id: number, status: 'active' | 'paused' | 'archived'): Promise<Automation> {
+	return request<Automation>(`/api/v1/automations/${id}/status`, {
+		method: 'POST',
+		body: JSON.stringify({ status })
+	});
+}
+
+export function runAutomation(id: number): Promise<Automation> {
+	return request<Automation>(`/api/v1/automations/${id}/run`, { method: 'POST' });
+}
+
+export function listAutomationRuns(id: number, query: { limit?: number; offset?: number } = {}): Promise<{ data: AutomationRun[]; meta: { total: number } }> {
+	const params = new URLSearchParams();
+	if (query.limit !== undefined) params.set('limit', String(query.limit));
+	if (query.offset !== undefined) params.set('offset', String(query.offset));
+	const suffix = params.toString();
+	return request<{ data: AutomationRun[]; meta: { total: number } }>(
+		`/api/v1/automations/${id}/runs${suffix ? `?${suffix}` : ''}`
+	);
+}

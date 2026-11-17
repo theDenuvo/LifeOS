@@ -50,7 +50,7 @@ func TestRunnerDispatchesEventRuns(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		running := false
-		for _, run := range repo.runs {
+		for _, run := range repo.snapshotRuns() {
 			if run.Status == domainautomation.RunRunning {
 				running = true
 			}
@@ -61,13 +61,13 @@ func TestRunnerDispatchesEventRuns(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	running := false
-	for _, run := range repo.runs {
+	for _, run := range repo.snapshotRuns() {
 		if run.Status == domainautomation.RunRunning {
 			running = true
 		}
 	}
 	if !running {
-		t.Fatalf("event did not start a run: %+v", repo.runs)
+		t.Fatalf("event did not start a run")
 	}
 	close(release)
 }
@@ -145,7 +145,7 @@ func TestSkipJournalKeepsReceiverLive(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		finished, skips := 0, 0
-		for _, run := range repo.runs {
+		for _, run := range repo.snapshotRuns() {
 			switch run.Status {
 			case domainautomation.RunSucceeded:
 				finished++
@@ -160,7 +160,7 @@ func TestSkipJournalKeepsReceiverLive(t *testing.T) {
 			statuses := map[string]int{}
 			perAutomation := map[int64]int{}
 			reasons := map[string]int{}
-			for _, run := range repo.runs {
+			for _, run := range repo.snapshotRuns() {
 				statuses[string(run.Status)]++
 				perAutomation[run.AutomationID]++
 				if run.Error != "" {
@@ -169,6 +169,80 @@ func TestSkipJournalKeepsReceiverLive(t *testing.T) {
 			}
 			t.Fatalf("journal did not drain: %d finished runs, %d recorded skips | statuses %v | per automation %v | reasons %v",
 				finished, skips, statuses, perAutomation, reasons)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestSkipJournalFlushesOnShutdown pins the shutdown guarantee: refusals
+// already queued are flushed even though the runner context is cancelled —
+// the journal never exits with a half-drained queue and never records a
+// fictitious zero-entry from a closed channel.
+func TestSkipJournalFlushesOnShutdown(t *testing.T) {
+	clock := testClock()
+	repo := newFakeRepo()
+	gate := make(chan struct{})
+	repo.skipGate = gate
+	release := make(chan struct{})
+	defer close(release)
+	tools := &blockingTools{release: release}
+	service := newTestService(clock, repo, tools, &recordedPublisher{})
+
+	const automations = 8
+	const events = 8 // 8 dispatched + 7*8 = 56 queued refusals, inside the journal bound
+	for i := 0; i < automations; i++ {
+		view := mustCreate(t, service, domainautomation.Trigger{
+			Kind:  domainautomation.TriggerEvent,
+			Event: &domainautomation.EventTrigger{Name: "task.completed"},
+		})
+		if _, err := service.Approve(context.Background(), view.Automation.ID); err != nil {
+			t.Fatalf("approve: %v", err)
+		}
+	}
+
+	source := make(chanSource, 64)
+	runner := appautomation.NewRunner(service, source, time.Minute)
+	ctx, cancel := context.WithCancel(context.Background())
+	go runner.Start(ctx)
+
+	now := clock.Now()
+	for i := 0; i < events; i++ {
+		if !source.publish("task.completed", map[string]any{}, now) {
+			t.Fatalf("receiver fell behind: the event buffer dropped event %d", i)
+		}
+	}
+	// The receive loop has enqueued the refusals; the journal is frozen on
+	// the gate, holding the first write.
+	time.Sleep(150 * time.Millisecond)
+	for _, run := range repo.snapshotRuns() {
+		if run.Status == domainautomation.RunSkipped {
+			t.Fatalf("a skip was recorded while the journal was frozen: %+v", run)
+		}
+	}
+
+	// Shutdown: cancel the context. The journal must not abandon its queue.
+	cancel()
+	time.Sleep(100 * time.Millisecond)
+
+	// Let the frozen write through and the drain finish.
+	close(gate)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		skips := 0
+		for _, run := range repo.snapshotRuns() {
+			if run.Status == domainautomation.RunSkipped {
+				if run.AutomationID == 0 {
+					t.Fatalf("a fictitious zero-automation skip was recorded: %+v", run)
+				}
+				skips++
+			}
+		}
+		if skips == (events-1)*automations {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("queued refusals were not flushed on shutdown: %d recorded, want %d",
+				skips, (events-1)*automations)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

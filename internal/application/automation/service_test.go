@@ -80,6 +80,9 @@ type fakeRepo struct {
 	nextID      int64
 	// skipDelay slows RecordSkipped down, modelling a real database write.
 	skipDelay time.Duration
+	// skipGate, when set, holds a skip write until it is closed — a test
+	// uses it to freeze the journal mid-drain.
+	skipGate chan struct{}
 }
 
 func newFakeRepo() *fakeRepo {
@@ -296,6 +299,11 @@ func (r *fakeRepo) RecoverRunning(_ context.Context, at time.Time) ([]*domainaut
 }
 
 func (r *fakeRepo) RecordSkipped(_ context.Context, automationID int64, trigger, reason string, at time.Time) (int64, error) {
+	// The gate is waited on before the lock, so a frozen write does not
+	// block the whole store.
+	if r.skipGate != nil {
+		<-r.skipGate
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.skipDelay > 0 {
@@ -320,6 +328,20 @@ func (u fakeUoW) Do(ctx context.Context, fn func(context.Context, appautomation.
 		return err
 	}
 	return fn(ctx, u.repo)
+}
+
+// snapshotRuns returns a locked copy of every journal entry: tests read the
+// journal from their own goroutine while run and journal goroutines write,
+// so raw map access would be a data race.
+func (r *fakeRepo) snapshotRuns() []*domainautomation.Run {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]*domainautomation.Run, 0, len(r.runs))
+	for _, run := range r.runs {
+		copied := *run
+		out = append(out, &copied)
+	}
+	return out
 }
 
 func (r *fakeRepo) Automations() appautomation.Repository { return r }

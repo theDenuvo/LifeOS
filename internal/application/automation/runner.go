@@ -145,41 +145,63 @@ func (r *Runner) watchEvents(ctx context.Context) {
 	// never waits for a database write, so a burst during an overflow keeps
 	// flowing instead of stalling and dropping events in the broker buffer.
 	skips := make(chan skipRequest, maxSkipJournalQueue)
-	go r.journalSkips(ctx, skips)
-	defer close(skips)
+	journalDone := make(chan struct{})
+	go r.journalSkips(ctx, skips, journalDone)
+	// Structured shutdown: the receive loop has returned, so no new refusals
+	// can be enqueued; close the queue and wait until the journal has
+	// flushed everything already queued before the runner goes away.
+	defer func() {
+		close(skips)
+		<-journalDone
+	}()
 
-	for event := range r.source.Subscribe(ctx) {
-		if ctx.Err() != nil {
+	// The loop exits on either the source closing its channel (as the broker
+	// does when the context is cancelled) or the cancellation itself, so a
+	// source that does not close still terminates the receiver.
+	sub := r.source.Subscribe(ctx)
+	for {
+		select {
+		case <-ctx.Done():
 			return
+		case event, open := <-sub:
+			if !open {
+				return
+			}
+			r.handleEvent(ctx, queue, skips, event)
 		}
-		if isAutomationEvent(event.Type) {
-			r.refreshCache(ctx)
-		}
-		payload, ok := event.Data.(map[string]any)
-		if !ok && event.Data != nil {
-			// A structured payload the automations could not interpret is not
-			// worth panicking over; event triggers match on well-formed data.
-			if data, err := json.Marshal(event.Data); err == nil {
-				decoded := map[string]any{}
-				if json.Unmarshal(data, &decoded) == nil {
-					payload = decoded
-				}
+	}
+}
+
+// handleEvent matches one incoming event against the cached subscriptions
+// and dispatches the matched runs.
+func (r *Runner) handleEvent(ctx context.Context, queue chan struct{}, skips chan<- skipRequest, event events.Event) {
+	if isAutomationEvent(event.Type) {
+		r.refreshCache(ctx)
+	}
+	payload, ok := event.Data.(map[string]any)
+	if !ok && event.Data != nil {
+		// A structured payload the automations could not interpret is not
+		// worth panicking over; event triggers match on well-formed data.
+		if data, err := json.Marshal(event.Data); err == nil {
+			decoded := map[string]any{}
+			if json.Unmarshal(data, &decoded) == nil {
+				payload = decoded
 			}
 		}
-		if payload == nil {
-			payload = map[string]any{}
-		}
-		for _, id := range r.cache.match(event.Type, payload) {
-			depth := r.depthFor(event.At)
-			select {
-			case queue <- struct{}{}:
-				go r.runEvent(ctx, queue, id, depth, event.Type)
-			default:
-				// The queue is full: the run is refused before any step, and
-				// the journal explains why instead of the event vanishing.
-				r.enqueueSkip(ctx, skips, id, "очередь запусков переполнена, событие не обработано")
-				slog.Warn("automation: dispatch queue full", "automation_id", id, "event", event.Type)
-			}
+	}
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	for _, id := range r.cache.match(event.Type, payload) {
+		depth := r.depthFor(event.At)
+		select {
+		case queue <- struct{}{}:
+			go r.runEvent(ctx, queue, id, depth, event.Type)
+		default:
+			// The queue is full: the run is refused before any step, and the
+			// journal explains why instead of the event vanishing.
+			r.enqueueSkip(skips, id, "очередь запусков переполнена, событие не обработано")
+			slog.Warn("automation: dispatch queue full", "automation_id", id, "event", event.Type)
 		}
 	}
 }
@@ -187,7 +209,7 @@ func (r *Runner) watchEvents(ctx context.Context) {
 // enqueueSkip hands a refused launch to the asynchronous journal. The send
 // never blocks the receiver; if the journal itself is saturated the refusal
 // is logged loudly — an observable loss, not a silent one.
-func (r *Runner) enqueueSkip(ctx context.Context, skips chan<- skipRequest, automationID int64, reason string) {
+func (r *Runner) enqueueSkip(skips chan<- skipRequest, automationID int64, reason string) {
 	request := skipRequest{automationID: automationID, trigger: "event", reason: reason, at: time.Now().UTC()}
 	select {
 	case skips <- request:
@@ -198,15 +220,16 @@ func (r *Runner) enqueueSkip(ctx context.Context, skips chan<- skipRequest, auto
 }
 
 // journalSkips drains the refused-launch queue into the journal, one write
-// at a time, away from the receive loop.
-func (r *Runner) journalSkips(ctx context.Context, skips <-chan skipRequest) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case request := <-skips:
-			r.service.recordSkipped(ctx, request.automationID, request.trigger, request.reason, request.at)
-		}
+// at a time, away from the receive loop. It reads until the queue is closed
+// and empty, so shutting the runner down flushes every refusal that was
+// already queued; the writes run on a context detached from cancellation,
+// because shutdown cancels the runner context while the queue may still
+// hold work.
+func (r *Runner) journalSkips(ctx context.Context, skips <-chan skipRequest, done chan<- struct{}) {
+	defer close(done)
+	detached := context.WithoutCancel(ctx)
+	for request := range skips {
+		r.service.recordSkipped(detached, request.automationID, request.trigger, request.reason, request.at)
 	}
 }
 

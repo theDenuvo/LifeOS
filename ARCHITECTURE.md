@@ -186,7 +186,7 @@ Transport (HTTP, MCP) ──► Application ──► Domain
 - Календарные события меняются и удаляются прямо в интерфейсе календаря: `PATCH /api/v1/calendar/events/{id}` и `DELETE ...` под `If-Match` с версией. Удаление аппаратное (строка `calendar_events` удаляется), поэтому событие исчезает из календаря, сводок и выдачи ассистента сразу; архивной копии нет.
 - Файловые инструменты отказывают в доступе к собственной базе `lifeos.db` (и её `-wal`/`-shm`): данные меняются только через сервисы LifeOS
 - `RetryProvider` (`internal/agent/resilience.go`) — ретраи с экспоненциальной задержкой (`429`, `5xx`, обрывы сети, пустой ответ) и фоллбек на следующую модель; стрим, уже отдавший текст, не перезапускается. Ретраи/фоллбеки приходят в UI событием `retry`
-- `internal/agent/tools` — реестр инструментов LifeOS: чтение (`list_tasks`, `get_today_summary`, `list_inbox`, `plan_day`, `replan`, `estimate_duration`, `review_habit`, `search_memory`, `list_memory`, `memory_conflicts`, `list_goals`, `get_goal`) и мутации (`create_task`, `update_task`, `complete_task`, `cancel_task`, `restore_task`, `reschedule_task`, `capture_inbox`, `convert_inbox`, `dismiss_inbox`, `apply_plan`, `capture`, `remember`, `save_knowledge`, `update_memory`, `forget_memory`, `link_memory`, `create_goal`, `update_goal_plan`, `update_goal_milestones`, `propose_goal_change`, `approve_goal`, `apply_goal_proposal`, `reject_goal_proposal`, `change_goal_status`, `link_goal`, `unlink_goal`, `record_goal_progress`)
+- `internal/agent/tools` — реестр инструментов LifeOS: чтение (`list_tasks`, `get_today_summary`, `list_inbox`, `plan_day`, `replan`, `estimate_duration`, `review_habit`, `search_memory`, `list_memory`, `memory_conflicts`, `list_goals`, `get_goal`) и мутации (`create_task`, `update_task`, `complete_task`, `cancel_task`, `restore_task`, `reschedule_task`, `capture_inbox`, `convert_inbox`, `dismiss_inbox`, `apply_plan`, `capture`, `remember`, `save_knowledge`, `update_memory`, `forget_memory`, `link_memory`, `create_goal`, `update_goal_plan`, `update_goal_milestones`, `propose_goal_change`, `approve_goal`, `apply_goal_proposal`, `reject_goal_proposal`, `change_goal_status`, `link_goal`, `unlink_goal`, `record_goal_progress`), автоматизации (`list_automations`, `get_automation`, `create_automation`, `update_automation`, `approve_automation`, `pause_automation`, `resume_automation`, `archive_automation`, `run_automation`) и исследование (`web_search`, `read_web_page`, `research_topic`, `list_research`, `get_research`, `list_external_sources`, `add_external_source`, `update_external_source`, `remove_external_source`, `call_external_source`, `test_external_source`, `list_watches`, `create_watch`, `check_watch`, `update_watch`, `delete_watch`)
 
 ### `internal/application/planning`
 - `PlanDay` — читает события и блоки дня, считает свободные интервалы с буфером и предлагает расстановку задач по срочности; ничего не пишет. Свободное время отсчитывается от текущего момента (`ClipFrom`), прошедший день помечается как `past` и не планируется
@@ -320,6 +320,54 @@ Transport (HTTP, MCP) ──► Application ──► Domain
   реестр строится раньше сервиса и служит ему исполнителем шагов, а инструменты
   автоматизаций прикрепляются к реестру после (`RegisterAutomationTools`)
 
+### `internal/application/research`, `internal/domain/research` и `internal/infrastructure/research`
+
+Исследователь и внешние источники (этап 7). Модуль разделён по слоям так же,
+как остальные: домен владеет моделью доказательств и чистыми правилами
+сопоставления, приложение — сбором доказательств, разрешениями и наблюдениями,
+адаптер — единственное место, которое ходит в интернет.
+
+- Домен: `Report` (вопрос, запросы, выводы, итог), `Finding` (утверждение с
+  уровнем достоверности, уверенностью, числом подтверждающих сайтов и
+  цитатами), `Connection` (тип, режим доступа, доверие, адрес), `Watch` (тема,
+  запросы, периодичность, база отпечатков)
+- `BuildFindings` — чистая функция сравнения: утверждения, чьи значимые слова
+  совпадают (с учётом словоформ: короткое слово — префикс длинного), сливаются
+  в один вывод; «факт» получает только вывод, подтверждённый двумя разными
+  сайтами; отрицание общего слова или разные числа в похожих утверждениях дают
+  явное расхождение, и такой вывод никогда не становится фактом
+- Сбор доказательств (`collect`) идёт вне транзакции БД: поиск по каждому
+  запросу, дедупликация по каноническому адресу (fragment, хвостовой слэш и
+  tracking-параметры снимаются), чтение страниц в пределах бюджета, выбор
+  фрагмента, отвечающего на запрос. Фрагмент разбивается на предложения: одно
+  предложение — одно утверждение, поэтому одинаково сформулированный факт двух
+  сайтов совпадает, а страница не тонет в пересказе абзаца. Недоступная страница отдаёт поисковую
+  выдержку с низким доверием и пометкой «страница не прочитана» — честная
+  деградация вместо выдуманного источника
+- `Watch` хранит отпечатки (URL + хэш текста + время первого появления) и
+  сравнивает их при каждой проверке: новая страница отличается от
+  изменившейся, неизменившаяся не создаёт события. База ограничена 200
+  страницами, вытесняются самые старые
+- `Runner` проверяет наступившие наблюдения каждые 15 минут и один раз при
+  старте, поэтому пропущенный момент догоняется после перезапуска. Изменение
+  темы становится наблюдением (`research-watch-<id>`) через
+  `proactive.WithResearch`, а не отдельным каналом уведомлений
+- Разрешения: `Connection.Mode` (`read`/`write`/`sync`) проверяется в
+  `CallSource` перед каждым обращением; отказ тоже попадает в журнал
+  (`research_calls`). Ассистент создаёт источник только выключенным и только на
+  чтение; источник-скрипт создаёт только пользователь и он всегда `read`
+- `internal/infrastructure/research` — адаптер: встроенный поиск
+  (DuckDuckGo HTML или SearxNG JSON), чтение страниц (`x/net/html` + определение
+  кодировки, включая windows-1251), HTTP API подключаемого сервиса, MCP
+  Streamable HTTP (`initialize` → `tools/list`/`tools/call`, ответ читается и
+  как JSON, и как кадр event-stream) и скрипт пользователя (запуск без оболочки,
+  ввод подставляется одним аргументом, поэтому запрос не может стать второй
+  командой)
+- Сохранение в базу знаний идёт узким портом `KnowledgeSink`: приложение
+  исследования не зависит от модуля памяти, а адаптер в `main` пишет запись
+  категории `research` с источником вида `web` и уверенностью по фактическому
+  подтверждению
+
 ### `internal/events`
 - In-process broker для SSE: подписки, буфер последних 256 событий, `Last-Event-ID` replay
 - `Publish` назначает ID и рассылает событие под одним mutex; доставка в канал подписчика неблокирующая. Это даёт два свойства, на которые опирается SSE: события приходят в порядке возрастания ID и отменённая подписка не может быть закрыта между копированием списка и отправкой (нет `send on closed channel`)
@@ -343,7 +391,7 @@ Transport (HTTP, MCP) ──► Application ──► Domain
 
 ### `web` (SvelteKit 2 + Svelte 5)
 - SPA (`ssr = false`), статический adapter, встраивается в Go-бинарник
-- Экраны: `/` (ассистент), `/today` (Сегодня), `/inbox` (Входящие), `/tasks` (Все задачи), `/goals` (Цели), `/automations` (Автоматизации), `/calendar` (Календарь), `/memory` (Память и база знаний)
+- Экраны: `/` (ассистент), `/today` (Сегодня), `/inbox` (Входящие), `/tasks` (Все задачи), `/goals` (Цели), `/automations` (Автоматизации), `/research` (Исследования), `/calendar` (Календарь), `/memory` (Память и база знаний)
 - `web/src/lib/api.ts` — типизированный клиент REST API; мутации отправляют `If-Match` с версией задачи
 - `web/src/lib/components/TaskRow.svelte` — общая карточка задачи (завершение, отмена, восстановление, перенос)
 - Визуальное направление — Concept B (тёмная тема, фиолетово-голубые акценты, боковая навигация, mobile bottom nav)
@@ -372,7 +420,7 @@ User Message → Agent → LLM (с инструментами) → Tool Call →
 Client → GET /api/v1/events (Last-Event-ID) → Broker.Subscribe + Replay → stream
 Application service → commit → Broker.Publish → все подписчики
 ```
-Реализовано: `task.*`, `inbox.*`; фронтенд перезагружает данные по событию (debounce 200 мс).
+Реализовано: `task.*`, `inbox.*`, `research.*`; фронтенд перезагружает данные по событию (debounce 200 мс).
 
 ### Frontend → Backend
 ```
@@ -400,7 +448,8 @@ Static files (embed) → Browser → fetch/openapi-fetch → REST API + SSE
 - `conversations` / `messages` — диалоги; `kind` разделяет главный чат и рабочие пространства (`purpose`, `source_conversation_id`)
 - `pending_actions` — ожидающие подтверждения
 - `app_settings` — key-value настройки
-- `memory_entries`, `memory_sources`, `memory_links`, `memory_conflicts`, `memory_fts` — память, происхождение, связи и очередь противоречий
+- `memory_entries`, `memory_sources`, `memory_links`, `memory_conflicts`, `memory_fts` — память, происхождение, связи и очередь противоречий; вид источника `web` отмечает сведения, полученные из интернета
+- `research_reports`, `research_connections`, `research_watches`, `research_calls` — исследования с доказательствами, подключённые источники с разрешениями, наблюдения с базой отпечатков и журнал внешних обращений
 
 ---
 
@@ -423,6 +472,11 @@ LIFEOS_LLM_MODEL=openai/gpt-4o-mini
 # MCP
 LIFEOS_MCP_ENABLED=false
 LIFEOS_MCP_PATH=/mcp
+
+# Web research (stage 7)
+LIFEOS_SEARCH_URL=
+LIFEOS_SEARCH_FORMAT=
+LIFEOS_RESEARCH_TIMEOUT_SECONDS=20
 
 # Frontend (dev)
 LIFEOS_FRONTEND_DEV=false

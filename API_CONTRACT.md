@@ -1081,6 +1081,113 @@ GET    /api/v1/automations/{id}/runs/{runId}   # один запуск с пош
 `automation.run.started`, `automation.run.finished` приходят через
 `GET /api/v1/events`.
 
+### 8.4 Исследования и внешние источники
+
+Исследование — это вопрос, ответ на который LifeOS ищет и проверяет сам.
+`fact` получает только вывод, подтверждённый минимум двумя независимыми сайтами;
+`assumption` — вывод одного источника (в том числе недоступной страницы, чья
+поисковая выдержка использована как зацепка), `inference` — собственный вывод
+LifeOS. Расхождение источников не скрывается: у вывода появляется `conflict`
+с цитатой второй стороны, и фактом он уже не считается.
+
+#### Схема ResearchReport
+
+```json
+{
+  "id": 4,
+  "question": "Что нового для generic type aliases в Go 1.24?",
+  "queries": ["go 1.24 generic type aliases"],
+  "status": "completed",
+  "summary": "## ... markdown с разделами: подтверждено / один источник / расхождения",
+  "findings": [{
+    "statement": "Go 1.24 adds generic type aliases to the language.",
+    "certainty": "fact",
+    "confidence": 0.72,
+    "corroboration": 2,
+    "domains": ["example.org", "go.dev"],
+    "citations": [{"url": "https://go.dev/doc/go1.24", "title": "Go 1.24",
+                   "site": "go.dev", "excerpt": "…", "trust": "normal"}],
+    "conflict": "Источники расходятся: example.com утверждает иначе — «…»."
+  }],
+  "sources": 2,
+  "knowledge_entry_id": 31,
+  "started_at": "2026-04-12T08:00:00Z",
+  "finished_at": "2026-04-12T08:00:14Z",
+  "version": 2
+}
+```
+
+`certainty` — `fact`, `assumption`, `inference`; `trust` источника — `high`,
+`normal`, `low` (низкое доверие у поисковой выдержки, чья страница не
+открылась). `knowledge_entry_id` появляется, когда результат сохранён в базу
+знаний.
+
+#### Endpoints
+
+```
+GET    /api/v1/research/reports?q=&limit=20&offset=0
+POST   /api/v1/research/reports                 # {"question","queries","max_pages","save_knowledge","knowledge_title","source_id"} → 201
+GET    /api/v1/research/reports/{id}
+DELETE /api/v1/research/reports/{id}            # запись в базе знаний остаётся
+GET    /api/v1/research/sources?kind=&enabled=
+POST   /api/v1/research/sources                 # {"name","kind","endpoint","mode","trust","format","notes","enabled"}
+PATCH  /api/v1/research/sources/{id}            # name/notes/trust/mode/endpoint/format/enabled + expected_version
+DELETE /api/v1/research/sources/{id}
+POST   /api/v1/research/sources/{id}/call       # {"operation","method","body","query","write"}
+GET    /api/v1/research/sources/{id}/calls?limit=20
+GET    /api/v1/research/watches?include_disabled=true
+POST   /api/v1/research/watches                 # {"topic","query","queries","cadence","enabled"}
+PATCH  /api/v1/research/watches/{id}            # topic/query/queries/cadence/enabled + expected_version
+DELETE /api/v1/research/watches/{id}
+POST   /api/v1/research/watches/{id}/check      # {"watch": {...}, "change": {"summary","new","updated","unchanged"}}
+```
+
+Ошибки: пустой вопрос → `400`; отчёт, источник или наблюдение отсутствуют →
+`404`; устаревшая версия → `409`; выключенный источник → `412`; изменяющий
+запрос к источнику только на чтение или попытка ассистента создать скрипт →
+`403`; веб-поиск не настроен → `503` при старте исследования без провайдера.
+
+Сбой самого исследования — это не ошибка запроса: отчёт создан и сохранён, а
+`POST /reports` отвечает `201` с `status: "failed"` и причиной в `error`, поэтому
+клиент показывает объяснение, а не общий заголовок ошибки. Такой отчёт остаётся
+в истории и открывается как обычный. Проверка наблюдения ведёт себя так же:
+`POST /watches/{id}/check` отвечает `200` с `watch` и необязательным `error`.
+
+#### Правила, которые важно помнить клиенту
+
+- `POST /reports` выполняет исследование целиком в рамках запроса: поиск,
+  чтение до `max_pages` страниц (по умолчанию 4, максимум 8), сопоставление и
+  сохранение. Дольше минуты на медленной сети — это нормальный ход событий,
+  а не зависание.
+- Запросов на исследование не больше трёх, страниц — не больше восьми; без
+  `queries` используется сам вопрос.
+- `save_knowledge` по умолчанию `true`: результат сохраняется записью
+  категории `research` с источником `web`, уверенностью по фактическому
+  подтверждению и адресами сайтов. Если запись не удалась, отчёт остаётся, а
+  в `error` появляется причина — молча «сохранено» не бывает.
+- Источник, созданный ассистентом, приходит выключенным и только в режиме
+  `read`; включение и расширение прав — только через `PATCH` пользователем.
+  Скрипт (`kind: "script"`) создаёт только пользователь, и режим у него
+  всегда `read`.
+- `mode`: `read` — только чтение, `write` — чтение и отправка изменений,
+  `sync` — двусторонняя работа. Изменяющий вызов (`write: true` или метод не
+  `GET`/`HEAD`) к источнику `read` отклоняется с `403`, и отказ попадает в
+  журнал.
+- Наблюдение с `cadence: daily`/`weekly` перепроверяется автоматически,
+  `manual` — только через `POST /watches/{id}/check`. Изменение фиксируется
+  сравнением отпечатков: новая страница отличается от изменившейся, а
+  неизменившаяся не создаёт события и не считается изменением.
+- Изменение темы становится наблюдением `research-watch-<id>` и приходит в
+  `GET /api/v1/insights`; отдельного канала уведомлений у исследований нет.
+
+#### События
+
+`research.completed`, `research.failed`, `research.deleted`,
+`research.source.created`, `research.source.updated`, `research.source.deleted`,
+`research.watch.created`, `research.watch.updated`, `research.watch.deleted`,
+`research.watch.changed`, `research.watch.checked` приходят через
+`GET /api/v1/events`.
+
 ### 9. Настройки
 
 #### Список настроек

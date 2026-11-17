@@ -17,6 +17,7 @@ import (
 	"github.com/theDenuvo/LifeOS/internal/application/inbox"
 	appmemory "github.com/theDenuvo/LifeOS/internal/application/memory"
 	"github.com/theDenuvo/LifeOS/internal/application/profile"
+	"github.com/theDenuvo/LifeOS/internal/application/research"
 	"github.com/theDenuvo/LifeOS/internal/application/settings"
 	"github.com/theDenuvo/LifeOS/internal/application/summary"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
@@ -87,6 +88,11 @@ func setupTestHandlerWithProvider(t *testing.T, provider assistant.Provider) (*H
 		automation.WithTimezone(cfg.Timezone),
 	)
 	tools.RegisterAutomationTools(registry, automationService)
+	researchService := research.NewService(
+		sqlite.NewResearchUnitOfWork(db), clock,
+		research.WithExternal(newHTTPTestWeb()), research.WithPublisher(broker),
+	)
+	tools.RegisterResearchTools(registry, researchService)
 	assistantService := assistant.NewService(sqlite.NewAssistantUnitOfWork(db), provider, registry, clock)
 	handler := NewHandler(db, cfg, testEmbedFS, Services{
 		Tasks:       taskService,
@@ -100,6 +106,7 @@ func setupTestHandlerWithProvider(t *testing.T, provider assistant.Provider) (*H
 		Memory:      memoryService,
 		Goals:       goalsService,
 		Automations: automationService,
+		Research:    researchService,
 		Broker:      broker,
 		Version:     "test",
 	})
@@ -428,6 +435,11 @@ func TestHandlerServeFrontendWithRealEmbedFS(t *testing.T) {
 		automation.WithTimezone(cfg.Timezone),
 	)
 	tools.RegisterAutomationTools(registry, automationService)
+	researchService := research.NewService(
+		sqlite.NewResearchUnitOfWork(db), clock,
+		research.WithExternal(newHTTPTestWeb()), research.WithPublisher(broker),
+	)
+	tools.RegisterResearchTools(registry, researchService)
 	assistantService := assistant.NewService(sqlite.NewAssistantUnitOfWork(db), nil, registry, clock)
 	handler := NewHandler(db, cfg, dist.FS, Services{
 		Tasks:     taskService,

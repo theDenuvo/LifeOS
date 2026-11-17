@@ -30,6 +30,7 @@ import (
 	"github.com/theDenuvo/LifeOS/internal/application/proactive"
 	"github.com/theDenuvo/LifeOS/internal/application/profile"
 	"github.com/theDenuvo/LifeOS/internal/application/recurrence"
+	appresearch "github.com/theDenuvo/LifeOS/internal/application/research"
 	"github.com/theDenuvo/LifeOS/internal/application/search"
 	"github.com/theDenuvo/LifeOS/internal/application/settings"
 	"github.com/theDenuvo/LifeOS/internal/application/summary"
@@ -39,6 +40,7 @@ import (
 	"github.com/theDenuvo/LifeOS/internal/domain/task"
 	"github.com/theDenuvo/LifeOS/internal/events"
 	infradocuments "github.com/theDenuvo/LifeOS/internal/infrastructure/documents"
+	infraresearch "github.com/theDenuvo/LifeOS/internal/infrastructure/research"
 	"github.com/theDenuvo/LifeOS/internal/infrastructure/sqlite"
 	"github.com/theDenuvo/LifeOS/internal/transport/http"
 	"github.com/theDenuvo/LifeOS/internal/web/dist"
@@ -220,6 +222,24 @@ func main() {
 		appmemory.WithPublisher(broker),
 	)
 
+	// Roadmap stage 7: the researcher and the user's external sources. The web
+	// client is the only place that talks to the internet; the service decides
+	// what the pages are worth, and a result saved into the knowledge base
+	// keeps its citations and its certainty level. It is built before the
+	// proactive service so a watched topic that changed can become an insight.
+	researchClient := infraresearch.NewClient(infraresearch.Options{
+		SearchURL:    cfg.SearchURL,
+		SearchFormat: cfg.SearchFormat,
+		Timeout:      time.Duration(cfg.ResearchTimeoutSeconds) * time.Second,
+	})
+	researchService := appresearch.NewService(
+		sqlite.NewResearchUnitOfWork(db),
+		clock,
+		appresearch.WithExternal(researchClient),
+		appresearch.WithKnowledge(researchKnowledge{service: memoryService}),
+		appresearch.WithPublisher(broker),
+	)
+
 	// Roadmap stage 5: full proactivity. The detectors now cross-reference
 	// tasks with the calendar, goals with their deadlines and durable
 	// agreements with their own age, and the outreach engine decides when one
@@ -234,6 +254,7 @@ func main() {
 		proactive.WithDeadlineRisks(goalsService),
 		proactive.WithCalendar(eventService),
 		proactive.WithMemory(memoryAgreements{service: memoryService}),
+		proactive.WithResearch(researchChanges{service: researchService}),
 	)
 
 	// The dashboard shows the day's load and the ideas that are due to resurface.
@@ -341,6 +362,11 @@ func main() {
 	)
 	tools.RegisterAutomationTools(registry, automationService)
 
+	// Roadmap stage 7: the research tools attach to the same registry once it
+	// exists. The service was built earlier, so the proactive detector already
+	// references it.
+	tools.RegisterResearchTools(registry, researchService)
+
 	// Roadmap stage 5: the initiative engine. It writes into the main chat on
 	// LifeOS's own behalf, so it is built after the assistant storage exists.
 	outreachConfig := proactive.OutreachConfig{
@@ -385,6 +411,7 @@ func main() {
 		Memory:      memoryService,
 		Goals:       goalsService,
 		Automations: automationService,
+		Research:    researchService,
 		Models:      modelCatalog,
 		Tools:       registry,
 		Broker:      broker,
@@ -435,6 +462,9 @@ func main() {
 	// here when their moment comes, so the browser shows them without polling.
 	go planning.NewDispatcher(planningService, broker, clock, 30*time.Second).Run(ctx)
 	go recurrence.NewWorker(recurrenceService, time.Minute).Run(ctx)
+	// Watched topics are re-checked on their own cadence; the runner only wakes
+	// up often enough to notice.
+	go appresearch.NewRunner(researchService, 15*time.Minute).Run(ctx)
 
 	// Goal progress is recorded synchronously when a completion commits. It
 	// does not depend on a live event subscriber, and the result is on disk
@@ -536,6 +566,71 @@ func (a memoryAgreements) Agreements(ctx context.Context) ([]proactive.Agreement
 			ID:        entry.ID,
 			Content:   entry.Content,
 			UpdatedAt: entry.UpdatedAt,
+		})
+	}
+	return result, nil
+}
+
+// researchKnowledge writes a finished research result into the durable memory.
+//
+// The entry is knowledge, its provenance is the web, and its certainty is what
+// the evidence supported: a report whose claims were corroborated is a fact, a
+// single-source report is an assumption. The citations live in the report, and
+// the entry names the sites, so a later reader can check the claim.
+type researchKnowledge struct {
+	service *appmemory.Service
+}
+
+func (k researchKnowledge) SaveResearch(ctx context.Context, input appresearch.KnowledgeInput) (int64, error) {
+	certainty := domainmemory.Certainty(input.Certainty)
+	if !certainty.IsValid() {
+		certainty = domainmemory.CertaintyAssumption
+	}
+	source := domainmemory.Source{
+		Kind:       domainmemory.SourceWeb,
+		Label:      input.SourceLabel,
+		Excerpt:    input.SourceExcerpt,
+		ObservedAt: time.Now().UTC(),
+	}
+	create := appmemory.CreateInput{
+		Title:     input.Title,
+		Content:   input.Content,
+		Category:  domainmemory.CategoryResearch,
+		Certainty: certainty,
+		Source:    source,
+	}
+	if input.Confidence > 0 {
+		confidence := input.Confidence
+		create.Confidence = &confidence
+	}
+	result, err := k.service.Remember(ctx, appmemory.RememberInput{CreateInput: create})
+	if err != nil {
+		return 0, err
+	}
+	if result.Entry == nil {
+		return 0, appresearch.ErrKnowledgeNotSaved
+	}
+	return result.Entry.ID, nil
+}
+
+// researchChanges feeds the proactive insight about watched topics from the
+// research service: what changed is a report, not a notification.
+type researchChanges struct {
+	service *appresearch.Service
+}
+
+func (r researchChanges) RecentChanges(ctx context.Context, since time.Time) ([]proactive.ResearchChange, error) {
+	changes, err := r.service.RecentChanges(ctx, since)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]proactive.ResearchChange, 0, len(changes))
+	for _, change := range changes {
+		result = append(result, proactive.ResearchChange{
+			WatchID:   change.WatchID,
+			Topic:     change.Topic,
+			Summary:   change.Summary,
+			ChangedAt: change.ChangedAt,
 		})
 	}
 	return result, nil

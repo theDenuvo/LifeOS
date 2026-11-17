@@ -421,7 +421,7 @@
 |---|---|---|
 | `id` | INTEGER | PK |
 | `entry_id` | INTEGER | FK → memory_entries, cascade |
-| `kind` | TEXT | `user`, `assistant`, `conversation`, `document`, `task`, `event`, `system` |
+| `kind` | TEXT | `user`, `assistant`, `conversation`, `document`, `task`, `event`, `system`, `web` |
 | `source_id` | INTEGER | ID объекта-источника, 0 если его нет |
 | `label` | TEXT | человекочитаемое описание источника |
 | `excerpt` | TEXT | фрагмент, на котором основано сведение (≤ 2000) |
@@ -577,6 +577,80 @@ Application (сначала пауза).
 автоматизацию: вставка running-строки атомарно отказывается, если такой уже
 есть, поэтому два прохода раннера не выполняют сценарий параллельно.
 
+## Исследования и внешние источники
+
+### 13. ResearchReport (Исследование)
+
+| Поле | Тип | Правила |
+|---|---|---|
+| `id` | INTEGER | PK |
+| `question` | TEXT | вопрос, 1–500 символов |
+| `status` | TEXT | `running`, `completed`, `failed` |
+| `queries_json` | JSON | поисковые запросы, не больше трёх |
+| `summary` | TEXT | итог в Markdown: подтверждённое, одиночные источники, расхождения, как проверялось |
+| `findings_json` | JSON | выводы: `statement`, `certainty`, `confidence`, `corroboration`, `domains`, `citations[]`, `conflict` |
+| `sources_count` | INTEGER | число разных страниц, на которые опирается хотя бы один вывод |
+| `knowledge_entry_id` | INTEGER? | FK → memory_entries (set null при удалении записи) |
+| `error` | TEXT | причина сбоя или предупреждение (например, запись в память не удалась) |
+| `started_at`, `finished_at` | TIMESTAMP | UTC |
+| `version` | INTEGER | optimistic locking |
+
+Таблица `research_reports` (миграция 027). Доказательства хранятся одним JSON-
+столбцом: отчёт читается целиком, по выводам не ищут построчно.
+
+**Уровни достоверности.** `fact` — утверждение подтверждают минимум два разных
+сайта; `assumption` — один источник, недоступная страница (поисковая выдержка)
+или расхождение с другим источником; `inference` — вывод самой LifeOS.
+Расхождение указывается в `conflict` и цитирует вторую сторону; такой вывод
+никогда не становится фактом.
+
+### 14. ResearchConnection (Внешний источник)
+
+| Поле | Тип | Правила |
+|---|---|---|
+| `id` | INTEGER | PK |
+| `name` | TEXT | 1–200 символов |
+| `kind` | TEXT | `web_search`, `http_api`, `mcp`, `script` |
+| `mode` | TEXT | `read`, `write`, `sync`; у `script` допускается только `read` |
+| `trust` | TEXT | `high`, `normal`, `low` — вес источника при сопоставлении |
+| `format` | TEXT | для `web_search`: `searxng` или `duckduckgo` |
+| `endpoint` | TEXT | шаблон поиска с `{query}`, базовый URL API, адрес MCP или команда |
+| `notes` | TEXT | описание источника |
+| `enabled` | INTEGER | выключенный источник нельзя использовать |
+| `created_by_assistant` | INTEGER | источник, подключённый ассистентом: только `read` и выключен |
+| `last_used_at` | TIMESTAMP? | последнее успешное обращение |
+| `created_at`, `updated_at`, `version` | | optimistic locking |
+
+Таблица `research_connections`. Режим проверяется при каждом обращении:
+`read` отказывает в изменяющем запросе, журнал фиксирует отказ.
+
+### 15. ResearchWatch (Наблюдение)
+
+| Поле | Тип | Правила |
+|---|---|---|
+| `id` | INTEGER | PK |
+| `topic` | TEXT | тема по-человечески, 1–200 символов |
+| `query`, `queries_json` | TEXT/JSON | поисковые запросы наблюдения (до пяти) |
+| `cadence` | TEXT | `daily`, `weekly`, `manual` |
+| `enabled` | INTEGER | выключенное наблюдение не проверяется |
+| `next_check_at` | TIMESTAMP? | закладка следующей проверки; `NULL` у ручного |
+| `last_checked_at`, `last_change_at` | TIMESTAMP? | когда проверяли и когда изменилось |
+| `last_change_summary` | TEXT | «новых источников: N, обновлено: M» |
+| `seen_json` | JSON | база отпечатков: `url`, `title`, `hash`, `first_seen`; не больше 200 записей |
+| `created_at`, `updated_at`, `version` | | optimistic locking |
+
+Таблица `research_watches`. Отпечаток — первые 4000 символов текста страницы,
+свёрнутые и захешированные: так изменение текста отличается от перестановки
+разметки.
+
+### 16. ResearchCall (Журнал обращений)
+
+`research_calls`: `connection_id`, `name`, `kind`, `mode`, `operation`,
+`outcome` (`ok`, `refused`, `failed`), `detail`, `duration_ms`, `created_at`.
+Пишется на каждое обращение, включая отказ по режиму доступа и сбой сети.
+`connection_id` не является внешним ключом: журнал переживает удаление
+источника и продолжает объяснять, что с ним делали.
+
 ## Работа с датами и часовыми поясами
 
 ### Правила (критично)
@@ -685,6 +759,7 @@ Automation 1 ──< AutomationRun
 | 023 | Инициатива: `outreach` с исходами реакции и окном тишины |
 | 024–025 | Маршрутизация источников рабочих пространств и её восстановление |
 | 026 | Автоматизации: `automations`, `automation_runs` с CHECK-ограничениями статусов, частичным индексом running-запусков и каскадным удалением |
+| 027 | Исследования: `research_reports`, `research_connections`, `research_watches`, `research_calls`; перестройка `memory_sources` ради вида источника `web` |
 
 ### Идентификаторы событий
 

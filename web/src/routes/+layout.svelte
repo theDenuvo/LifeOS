@@ -27,6 +27,7 @@
 		BookOpen,
 		Layers,
 		Target,
+		Telescope,
 		Workflow
 	} from 'lucide-svelte';
 
@@ -35,6 +36,7 @@
 		{ href: '/tasks', label: 'Задачи', icon: ListTodo, chat: false },
 		{ href: '/goals', label: 'Цели', icon: Target, chat: false },
 		{ href: '/automations', label: 'Автоматизации', icon: Workflow, chat: false },
+		{ href: '/research', label: 'Исследования', icon: Telescope, chat: false },
 		{ href: '/calendar', label: 'Календарь', icon: CalendarDays, chat: false },
 		{ href: '/memory', label: 'Память', icon: BookOpen, chat: false }
 	];
@@ -46,6 +48,7 @@
 		{ href: '/tasks', label: 'Задачи', icon: ListTodo, chat: false },
 		{ href: '/goals', label: 'Цели', icon: Target, chat: false },
 		{ href: '/automations', label: 'Автоматизации', icon: Workflow, chat: false },
+		{ href: '/research', label: 'Исследования', icon: Telescope, chat: false },
 		{ href: '/calendar', label: 'Календарь', icon: CalendarDays, chat: false },
 		{ href: '/memory', label: 'Память', icon: BookOpen, chat: false }
 	];
@@ -960,28 +963,42 @@
 			padding-bottom: calc(var(--mobile-nav-h) + env(safe-area-inset-bottom));
 		}
 
+		/* The module list is longer than a phone is wide, so the bar scrolls
+		   sideways instead of shrinking every target below 44 px or wrapping
+		   into a second row that would cover the content. */
 		.mobile-nav {
-			display: grid;
-			grid-template-columns: repeat(6, 1fr);
+			display: flex;
 			position: fixed;
 			inset: auto 0 0 0;
 			z-index: 30;
+			overflow-x: auto;
+			overscroll-behavior-x: contain;
+			scroll-snap-type: x proximity;
 			padding: 4px 4px calc(4px + env(safe-area-inset-bottom));
 			border-top: 1px solid var(--border);
 			background: rgba(10, 10, 13, 0.97);
 			backdrop-filter: blur(12px);
+			scrollbar-width: none;
+		}
+
+		.mobile-nav::-webkit-scrollbar {
+			display: none;
 		}
 
 		.mobile-item {
 			display: flex;
+			min-width: 74px;
 			min-height: 44px;
+			flex: 1 0 auto;
 			flex-direction: column;
 			align-items: center;
 			justify-content: center;
 			gap: 2px;
 			border-radius: 7px;
 			color: var(--fg-muted);
-			font-size: 9.5px;
+			font-size: 10px;
+			white-space: nowrap;
+			scroll-snap-align: center;
 			text-decoration: none;
 		}
 

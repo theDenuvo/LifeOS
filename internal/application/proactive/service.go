@@ -119,6 +119,22 @@ type MemoryWatcher interface {
 	Agreements(ctx context.Context) ([]Agreement, error)
 }
 
+// ResearchChange is one watched topic whose answer changed. Roadmap stage 7: a
+// watch is a standing question, and an answer that moved is exactly the kind of
+// observation the assistant should bring up on its own.
+type ResearchChange struct {
+	WatchID   int64
+	Topic     string
+	Summary   string
+	ChangedAt time.Time
+}
+
+// ResearchWatcher is the slice of the research service the watch detector
+// needs.
+type ResearchWatcher interface {
+	RecentChanges(ctx context.Context, since time.Time) ([]ResearchChange, error)
+}
+
 // Option customises the proactive service.
 type Option func(*Service)
 
@@ -143,6 +159,11 @@ func WithMemory(watcher MemoryWatcher) Option {
 	return func(s *Service) { s.memory = watcher }
 }
 
+// WithResearch attaches the watched topics whose answers changed.
+func WithResearch(watcher ResearchWatcher) Option {
+	return func(s *Service) { s.research = watcher }
+}
+
 // Service computes and manages insights.
 type Service struct {
 	uow           UnitOfWork
@@ -152,6 +173,7 @@ type Service struct {
 	deadlineRisks DeadlineRiskWatcher
 	calendar      CalendarWatcher
 	memory        MemoryWatcher
+	research      ResearchWatcher
 	clock         Clock
 	timezone      string
 }
@@ -224,6 +246,10 @@ func (s *Service) Compute(ctx context.Context) ([]Insight, error) {
 	// detector runs last and tolerates its own failure: an empty result just
 	// means no opportunity was visible today.
 	insights = append(insights, s.automationOpportunityInsights(ctx, now)...)
+	// Roadmap stage 7: a watched topic whose answer moved is a finding the
+	// user asked for by starting the watch, so it is reported without waiting
+	// for the next conversation.
+	insights = append(insights, s.researchChangeInsights(ctx, now)...)
 	if len(insights) == 0 {
 		return []Insight{}, nil
 	}
@@ -782,6 +808,41 @@ func (s *Service) automationOpportunityInsights(ctx context.Context, now time.Ti
 			Count:    len(found.ids),
 			TaskIDs:  limitIDs(found.ids, 10),
 			Proposal: "Попросите ассистента спроектировать автоматизацию: «сделай из этого автоматизацию» — сценарий покажут на согласование.",
+		})
+	}
+	sort.SliceStable(insights, func(i, j int) bool { return insights[i].Key < insights[j].Key })
+	return insights
+}
+
+// researchChangeInsights reports the watched topics that changed recently.
+// The insight is a pointer to the research, not a summary of it: the report
+// itself carries the evidence and the citations.
+func (s *Service) researchChangeInsights(ctx context.Context, now time.Time) []Insight {
+	const researchChangeWindow = 7 * 24 * time.Hour
+	if s.research == nil {
+		return nil
+	}
+	changes, err := s.research.RecentChanges(ctx, now.Add(-researchChangeWindow))
+	if err != nil {
+		// A failed query must not erase the day's other insights.
+		return nil
+	}
+	insights := make([]Insight, 0, len(changes))
+	for _, change := range changes {
+		if change.ChangedAt.Before(now.Add(-researchChangeWindow)) {
+			continue
+		}
+		detail := change.Summary
+		if detail == "" {
+			detail = "Появились изменения с прошлой проверки"
+		}
+		insights = append(insights, Insight{
+			Key:      fmt.Sprintf("research-watch-%d", change.WatchID),
+			Kind:     "research-watch",
+			Severity: SeverityInfo,
+			Title:    fmt.Sprintf("Тема «%s» обновилась", change.Topic),
+			Detail:   detail,
+			Proposal: "Попросите ассистента разобрать изменения: он прочитает источники и покажет, что действительно поменялось.",
 		})
 	}
 	sort.SliceStable(insights, func(i, j int) bool { return insights[i].Key < insights[j].Key })

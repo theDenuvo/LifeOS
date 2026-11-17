@@ -51,6 +51,14 @@ type Config struct {
 	OutreachQuietTo            int
 	OutreachMinIntervalMinutes int
 	OutreachKindCooldownHours  int
+
+	// Roadmap stage 7: web research. SearchURL is a query template containing
+	// {query}; empty keeps the free built-in provider and "off" disables web
+	// search entirely. SearchFormat selects the answer parser.
+	SearchURL    string
+	SearchFormat string
+	// ResearchTimeoutSeconds bounds one page read or search request.
+	ResearchTimeoutSeconds int
 }
 
 func Load(configPath string) (*Config, error) {
@@ -84,6 +92,9 @@ func Load(configPath string) (*Config, error) {
 		OutreachQuietTo:            getEnvInt("LIFEOS_OUTREACH_QUIET_TO", 8),
 		OutreachMinIntervalMinutes: getEnvInt("LIFEOS_OUTREACH_MIN_INTERVAL_MINUTES", 90),
 		OutreachKindCooldownHours:  getEnvInt("LIFEOS_OUTREACH_KIND_COOLDOWN_HOURS", 24),
+		SearchURL:                  getEnv("LIFEOS_SEARCH_URL", ""),
+		SearchFormat:               getEnv("LIFEOS_SEARCH_FORMAT", ""),
+		ResearchTimeoutSeconds:     getEnvInt("LIFEOS_RESEARCH_TIMEOUT_SECONDS", 20),
 	}
 
 	// Load .env file if it exists (non-fatal if missing)
@@ -117,6 +128,9 @@ func Load(configPath string) (*Config, error) {
 	cfg.OutreachQuietTo = getEnvInt("LIFEOS_OUTREACH_QUIET_TO", cfg.OutreachQuietTo)
 	cfg.OutreachMinIntervalMinutes = getEnvInt("LIFEOS_OUTREACH_MIN_INTERVAL_MINUTES", cfg.OutreachMinIntervalMinutes)
 	cfg.OutreachKindCooldownHours = getEnvInt("LIFEOS_OUTREACH_KIND_COOLDOWN_HOURS", cfg.OutreachKindCooldownHours)
+	cfg.SearchURL = getEnv("LIFEOS_SEARCH_URL", cfg.SearchURL)
+	cfg.SearchFormat = getEnv("LIFEOS_SEARCH_FORMAT", cfg.SearchFormat)
+	cfg.ResearchTimeoutSeconds = getEnvInt("LIFEOS_RESEARCH_TIMEOUT_SECONDS", cfg.ResearchTimeoutSeconds)
 
 	// Validate timezone using embedded IANA database
 	loc, err := time.LoadLocation(cfg.Timezone)

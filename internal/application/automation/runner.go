@@ -36,6 +36,13 @@ const maxSkipJournalQueue = 64
 // progress: either the write lands or the deadline fails it loudly.
 const maxSkipWriteTimeout = 5 * time.Second
 
+// maxDrainTimeout bounds the whole refusal-journal drain after shutdown:
+// once it elapses, remaining writes fail fast on a cancelled context
+// instead of finishing one by one. Together with one in-flight write the
+// worst case is maxDrainTimeout + maxSkipWriteTimeout — the bound the
+// application shutdown wait in main is sized against.
+const maxDrainTimeout = 5 * time.Second
+
 // maxFinishedWindows is how many finished run windows the attribution memory
 // keeps. Runs are the only things that can cause deeper chains, and they
 // finish within minutes at most, so a small ring covers the recent history.
@@ -162,12 +169,20 @@ func (r *Runner) watchEvents(ctx context.Context) {
 	// flowing instead of stalling and dropping events in the broker buffer.
 	skips := make(chan skipRequest, maxSkipJournalQueue)
 	journalDone := make(chan struct{})
-	go r.journalSkips(ctx, skips, journalDone)
+	// The drain context is cancelled maxDrainTimeout after the receive loop
+	// has stopped: from then on the remaining queued refusals fail fast
+	// instead of finishing one by one, so the whole drain is bounded by
+	// maxDrainTimeout plus one in-flight write.
+	drainCtx, drainCancel := context.WithCancel(context.WithoutCancel(ctx))
+	go r.journalSkips(drainCtx, skips, journalDone)
 	// Structured shutdown: the receive loop has returned, so no new refusals
 	// can be enqueued; close the queue and wait until the journal has
-	// flushed everything already queued before the runner goes away.
+	// flushed everything already queued — or hit the drain bound — before
+	// the runner goes away.
 	defer func() {
 		close(skips)
+		timer := time.AfterFunc(maxDrainTimeout, drainCancel)
+		defer timer.Stop()
 		<-journalDone
 	}()
 
@@ -243,12 +258,12 @@ func (r *Runner) enqueueSkip(skips chan<- skipRequest, automationID int64, reaso
 // hold work.
 func (r *Runner) journalSkips(ctx context.Context, skips <-chan skipRequest, done chan<- struct{}) {
 	defer close(done)
-	detached := context.WithoutCancel(ctx)
 	for request := range skips {
-		// Every write carries its own deadline: the drain survives the
-		// runner's cancellation, but a stuck write fails after the timeout
-		// instead of holding shutdown open indefinitely.
-		writeCtx, cancel := context.WithTimeout(detached, maxSkipWriteTimeout)
+		// Every write carries its own deadline and lives under the drain
+		// context: a stuck write fails after the timeout, and once the drain
+		// bound elapses the remaining writes fail immediately instead of
+		// holding shutdown open indefinitely.
+		writeCtx, cancel := context.WithTimeout(ctx, maxSkipWriteTimeout)
 		r.service.recordSkipped(writeCtx, request.automationID, request.trigger, request.reason, request.at)
 		cancel()
 	}

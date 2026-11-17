@@ -322,3 +322,67 @@ func TestRunnerStartWaitsForEventReceiver(t *testing.T) {
 			skips, (events-1)*automations)
 	}
 }
+
+// TestSkipJournalDrainIsBounded pins the shutdown arithmetic: after the
+// receive loop stops, the whole drain is bounded by maxDrainTimeout plus
+// one in-flight write — slow writes cannot stretch it one entry at a time
+// beyond the bound the application wait in main is sized against.
+func TestSkipJournalDrainIsBounded(t *testing.T) {
+	clock := testClock()
+	repo := newFakeRepo()
+	repo.skipDelay = 300 * time.Millisecond // 56 queued writes would take ~17s unbounded
+	release := make(chan struct{})
+	defer close(release)
+	tools := &blockingTools{release: release}
+	service := newTestService(clock, repo, tools, &recordedPublisher{})
+
+	const automations = 8
+	const events = 8 // 8 dispatched + 56 queued refusals
+	for i := 0; i < automations; i++ {
+		view := mustCreate(t, service, domainautomation.Trigger{
+			Kind:  domainautomation.TriggerEvent,
+			Event: &domainautomation.EventTrigger{Name: "task.completed"},
+		})
+		if _, err := service.Approve(context.Background(), view.Automation.ID); err != nil {
+			t.Fatalf("approve: %v", err)
+		}
+	}
+
+	source := make(chanSource, 64)
+	runner := appautomation.NewRunner(service, source, time.Minute)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	go func() {
+		runner.Start(ctx)
+		close(started)
+	}()
+
+	now := clock.Now()
+	for i := 0; i < events; i++ {
+		if !source.publish("task.completed", map[string]any{}, now) {
+			t.Fatalf("receiver fell behind: the event buffer dropped event %d", i)
+		}
+	}
+	time.Sleep(300 * time.Millisecond) // some writes land, most stay queued
+
+	shutdownAt := time.Now()
+	cancel()
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Start did not return within the drain bound")
+	}
+	elapsed := time.Since(shutdownAt)
+	// Unbounded, the queue would drain at 300ms per entry for ~17 seconds.
+	// Bounded, the drain stops after maxDrainTimeout plus one in-flight
+	// write; allow the test scheduler some slack.
+	if elapsed > 9*time.Second {
+		t.Fatalf("drain was not bounded: Start returned after %s", elapsed)
+	}
+	for _, run := range repo.snapshotRuns() {
+		if run.AutomationID == 0 {
+			t.Fatalf("a fictitious zero-automation skip was recorded: %+v", run)
+		}
+	}
+}

@@ -67,3 +67,21 @@ func TestEventCacheMatchesAndRefreshes(t *testing.T) {
 		t.Fatalf("paused automation must not match, got %v", got)
 	}
 }
+
+// TestEventCacheIgnoresReservedRunEvents is the runtime braces to the trigger
+// validation: even a hand-written row with a run-lifecycle trigger never
+// fires an automation, so the refusal chain cannot loop.
+func TestEventCacheIgnoresReservedRunEvents(t *testing.T) {
+	var cache eventCache
+	reserved := &domainautomation.Automation{
+		ID: 9, Status: domainautomation.StatusActive,
+		Trigger: domainautomation.Trigger{
+			Kind:  domainautomation.TriggerEvent,
+			Event: &domainautomation.EventTrigger{Name: "automation.run.finished"},
+		},
+	}
+	cache.replace([]*domainautomation.Automation{reserved})
+	if got := cache.match("automation.run.finished", map[string]any{}); len(got) != 0 {
+		t.Fatalf("reserved run event must never match, got %v", got)
+	}
+}

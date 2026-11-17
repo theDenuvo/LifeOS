@@ -22,6 +22,14 @@ type EventSource interface {
 // run, so refused work stays in the journal instead of disappearing silently.
 const maxDispatchQueue = 8
 
+// maxSkipJournalQueue bounds the asynchronous journal of refused launches.
+// Recording a skip touches the database, and the receive loop must never
+// wait for a database write — otherwise a burst during an overflow would
+// stall the receiver and silently drop events in the broker buffer. The
+// journal drains on its own; if even it saturates, the drop is logged
+// loudly instead of staying silent.
+const maxSkipJournalQueue = 64
+
 // maxFinishedWindows is how many finished run windows the attribution memory
 // keeps. Runs are the only things that can cause deeper chains, and they
 // finish within minutes at most, so a small ring covers the recent history.
@@ -35,6 +43,14 @@ type runWindow struct {
 	start  time.Time
 	finish time.Time // zero while the run is still executing
 	depth  int
+}
+
+// skipRequest is one refused launch waiting to be journalled.
+type skipRequest struct {
+	automationID int64
+	trigger      string
+	reason       string
+	at           time.Time
 }
 
 // Runner executes approved automations: schedule moments on a fixed cadence,
@@ -125,6 +141,13 @@ func (r *Runner) watchEvents(ctx context.Context) {
 	go r.refreshLoop(ctx)
 
 	queue := make(chan struct{}, maxDispatchQueue)
+	// Refused launches are journalled off the receive path: the receiver
+	// never waits for a database write, so a burst during an overflow keeps
+	// flowing instead of stalling and dropping events in the broker buffer.
+	skips := make(chan skipRequest, maxSkipJournalQueue)
+	go r.journalSkips(ctx, skips)
+	defer close(skips)
+
 	for event := range r.source.Subscribe(ctx) {
 		if ctx.Err() != nil {
 			return
@@ -154,10 +177,35 @@ func (r *Runner) watchEvents(ctx context.Context) {
 			default:
 				// The queue is full: the run is refused before any step, and
 				// the journal explains why instead of the event vanishing.
-				r.service.recordSkipped(ctx, id, "event",
-					"очередь запусков переполнена, событие не обработано", time.Now().UTC())
+				r.enqueueSkip(ctx, skips, id, "очередь запусков переполнена, событие не обработано")
 				slog.Warn("automation: dispatch queue full", "automation_id", id, "event", event.Type)
 			}
+		}
+	}
+}
+
+// enqueueSkip hands a refused launch to the asynchronous journal. The send
+// never blocks the receiver; if the journal itself is saturated the refusal
+// is logged loudly — an observable loss, not a silent one.
+func (r *Runner) enqueueSkip(ctx context.Context, skips chan<- skipRequest, automationID int64, reason string) {
+	request := skipRequest{automationID: automationID, trigger: "event", reason: reason, at: time.Now().UTC()}
+	select {
+	case skips <- request:
+	default:
+		slog.Warn("automation: skip journal saturated, refusal not recorded",
+			"automation_id", automationID, "reason", reason)
+	}
+}
+
+// journalSkips drains the refused-launch queue into the journal, one write
+// at a time, away from the receive loop.
+func (r *Runner) journalSkips(ctx context.Context, skips <-chan skipRequest) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case request := <-skips:
+			r.service.recordSkipped(ctx, request.automationID, request.trigger, request.reason, request.at)
 		}
 	}
 }
@@ -292,6 +340,11 @@ func (c *eventCache) replace(automations []*domainautomation.Automation) {
 	subs := map[string][]eventSub{}
 	for _, item := range automations {
 		if !item.Active() || item.Trigger.Kind != domainautomation.TriggerEvent || item.Trigger.Event == nil {
+			continue
+		}
+		// Belt and braces to the trigger validation: run-lifecycle events can
+		// never fire an automation, even if a row was written by hand.
+		if domainautomation.IsReservedRunEvent(item.Trigger.Event.Name) {
 			continue
 		}
 		subs[item.Trigger.Event.Name] = append(subs[item.Trigger.Event.Name], eventSub{id: item.ID, trigger: *item.Trigger.Event})

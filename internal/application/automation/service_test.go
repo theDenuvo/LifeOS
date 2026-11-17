@@ -74,9 +74,12 @@ func (c fakeConditions) CurrentInsightKeys(context.Context) (map[string]struct{}
 // fakeRepo mirrors the SQLite semantics: versioned writes, a single running
 // run reservation and a durable run journal.
 type fakeRepo struct {
+	mu          sync.Mutex
 	automations map[int64]*domainautomation.Automation
 	runs        map[int64]*domainautomation.Run
 	nextID      int64
+	// skipDelay slows RecordSkipped down, modelling a real database write.
+	skipDelay time.Duration
 }
 
 func newFakeRepo() *fakeRepo {
@@ -86,12 +89,15 @@ func newFakeRepo() *fakeRepo {
 	}
 }
 
+// next allocates an id; callers hold r.mu.
 func (r *fakeRepo) next() int64 {
 	r.nextID++
 	return r.nextID
 }
 
 func (r *fakeRepo) Insert(_ context.Context, automation *domainautomation.Automation) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if err := automation.Validate(); err != nil {
 		return 0, err
 	}
@@ -103,6 +109,8 @@ func (r *fakeRepo) Insert(_ context.Context, automation *domainautomation.Automa
 }
 
 func (r *fakeRepo) Get(_ context.Context, id int64) (*domainautomation.Automation, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	stored, ok := r.automations[id]
 	if !ok {
 		return nil, appautomation.ErrNotFound
@@ -111,6 +119,8 @@ func (r *fakeRepo) Get(_ context.Context, id int64) (*domainautomation.Automatio
 }
 
 func (r *fakeRepo) List(_ context.Context, filter appautomation.Filter) ([]*domainautomation.Automation, int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	found := make([]*domainautomation.Automation, 0)
 	for _, item := range r.automations {
 		if filter.Status != nil && item.Status != *filter.Status {
@@ -125,6 +135,8 @@ func (r *fakeRepo) List(_ context.Context, filter appautomation.Filter) ([]*doma
 }
 
 func (r *fakeRepo) Update(_ context.Context, id int64, expectedVersion int, automation *domainautomation.Automation) (*domainautomation.Automation, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if err := automation.Validate(); err != nil {
 		return nil, err
 	}
@@ -143,6 +155,8 @@ func (r *fakeRepo) Update(_ context.Context, id int64, expectedVersion int, auto
 }
 
 func (r *fakeRepo) Delete(_ context.Context, id int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if _, ok := r.automations[id]; !ok {
 		return appautomation.ErrNotFound
 	}
@@ -156,6 +170,8 @@ func (r *fakeRepo) Delete(_ context.Context, id int64) error {
 }
 
 func (r *fakeRepo) ScheduleDue(_ context.Context, now time.Time) ([]*domainautomation.Automation, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	found := make([]*domainautomation.Automation, 0)
 	for _, item := range r.automations {
 		if item.Status != domainautomation.StatusActive || item.Trigger.Kind != domainautomation.TriggerSchedule {
@@ -169,6 +185,8 @@ func (r *fakeRepo) ScheduleDue(_ context.Context, now time.Time) ([]*domainautom
 }
 
 func (r *fakeRepo) ListByTrigger(_ context.Context, kind domainautomation.TriggerKind) ([]*domainautomation.Automation, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	found := make([]*domainautomation.Automation, 0)
 	for _, item := range r.automations {
 		if item.Status == domainautomation.StatusActive && item.Trigger.Kind == kind {
@@ -179,6 +197,8 @@ func (r *fakeRepo) ListByTrigger(_ context.Context, kind domainautomation.Trigge
 }
 
 func (r *fakeRepo) StartRun(_ context.Context, automationID int64, trigger string, startedAt time.Time) (*domainautomation.Run, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	for _, run := range r.runs {
 		if run.AutomationID == automationID && run.Status == domainautomation.RunRunning {
 			return nil, nil
@@ -199,6 +219,8 @@ func (r *fakeRepo) StartRun(_ context.Context, automationID int64, trigger strin
 }
 
 func (r *fakeRepo) FinishRun(_ context.Context, run *domainautomation.Run) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	stored, ok := r.runs[run.ID]
 	if !ok || stored.Status != domainautomation.RunRunning {
 		return appautomation.ErrRunNotFound
@@ -212,6 +234,8 @@ func (r *fakeRepo) FinishRun(_ context.Context, run *domainautomation.Run) error
 }
 
 func (r *fakeRepo) GetRun(_ context.Context, automationID, runID int64) (*domainautomation.Run, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	run, ok := r.runs[runID]
 	if !ok || run.AutomationID != automationID {
 		return nil, appautomation.ErrRunNotFound
@@ -220,6 +244,8 @@ func (r *fakeRepo) GetRun(_ context.Context, automationID, runID int64) (*domain
 }
 
 func (r *fakeRepo) ListRuns(_ context.Context, automationID int64, limit, offset int) ([]*domainautomation.Run, int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	found := make([]*domainautomation.Run, 0)
 	for _, run := range r.runs {
 		if run.AutomationID == automationID {
@@ -241,6 +267,8 @@ func (r *fakeRepo) ListRuns(_ context.Context, automationID int64, limit, offset
 }
 
 func (r *fakeRepo) FailRun(_ context.Context, runID int64, reason string, at time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	stored, ok := r.runs[runID]
 	if !ok || stored.Status != domainautomation.RunRunning {
 		return appautomation.ErrRunNotFound
@@ -252,6 +280,8 @@ func (r *fakeRepo) FailRun(_ context.Context, runID int64, reason string, at tim
 }
 
 func (r *fakeRepo) RecoverRunning(_ context.Context, at time.Time) ([]*domainautomation.Run, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	recovered := []*domainautomation.Run{}
 	for _, run := range r.runs {
 		if run.Status != domainautomation.RunRunning {
@@ -266,6 +296,11 @@ func (r *fakeRepo) RecoverRunning(_ context.Context, at time.Time) ([]*domainaut
 }
 
 func (r *fakeRepo) RecordSkipped(_ context.Context, automationID int64, trigger, reason string, at time.Time) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.skipDelay > 0 {
+		time.Sleep(r.skipDelay)
+	}
 	id := r.next()
 	r.runs[id] = &domainautomation.Run{
 		ID: id, AutomationID: automationID, Trigger: trigger,
@@ -845,5 +880,27 @@ func TestJournalSurvivesCancelledContext(t *testing.T) {
 	}
 	if total != 2 {
 		t.Fatalf("total runs = %d, want 2: the released reservation must not block", total)
+	}
+}
+
+// TestEventTriggerRejectsRunLifecycleEvents pins the structural cycle guard
+// at the creation boundary: automation.run.* events are published by every
+// run — including a depth-refused skip — so they must never be triggerable.
+func TestEventTriggerRejectsRunLifecycleEvents(t *testing.T) {
+	clock := testClock()
+	service := newTestService(clock, newFakeRepo(), &fakeTools{}, &recordedPublisher{})
+	for _, name := range []string{"automation.run.started", "automation.run.finished"} {
+		_, err := service.Create(context.Background(), appautomation.CreateInput{
+			Title: "Проверка",
+			Trigger: domainautomation.Trigger{
+				Kind:  domainautomation.TriggerEvent,
+				Event: &domainautomation.EventTrigger{Name: name},
+			},
+			Steps:          sampleSteps(),
+			ExpectedResult: "Напоминание во входящих",
+		})
+		if err == nil {
+			t.Fatalf("trigger on %q must be refused", name)
+		}
 	}
 }

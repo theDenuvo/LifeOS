@@ -202,3 +202,24 @@ func TestAutomationListFilterOverHTTP(t *testing.T) {
 		t.Fatalf("trigger not rendered: %s", list.Data[0].Trigger)
 	}
 }
+
+// TestAutomationRejectsRunLifecycleEventTrigger pins the structural cycle
+// guard at the API boundary: automation.run.* events are published for every
+// run — including a depth-refused skip — so they can never be triggers.
+func TestAutomationRejectsRunLifecycleEventTrigger(t *testing.T) {
+	handler, cleanup := setupTestHandler(t)
+	defer cleanup()
+
+	payload := `{
+		"title": "После каждого запуска",
+		"expected_result": "Реакция на журнал",
+		"trigger": {"kind": "event", "event": {"name": "automation.run.finished"}},
+		"steps": [
+			{"name": "list_tasks", "arguments": {"status": "open"}, "description": "Открытые задачи"}
+		]
+	}`
+	w := automationRequest(t, handler, http.MethodPost, "/api/v1/automations", payload)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", w.Code, w.Body.String())
+	}
+}

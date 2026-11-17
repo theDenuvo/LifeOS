@@ -222,7 +222,24 @@ func (e EventTrigger) Validate() error {
 	if strings.TrimSpace(e.Name) == "" {
 		return errors.New("имя события обязательно")
 	}
+	if IsReservedRunEvent(e.Name) {
+		return fmt.Errorf("событие %q — внутреннее событие жизненного цикла запусков автоматизаций и не может быть триггером: оно публикуется каждым запуском, включая отказ в запуске, и самоподдерживающаяся цепочка пропусков недопустима", e.Name)
+	}
 	return nil
+}
+
+// IsReservedRunEvent reports whether the event type belongs to the
+// automation run lifecycle. These events are published by the service for
+// every run — including refused and skipped ones — so letting user triggers
+// listen to them would make the chain-depth guard loop against itself: a
+// depth-refused run publishes its skip, the skip event re-triggers the same
+// automation, the next refusal publishes again, forever.
+func IsReservedRunEvent(name string) bool {
+	switch name {
+	case "automation.run.started", "automation.run.finished":
+		return true
+	}
+	return false
 }
 
 // Validate checks a condition trigger.

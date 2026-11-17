@@ -926,3 +926,16 @@ func TestEventTriggerRejectsRunLifecycleEvents(t *testing.T) {
 		}
 	}
 }
+
+// ctxTools ignores everything except cancellation: it models a tool that
+// keeps working until its context is cancelled and only then returns.
+type ctxTools struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func (t *ctxTools) Execute(ctx context.Context, _ string, _ json.RawMessage) (any, error) {
+	t.once.Do(func() { close(t.started) })
+	<-ctx.Done()
+	return nil, ctx.Err()
+}

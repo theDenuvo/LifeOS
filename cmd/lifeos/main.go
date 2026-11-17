@@ -474,15 +474,14 @@ func main() {
 
 	// The automation runner finishes its in-flight runs and flushes the
 	// refusal journal on shutdown; wait for it before returning — and before
-	// the deferred database close — so no write is cut off. The wait covers
-	// the runner's own worst case: a 10-second bound on in-flight runs plus a
-	// 10-second bound on the journal drain, plus slack. A runner that still
-	// has not finished is reported instead of holding the process open
-	// indefinitely; everything it is doing is deadline-bound and fails on its
-	// own shortly after.
+	// the deferred database close — so no write is cut off. Its worst case is
+	// 30 seconds: 10s grace for in-flight work, up to two 5s journal writes
+	// for the interrupted run and 10s for the refusal drain. The wait here is
+	// 35s, and the runner guarantees a real zero worker count rather than a
+	// bounded hop, so a shutdown that returns means the database is idle.
 	select {
 	case <-automationRunnerDone:
-	case <-time.After(25 * time.Second):
+	case <-time.After(35 * time.Second):
 		slog.Warn("Automation runner did not finish in time; continuing shutdown")
 	}
 }

@@ -36,11 +36,22 @@ const maxSkipJournalQueue = 64
 // progress: either the write lands or the deadline fails it loudly.
 const maxSkipWriteTimeout = 5 * time.Second
 
-// maxWorkerWait bounds how long shutdown waits for in-flight event runs to
-// finish. A scenario in progress is allowed to complete its current steps and
-// journal, but not to hold the database open indefinitely: past this bound
-// the runner reports and returns anyway.
-const maxWorkerWait = 10 * time.Second
+// maxWorkerGrace is how long an in-flight scenario may keep working after
+// shutdown began. It bounds the work itself, not the wait: when it elapses the
+// runner cancels the work context, so tools and journal writes observe the
+// cancellation and return, and the runner then waits for the real zero count.
+// That distinction is what makes the shutdown guarantee absolute — a bounded
+// wait alone would let the runner return with goroutines still writing.
+const maxWorkerGrace = 10 * time.Second
+
+// Shutdown runs three bounded stages, in this order: in-flight scenarios get
+// maxWorkerGrace (10s) to finish and are cancelled when it elapses; each run's
+// journal write, detached from cancellation, gets maxFinalizeTimeout (5s) —
+// twice if the primary write fails and the fallback runs; the refusal journal
+// gets maxDrainTimeout (5s) plus one in-flight write of maxSkipWriteTimeout
+// (5s). The worst case is 30 seconds, which is what the wait in main is sized
+// against. Every stage bounds the work, never merely the wait for it, so the
+// runner always reaches a real zero worker count.
 
 // maxDrainTimeout bounds the whole refusal-journal drain after shutdown:
 // once it elapses, remaining writes fail fast on a cancelled context
@@ -95,6 +106,10 @@ type Runner struct {
 	running  []runWindow // active runs: never evicted while unfinished
 	finished []runWindow // capped ring of completed runs
 
+	// workerGrace is how long in-flight work may keep running after shutdown
+	// before its context is cancelled; tests shorten it.
+	workerGrace time.Duration
+
 	// workers tracks every background goroutine the runner starts — event
 	// runs and the cache refresher — so shutdown can wait for all of them
 	// before the database closes.
@@ -103,13 +118,30 @@ type Runner struct {
 	cache eventCache
 }
 
+// RunnerOption adjusts a Runner at construction.
+type RunnerOption func(*Runner)
+
+// WithWorkerGrace overrides how long in-flight work may keep running after
+// shutdown before its context is cancelled. The default is maxWorkerGrace.
+func WithWorkerGrace(grace time.Duration) RunnerOption {
+	return func(r *Runner) {
+		if grace > 0 {
+			r.workerGrace = grace
+		}
+	}
+}
+
 // NewRunner builds a runner. A zero interval defaults to 30 seconds, which is
 // tight enough for minute-level schedules without hammering the database.
-func NewRunner(service *Service, source EventSource, interval time.Duration) *Runner {
+func NewRunner(service *Service, source EventSource, interval time.Duration, options ...RunnerOption) *Runner {
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
-	return &Runner{service: service, source: source, interval: interval}
+	runner := &Runner{service: service, source: source, interval: interval, workerGrace: maxWorkerGrace}
+	for _, option := range options {
+		option(runner)
+	}
+	return runner
 }
 
 // Start runs the loops until ctx is cancelled.
@@ -119,10 +151,18 @@ func NewRunner(service *Service, source EventSource, interval time.Duration) *Ru
 // including the refusal-journal drain. A caller that closes the database
 // after Start returns cannot cut the drain short.
 func (r *Runner) Start(ctx context.Context) {
+	// Work runs on its own cancellation branch, detached from the parent's
+	// cancellation: that is what gives in-flight scenarios a real grace
+	// period instead of killing them the instant shutdown begins. The grace
+	// period bounds the work — when it elapses cancelWork stops it — and the
+	// wait for the workers themselves is absolute.
+	workCtx, cancelWork := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelWork()
+
 	receiverDone := make(chan struct{})
 	go func() {
 		defer close(receiverDone)
-		r.watchEvents(ctx)
+		r.watchEvents(ctx, workCtx, cancelWork)
 	}()
 	r.tickLoop(ctx)
 	<-receiverDone
@@ -164,7 +204,7 @@ func (r *Runner) tick(ctx context.Context) {
 // in-memory cache, never against the database — so a burst cannot outrun it
 // and overflow the broker's subscriber buffer; runs execute in bounded
 // background work.
-func (r *Runner) watchEvents(ctx context.Context) {
+func (r *Runner) watchEvents(ctx context.Context, workCtx context.Context, cancelWork context.CancelFunc) {
 	if r.source == nil {
 		return
 	}
@@ -196,13 +236,13 @@ func (r *Runner) watchEvents(ctx context.Context) {
 	// background goroutines are joined. Nothing the runner started may still
 	// touch the database after it returns.
 	defer func() {
-		r.waitWorkers()
+		r.stopWorkers(cancelWork)
 		close(skips)
 		timer := time.AfterFunc(maxDrainTimeout, drainCancel)
 		defer timer.Stop()
 		<-journalDone
 		drainCancel()
-		r.waitWorkers()
+		r.workers.Wait()
 	}()
 
 	// The loop exits on either the source closing its channel (as the broker
@@ -217,16 +257,16 @@ func (r *Runner) watchEvents(ctx context.Context) {
 			if !open {
 				return
 			}
-			r.handleEvent(ctx, queue, skips, event)
+			r.handleEvent(workCtx, queue, skips, event)
 		}
 	}
 }
 
 // handleEvent matches one incoming event against the cached subscriptions
 // and dispatches the matched runs.
-func (r *Runner) handleEvent(ctx context.Context, queue chan struct{}, skips chan<- skipRequest, event events.Event) {
+func (r *Runner) handleEvent(workCtx context.Context, queue chan struct{}, skips chan<- skipRequest, event events.Event) {
 	if isAutomationEvent(event.Type) {
-		r.refreshCache(ctx)
+		r.refreshCache(workCtx)
 	}
 	payload, ok := event.Data.(map[string]any)
 	if !ok && event.Data != nil {
@@ -249,7 +289,7 @@ func (r *Runner) handleEvent(ctx context.Context, queue chan struct{}, skips cha
 			r.workers.Add(1)
 			go func() {
 				defer r.workers.Done()
-				r.runEvent(ctx, queue, id, depth, event.Type)
+				r.runEvent(workCtx, queue, id, depth, event.Type)
 			}()
 		default:
 			// The queue is full: the run is refused before any step, and the
@@ -342,11 +382,23 @@ func (r *Runner) runEvent(ctx context.Context, queue <-chan struct{}, automation
 	r.closeWindow(window)
 }
 
-// waitWorkers waits until every background goroutine the runner started has
-// returned, bounded by maxWorkerWait so a stuck scenario cannot hold shutdown
-// open. The wait is repeated by the callers: event runs are joined first, then
-// the pieces that only stop once the drain context is cancelled.
-func (r *Runner) waitWorkers() {
+// grace reports the shutdown grace period for in-flight work.
+func (r *Runner) grace() time.Duration {
+	if r.workerGrace > 0 {
+		return r.workerGrace
+	}
+	return maxWorkerGrace
+}
+
+// stopWorkers ends all in-flight work and waits until every background
+// goroutine has actually returned.
+//
+// The grace period bounds the work, not the wait: a scenario gets
+// maxWorkerGrace to finish on its own, and when that elapses the work context
+// is cancelled so tools and journal writes observe it and return. Only then
+// does the runner wait — unconditionally — for the real zero count, so it can
+// never return while a worker is still touching the database.
+func (r *Runner) stopWorkers(cancelWork context.CancelFunc) {
 	done := make(chan struct{})
 	go func() {
 		r.workers.Wait()
@@ -354,9 +406,12 @@ func (r *Runner) waitWorkers() {
 	}()
 	select {
 	case <-done:
-	case <-time.After(maxWorkerWait):
-		slog.Warn("automation: background work did not finish before the shutdown bound")
+		return
+	case <-time.After(r.grace()):
 	}
+	slog.Warn("automation: cancelling work that outlived the shutdown grace period", "grace", r.grace())
+	cancelWork()
+	<-done
 }
 
 // remember records a run window. An unfinished window is never evicted: a

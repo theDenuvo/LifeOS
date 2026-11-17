@@ -462,3 +462,65 @@ func TestRunnerStartWaitsForEventWorkers(t *testing.T) {
 		t.Fatalf("in-flight run was not finished before Start returned: %+v", runs)
 	}
 }
+
+// TestRunnerStopsWorkThatOutlivesTheGracePeriod pins the shutdown guarantee
+// the database close depends on: when a scenario does not finish within the
+// grace period, the runner cancels its work, the worker returns, and Start
+// waits for the real zero count — it never returns with a worker still alive.
+func TestRunnerStopsWorkThatOutlivesTheGracePeriod(t *testing.T) {
+	clock := testClock()
+	repo := newFakeRepo()
+	tools := &ctxTools{started: make(chan struct{})}
+	service := newTestService(clock, repo, tools, &recordedPublisher{})
+	view := mustCreate(t, service, domainautomation.Trigger{
+		Kind:  domainautomation.TriggerEvent,
+		Event: &domainautomation.EventTrigger{Name: "task.completed"},
+	})
+	if _, err := service.Approve(context.Background(), view.Automation.ID); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	source := make(chanSource, 8)
+	runner := appautomation.NewRunner(service, source, time.Minute,
+		appautomation.WithWorkerGrace(150*time.Millisecond))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	go func() {
+		runner.Start(ctx)
+		close(started)
+	}()
+
+	if !source.publish("task.completed", map[string]any{}, clock.Now()) {
+		t.Fatal("publish refused")
+	}
+	select {
+	case <-tools.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the scenario never started")
+	}
+
+	cancel()
+	// The worker keeps working through the grace period — its context is not
+	// the cancelled parent — so only the forced stop can end it.
+	select {
+	case <-started:
+		t.Fatal("Start returned before the grace period elapsed")
+	case <-time.After(50 * time.Millisecond):
+	}
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Start did not return after cancelling outlived work")
+	}
+
+	// Start returned only after the worker really finished: the run reached a
+	// terminal state and its reservation is released.
+	runs, total, err := service.Runs(context.Background(), view.Automation.ID, 10, 0)
+	if err != nil {
+		t.Fatalf("runs: %v", err)
+	}
+	if total != 1 || !runs[0].Status.Terminal() {
+		t.Fatalf("run was not finished before Start returned: %+v", runs)
+	}
+}

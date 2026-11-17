@@ -524,3 +524,49 @@ func TestRunnerStopsWorkThatOutlivesTheGracePeriod(t *testing.T) {
 		t.Fatalf("run was not finished before Start returned: %+v", runs)
 	}
 }
+
+// TestShutdownCancelsSynchronousCacheRefresh pins the receiver-side shutdown
+// path: the subscription refresh runs on the receiver's context, so shutdown
+// cancels a blocked database query and the receiver reaches its own shutdown
+// instead of sitting in a query on a context that outlives the process.
+func TestShutdownCancelsSynchronousCacheRefresh(t *testing.T) {
+	clock := testClock()
+	repo := newFakeRepo()
+	gate := make(chan struct{})
+	defer close(gate)
+	repo.listGate = gate
+	service := newTestService(clock, repo, &fakeTools{}, &recordedPublisher{})
+	view := mustCreate(t, service, domainautomation.Trigger{
+		Kind:  domainautomation.TriggerEvent,
+		Event: &domainautomation.EventTrigger{Name: "task.completed"},
+	})
+	if _, err := service.Approve(context.Background(), view.Automation.ID); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	source := make(chanSource, 8)
+	runner := appautomation.NewRunner(service, source, time.Minute)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	go func() {
+		runner.Start(ctx)
+		close(started)
+	}()
+
+	// An automation event makes the receiver refresh its subscriptions
+	// synchronously; the store holds that query open.
+	if !source.publish("automation.updated", map[string]any{}, clock.Now()) {
+		t.Fatal("publish refused")
+	}
+	time.Sleep(150 * time.Millisecond)
+
+	cancel()
+	// The receiver must be able to leave the blocked query: without the
+	// receiver's own context the query would outlive shutdown entirely.
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Runner did not finish: the cache refresh outlived the shutdown context")
+	}
+}

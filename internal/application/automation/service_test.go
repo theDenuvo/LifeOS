@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -106,6 +107,11 @@ type fakeRepo struct {
 	// skipGate, when set, holds a skip write until it is closed — a test
 	// uses it to freeze the journal mid-drain.
 	skipGate chan struct{}
+	// listGate, when set, holds subscription queries from the second call on
+	// (the first is the receiver's startup load) until it is closed or the
+	// query's context is cancelled.
+	listGate  chan struct{}
+	listCalls int32
 }
 
 func newFakeRepo() *fakeRepo {
@@ -210,7 +216,14 @@ func (r *fakeRepo) ScheduleDue(_ context.Context, now time.Time) ([]*domainautom
 	return found, nil
 }
 
-func (r *fakeRepo) ListByTrigger(_ context.Context, kind domainautomation.TriggerKind) ([]*domainautomation.Automation, error) {
+func (r *fakeRepo) ListByTrigger(ctx context.Context, kind domainautomation.TriggerKind) ([]*domainautomation.Automation, error) {
+	if r.listGate != nil && atomic.AddInt32(&r.listCalls, 1) >= 2 {
+		select {
+		case <-r.listGate:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	found := make([]*domainautomation.Automation, 0)

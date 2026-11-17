@@ -257,16 +257,22 @@ func (r *Runner) watchEvents(ctx context.Context, workCtx context.Context, cance
 			if !open {
 				return
 			}
-			r.handleEvent(workCtx, queue, skips, event)
+			r.handleEvent(ctx, workCtx, queue, skips, event)
 		}
 	}
 }
 
 // handleEvent matches one incoming event against the cached subscriptions
 // and dispatches the matched runs.
-func (r *Runner) handleEvent(workCtx context.Context, queue chan struct{}, skips chan<- skipRequest, event events.Event) {
+//
+// The cache refresh runs on the receiver's own context, not the work context:
+// it is a synchronous database query performed by the receive loop itself, so
+// shutdown must be able to cancel it and let the receiver reach stopWorkers.
+// The detached work context is for scenarios only, which get a grace period
+// and are then stopped explicitly.
+func (r *Runner) handleEvent(ctx, workCtx context.Context, queue chan struct{}, skips chan<- skipRequest, event events.Event) {
 	if isAutomationEvent(event.Type) {
-		r.refreshCache(workCtx)
+		r.refreshCache(ctx)
 	}
 	payload, ok := event.Data.(map[string]any)
 	if !ok && event.Data != nil {

@@ -247,3 +247,78 @@ func TestSkipJournalFlushesOnShutdown(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// TestRunnerStartWaitsForEventReceiver pins the application-level shutdown
+// guarantee: Start returns only after the event receiver has finished its
+// orderly shutdown, including the refusal-journal drain — a caller that
+// closes the database after Start returns cannot cut the flush short.
+func TestRunnerStartWaitsForEventReceiver(t *testing.T) {
+	clock := testClock()
+	repo := newFakeRepo()
+	gate := make(chan struct{})
+	repo.skipGate = gate
+	release := make(chan struct{})
+	defer close(release)
+	tools := &blockingTools{release: release}
+	service := newTestService(clock, repo, tools, &recordedPublisher{})
+
+	const automations = 8
+	const events = 8 // 8 dispatched + 56 queued refusals
+	for i := 0; i < automations; i++ {
+		view := mustCreate(t, service, domainautomation.Trigger{
+			Kind:  domainautomation.TriggerEvent,
+			Event: &domainautomation.EventTrigger{Name: "task.completed"},
+		})
+		if _, err := service.Approve(context.Background(), view.Automation.ID); err != nil {
+			t.Fatalf("approve: %v", err)
+		}
+	}
+
+	source := make(chanSource, 64)
+	runner := appautomation.NewRunner(service, source, time.Minute)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	go func() {
+		runner.Start(ctx)
+		close(started)
+	}()
+
+	now := clock.Now()
+	for i := 0; i < events; i++ {
+		if !source.publish("task.completed", map[string]any{}, now) {
+			t.Fatalf("receiver fell behind: the event buffer dropped event %d", i)
+		}
+	}
+	// The queue holds refusals; the journal is frozen on the gate.
+	time.Sleep(150 * time.Millisecond)
+
+	// Shutdown: Start must not return while the drain is still pending.
+	cancel()
+	select {
+	case <-started:
+		t.Fatal("Start returned while the refusal journal was still draining")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// Let the drain finish; now Start returns.
+	close(gate)
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start did not return after the journal drained")
+	}
+	skips := 0
+	for _, run := range repo.snapshotRuns() {
+		if run.Status == domainautomation.RunSkipped {
+			if run.AutomationID == 0 {
+				t.Fatalf("a fictitious zero-automation skip was recorded: %+v", run)
+			}
+			skips++
+		}
+	}
+	if skips != (events-1)*automations {
+		t.Fatalf("queued refusals were not flushed before Start returned: %d recorded, want %d",
+			skips, (events-1)*automations)
+	}
+}

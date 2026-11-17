@@ -30,6 +30,12 @@ const maxDispatchQueue = 8
 // loudly instead of staying silent.
 const maxSkipJournalQueue = 64
 
+// maxSkipWriteTimeout bounds a single refused-launch journal write, so a
+// hung database operation cannot hold the drain — and with it the shutdown
+// of the whole application — open forever. The drain always makes bounded
+// progress: either the write lands or the deadline fails it loudly.
+const maxSkipWriteTimeout = 5 * time.Second
+
 // maxFinishedWindows is how many finished run windows the attribution memory
 // keeps. Runs are the only things that can cause deeper chains, and they
 // finish within minutes at most, so a small ring covers the recent history.
@@ -89,9 +95,19 @@ func NewRunner(service *Service, source EventSource, interval time.Duration) *Ru
 }
 
 // Start runs the loops until ctx is cancelled.
+//
+// It returns only when both loops have fully stopped: the tick loop ends
+// with the context, and the event receiver finishes its orderly shutdown,
+// including the refusal-journal drain. A caller that closes the database
+// after Start returns cannot cut the drain short.
 func (r *Runner) Start(ctx context.Context) {
-	go r.watchEvents(ctx)
+	receiverDone := make(chan struct{})
+	go func() {
+		defer close(receiverDone)
+		r.watchEvents(ctx)
+	}()
 	r.tickLoop(ctx)
+	<-receiverDone
 }
 
 // tickLoop recomputes and executes due work on a fixed cadence. The first
@@ -229,7 +245,12 @@ func (r *Runner) journalSkips(ctx context.Context, skips <-chan skipRequest, don
 	defer close(done)
 	detached := context.WithoutCancel(ctx)
 	for request := range skips {
-		r.service.recordSkipped(detached, request.automationID, request.trigger, request.reason, request.at)
+		// Every write carries its own deadline: the drain survives the
+		// runner's cancellation, but a stuck write fails after the timeout
+		// instead of holding shutdown open indefinitely.
+		writeCtx, cancel := context.WithTimeout(detached, maxSkipWriteTimeout)
+		r.service.recordSkipped(writeCtx, request.automationID, request.trigger, request.reason, request.at)
+		cancel()
 	}
 }
 

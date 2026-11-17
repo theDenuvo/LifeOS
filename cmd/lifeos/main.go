@@ -451,8 +451,14 @@ func main() {
 
 	// Automation runner: schedule moments fire on a fixed cadence, LifeOS
 	// events are observed live through the broker, and condition triggers are
-	// checked on every pass. Both loops stop with the context.
-	go automation.NewRunner(automationService, broker, 30*time.Second).Start(ctx)
+	// checked on every pass. Both loops stop with the context, and Start
+	// returns only after the refusal journal has drained, so the wait below
+	// must complete before the database closes.
+	automationRunnerDone := make(chan struct{})
+	go func() {
+		automation.NewRunner(automationService, broker, 30*time.Second).Start(ctx)
+		close(automationRunnerDone)
+	}()
 
 	<-ctx.Done()
 	slog.Info("Shutting down...")
@@ -464,6 +470,18 @@ func main() {
 		slog.Error("Graceful shutdown failed", "error", err)
 	} else {
 		slog.Info("Server stopped gracefully")
+	}
+
+	// The refusal journal of the automation runner flushes on shutdown; wait
+	// for it before returning — and before the deferred database close — so
+	// queued refusals cannot be cut off mid-write. The wait is bounded: each
+	// journal write already carries its own deadline, and a runner that
+	// still has not finished is reported instead of holding the process
+	// open indefinitely.
+	select {
+	case <-automationRunnerDone:
+	case <-time.After(5 * time.Second):
+		slog.Warn("Automation runner did not finish draining in time; continuing shutdown")
 	}
 }
 

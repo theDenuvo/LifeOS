@@ -36,6 +36,12 @@ const maxSkipJournalQueue = 64
 // progress: either the write lands or the deadline fails it loudly.
 const maxSkipWriteTimeout = 5 * time.Second
 
+// maxWorkerWait bounds how long shutdown waits for in-flight event runs to
+// finish. A scenario in progress is allowed to complete its current steps and
+// journal, but not to hold the database open indefinitely: past this bound
+// the runner reports and returns anyway.
+const maxWorkerWait = 10 * time.Second
+
 // maxDrainTimeout bounds the whole refusal-journal drain after shutdown:
 // once it elapses, remaining writes fail fast on a cancelled context
 // instead of finishing one by one. Together with one in-flight write the
@@ -88,6 +94,11 @@ type Runner struct {
 	mu       sync.Mutex
 	running  []runWindow // active runs: never evicted while unfinished
 	finished []runWindow // capped ring of completed runs
+
+	// workers tracks every background goroutine the runner starts — event
+	// runs and the cache refresher — so shutdown can wait for all of them
+	// before the database closes.
+	workers sync.WaitGroup
 
 	cache eventCache
 }
@@ -161,7 +172,11 @@ func (r *Runner) watchEvents(ctx context.Context) {
 	// The cache is the belt: automation events and a slow timer both refresh
 	// it, so a missed automation.* event cannot leave stale subscriptions for
 	// longer than one tick.
-	go r.refreshLoop(ctx)
+	r.workers.Add(1)
+	go func() {
+		defer r.workers.Done()
+		r.refreshLoop(ctx)
+	}()
 
 	queue := make(chan struct{}, maxDispatchQueue)
 	// Refused launches are journalled off the receive path: the receiver
@@ -175,15 +190,19 @@ func (r *Runner) watchEvents(ctx context.Context) {
 	// maxDrainTimeout plus one in-flight write.
 	drainCtx, drainCancel := context.WithCancel(context.WithoutCancel(ctx))
 	go r.journalSkips(drainCtx, skips, journalDone)
-	// Structured shutdown: the receive loop has returned, so no new refusals
-	// can be enqueued; close the queue and wait until the journal has
-	// flushed everything already queued — or hit the drain bound — before
-	// the runner goes away.
+	// Structured shutdown, in order: nothing new is received, the in-flight
+	// event runs are allowed to finish (each with its journal write), the
+	// refusal queue is closed and drained, and finally the remaining
+	// background goroutines are joined. Nothing the runner started may still
+	// touch the database after it returns.
 	defer func() {
+		r.waitWorkers()
 		close(skips)
 		timer := time.AfterFunc(maxDrainTimeout, drainCancel)
 		defer timer.Stop()
 		<-journalDone
+		drainCancel()
+		r.waitWorkers()
 	}()
 
 	// The loop exits on either the source closing its channel (as the broker
@@ -227,7 +246,11 @@ func (r *Runner) handleEvent(ctx context.Context, queue chan struct{}, skips cha
 		depth := r.depthFor(event.At)
 		select {
 		case queue <- struct{}{}:
-			go r.runEvent(ctx, queue, id, depth, event.Type)
+			r.workers.Add(1)
+			go func() {
+				defer r.workers.Done()
+				r.runEvent(ctx, queue, id, depth, event.Type)
+			}()
 		default:
 			// The queue is full: the run is refused before any step, and the
 			// journal explains why instead of the event vanishing.
@@ -317,6 +340,23 @@ func (r *Runner) runEvent(ctx context.Context, queue <-chan struct{}, automation
 		}
 	}
 	r.closeWindow(window)
+}
+
+// waitWorkers waits until every background goroutine the runner started has
+// returned, bounded by maxWorkerWait so a stuck scenario cannot hold shutdown
+// open. The wait is repeated by the callers: event runs are joined first, then
+// the pieces that only stop once the drain context is cancelled.
+func (r *Runner) waitWorkers() {
+	done := make(chan struct{})
+	go func() {
+		r.workers.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(maxWorkerWait):
+		slog.Warn("automation: background work did not finish before the shutdown bound")
+	}
 }
 
 // remember records a run window. An unfinished window is never evicted: a

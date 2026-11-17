@@ -472,18 +472,18 @@ func main() {
 		slog.Info("Server stopped gracefully")
 	}
 
-	// The refusal journal of the automation runner flushes on shutdown; wait
-	// for it before returning — and before the deferred database close — so
-	// queued refusals cannot be cut off mid-write. The wait covers the
-	// runner's own worst case: a 5-second bound on the whole drain plus one
-	// in-flight write of up to 5 seconds, plus slack. A runner that still
-	// has not finished by then is reported instead of holding the process
-	// open indefinitely; its remaining writes are already deadline-bound and
-	// will fail on their own shortly after.
+	// The automation runner finishes its in-flight runs and flushes the
+	// refusal journal on shutdown; wait for it before returning — and before
+	// the deferred database close — so no write is cut off. The wait covers
+	// the runner's own worst case: a 10-second bound on in-flight runs plus a
+	// 10-second bound on the journal drain, plus slack. A runner that still
+	// has not finished is reported instead of holding the process open
+	// indefinitely; everything it is doing is deadline-bound and fails on its
+	// own shortly after.
 	select {
 	case <-automationRunnerDone:
-	case <-time.After(15 * time.Second):
-		slog.Warn("Automation runner did not finish draining in time; continuing shutdown")
+	case <-time.After(25 * time.Second):
+		slog.Warn("Automation runner did not finish in time; continuing shutdown")
 	}
 }
 

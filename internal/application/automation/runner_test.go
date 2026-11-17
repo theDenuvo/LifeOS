@@ -258,7 +258,6 @@ func TestRunnerStartWaitsForEventReceiver(t *testing.T) {
 	gate := make(chan struct{})
 	repo.skipGate = gate
 	release := make(chan struct{})
-	defer close(release)
 	tools := &blockingTools{release: release}
 	service := newTestService(clock, repo, tools, &recordedPublisher{})
 
@@ -301,7 +300,8 @@ func TestRunnerStartWaitsForEventReceiver(t *testing.T) {
 	case <-time.After(300 * time.Millisecond):
 	}
 
-	// Let the drain finish; now Start returns.
+	// Release the in-flight runs and let the drain finish; now Start returns.
+	close(release)
 	close(gate)
 	select {
 	case <-started:
@@ -332,7 +332,6 @@ func TestSkipJournalDrainIsBounded(t *testing.T) {
 	repo := newFakeRepo()
 	repo.skipDelay = 300 * time.Millisecond // 56 queued writes would take ~17s unbounded
 	release := make(chan struct{})
-	defer close(release)
 	tools := &blockingTools{release: release}
 	service := newTestService(clock, repo, tools, &recordedPublisher{})
 
@@ -366,6 +365,9 @@ func TestSkipJournalDrainIsBounded(t *testing.T) {
 	}
 	time.Sleep(300 * time.Millisecond) // some writes land, most stay queued
 
+	// The runs are released first, so the measurement covers the journal
+	// drain and not the bounded wait for in-flight work.
+	close(release)
 	shutdownAt := time.Now()
 	cancel()
 	select {
@@ -384,5 +386,79 @@ func TestSkipJournalDrainIsBounded(t *testing.T) {
 		if run.AutomationID == 0 {
 			t.Fatalf("a fictitious zero-automation skip was recorded: %+v", run)
 		}
+	}
+}
+
+// TestRunnerStartWaitsForEventWorkers pins the guarantee the shutdown relies
+// on: a scenario already executing keeps the runner alive until it finishes
+// its steps and journals the run — Start cannot return, and therefore the
+// database cannot close, while a run is still writing.
+func TestRunnerStartWaitsForEventWorkers(t *testing.T) {
+	clock := testClock()
+	repo := newFakeRepo()
+	release := make(chan struct{})
+	tools := &blockingTools{release: release}
+	service := newTestService(clock, repo, tools, &recordedPublisher{})
+	view := mustCreate(t, service, domainautomation.Trigger{
+		Kind:  domainautomation.TriggerEvent,
+		Event: &domainautomation.EventTrigger{Name: "task.completed"},
+	})
+	if _, err := service.Approve(context.Background(), view.Automation.ID); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	source := make(chanSource, 8)
+	runner := appautomation.NewRunner(service, source, time.Minute)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	go func() {
+		runner.Start(ctx)
+		close(started)
+	}()
+
+	if !source.publish("task.completed", map[string]any{}, clock.Now()) {
+		t.Fatal("publish refused")
+	}
+	// Wait for the run to actually be executing, then shut down under it.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		running := false
+		for _, run := range repo.snapshotRuns() {
+			if run.Status == domainautomation.RunRunning {
+				running = true
+			}
+		}
+		if running {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the event run never started")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case <-started:
+		t.Fatal("Start returned while an event run was still executing")
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Start did not return after the in-flight run finished")
+	}
+
+	// The run reached a terminal state and the reservation is released: no
+	// write is left pending behind the runner's back.
+	runs, total, err := service.Runs(context.Background(), view.Automation.ID, 10, 0)
+	if err != nil {
+		t.Fatalf("runs: %v", err)
+	}
+	if total != 1 || !runs[0].Status.Terminal() {
+		t.Fatalf("in-flight run was not finished before Start returned: %+v", runs)
 	}
 }

@@ -165,3 +165,10 @@ type ObserveResult struct {
 // runs are refused and recorded as skipped, so no cycle — including the
 // automation reacting to its own effects — can sustain itself.
 const maxChainDepth = 3
+
+// maxFinalizeTimeout bounds the journal write that finishes a run. The write
+// runs on a context detached from the caller's cancellation (a closed HTTP
+// connection must not leave a reservation behind), and the runner joins the
+// goroutine that performs it during shutdown — so it needs its own deadline,
+// otherwise a hung write would hold the database open indefinitely.
+const maxFinalizeTimeout = 10 * time.Second

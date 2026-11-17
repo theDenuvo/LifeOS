@@ -779,8 +779,12 @@ func (s *Service) execute(ctx context.Context, item *domainautomation.Automation
 	// The journal write must survive the caller's cancellation: a user closing
 	// the HTTP connection (or any other ctx cancellation) is not a reason to
 	// leave the reservation running. The context keeps its values but drops
-	// the cancellation signal from here on.
-	detached := context.WithoutCancel(ctx)
+	// the cancellation signal from here on — and carries its own deadline, so
+	// a hung write fails instead of holding shutdown open: the runner joins
+	// this goroutine before the database closes, and without a bound here that
+	// join could wait forever.
+	detached, cancelFinish := context.WithTimeout(context.WithoutCancel(ctx), maxFinalizeTimeout)
+	defer cancelFinish()
 	err = s.uow.Do(detached, func(ctx context.Context, tx Transaction) error {
 		if err := tx.Automations().FinishRun(ctx, run); err != nil {
 			return err
@@ -807,7 +811,9 @@ func (s *Service) execute(ctx context.Context, item *domainautomation.Automation
 		// line of defence.
 		slog.Error("automation: run journal write failed", "automation_id", item.ID, "run_id", run.ID, "error", err)
 		reason := "журнал запуска не записан: " + err.Error()
-		if fallbackErr := s.uow.Do(detached, func(ctx context.Context, tx Transaction) error {
+		fallbackCtx, cancelFallback := context.WithTimeout(context.WithoutCancel(ctx), maxFinalizeTimeout)
+		defer cancelFallback()
+		if fallbackErr := s.uow.Do(fallbackCtx, func(ctx context.Context, tx Transaction) error {
 			return tx.Automations().FailRun(ctx, run.ID, reason, finished)
 		}); fallbackErr != nil {
 			slog.Error("automation: run reservation release failed", "automation_id", item.ID, "run_id", run.ID, "error", fallbackErr)

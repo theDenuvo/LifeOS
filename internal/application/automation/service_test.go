@@ -27,26 +27,49 @@ func testClock() *stepClock {
 	return &stepClock{at: time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)}
 }
 
-// recordedPublisher remembers what the service announced live.
+// recordedPublisher remembers what the service announced live. Publishing
+// happens from run goroutines, so the list is guarded — the CI suite runs
+// under the race detector.
 type recordedPublisher struct {
 	events.Broker
+	mu        sync.Mutex
 	published []string
 }
 
 func (p *recordedPublisher) Publish(eventType string, _ any) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.published = append(p.published, eventType)
 	return nil
 }
 
-// fakeTools records executed steps and answers with canned results.
+// announced returns a copy of the announced event types.
+func (p *recordedPublisher) announced() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.published...)
+}
+
+// fakeTools records executed steps and answers with canned results. Steps run
+// from worker goroutines, so the call log is guarded.
 type fakeTools struct {
+	mu      sync.Mutex
 	results map[string]any
 	calls   []string
 	failFor map[string]bool
 }
 
+// executed returns a copy of the executed step names.
+func (t *fakeTools) executed() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]string(nil), t.calls...)
+}
+
 func (t *fakeTools) Execute(_ context.Context, name string, _ json.RawMessage) (any, error) {
+	t.mu.Lock()
 	t.calls = append(t.calls, name)
+	t.mu.Unlock()
 	if t.failFor[name] {
 		return nil, errors.New("шаг сломался")
 	}
@@ -397,8 +420,8 @@ func TestCreateStartsProposedAndWaitsForApproval(t *testing.T) {
 	if view.Automation.Status != domainautomation.StatusProposed {
 		t.Fatalf("status = %s, want proposed", view.Automation.Status)
 	}
-	if len(tools.calls) != 0 {
-		t.Fatalf("designing must not execute steps, got %v", tools.calls)
+	if len(tools.executed()) != 0 {
+		t.Fatalf("designing must not execute steps, got %v", tools.executed())
 	}
 
 	// An approved automation gets a schedule bookmark computed from now.
@@ -453,8 +476,8 @@ func TestTickRunsDueScheduleAndJournalsSteps(t *testing.T) {
 	if result.ScheduleRuns != 1 {
 		t.Fatalf("runs = %d, want 1", result.ScheduleRuns)
 	}
-	if len(tools.calls) != len(sampleSteps()) {
-		t.Fatalf("executed %v, want every step once", tools.calls)
+	if len(tools.executed()) != len(sampleSteps()) {
+		t.Fatalf("executed %v, want every step once", tools.executed())
 	}
 	runs, total, err := service.Runs(context.Background(), view.Automation.ID, 10, 0)
 	if err != nil || total != 1 {
@@ -645,8 +668,8 @@ func TestManualRunRequiresApproval(t *testing.T) {
 	if _, err := service.RunNow(context.Background(), view.Automation.ID); !errors.Is(err, appautomation.ErrNotExecutable) {
 		t.Fatalf("proposed automation must refuse a manual run, got %v", err)
 	}
-	if len(tools.calls) != 0 {
-		t.Fatalf("nothing must execute, got %v", tools.calls)
+	if len(tools.executed()) != 0 {
+		t.Fatalf("nothing must execute, got %v", tools.executed())
 	}
 }
 
@@ -737,8 +760,8 @@ func TestChainDepthRefusesSelfSustainedEvents(t *testing.T) {
 	if skipped.Status != domainautomation.RunSkipped || skipped.Error == "" {
 		t.Fatalf("refused run must be a skipped journal entry with a reason: %+v", skipped)
 	}
-	if len(tools.calls) != len(sampleSteps()) {
-		t.Fatalf("refused run executed steps: %v", tools.calls)
+	if len(tools.executed()) != len(sampleSteps()) {
+		t.Fatalf("refused run executed steps: %v", tools.executed())
 	}
 }
 

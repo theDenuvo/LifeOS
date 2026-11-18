@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -30,15 +31,18 @@ import (
 	"github.com/theDenuvo/LifeOS/internal/application/proactive"
 	"github.com/theDenuvo/LifeOS/internal/application/profile"
 	"github.com/theDenuvo/LifeOS/internal/application/recurrence"
+	appresearch "github.com/theDenuvo/LifeOS/internal/application/research"
 	"github.com/theDenuvo/LifeOS/internal/application/search"
 	"github.com/theDenuvo/LifeOS/internal/application/settings"
 	"github.com/theDenuvo/LifeOS/internal/application/summary"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	"github.com/theDenuvo/LifeOS/internal/config"
 	domainmemory "github.com/theDenuvo/LifeOS/internal/domain/memory"
+	domainresearch "github.com/theDenuvo/LifeOS/internal/domain/research"
 	"github.com/theDenuvo/LifeOS/internal/domain/task"
 	"github.com/theDenuvo/LifeOS/internal/events"
 	infradocuments "github.com/theDenuvo/LifeOS/internal/infrastructure/documents"
+	infraresearch "github.com/theDenuvo/LifeOS/internal/infrastructure/research"
 	"github.com/theDenuvo/LifeOS/internal/infrastructure/sqlite"
 	"github.com/theDenuvo/LifeOS/internal/transport/http"
 	"github.com/theDenuvo/LifeOS/internal/web/dist"
@@ -220,6 +224,30 @@ func main() {
 		appmemory.WithPublisher(broker),
 	)
 
+	// Roadmap stage 7: the researcher and the user's external sources. The web
+	// client is the only place that talks to the internet; the service decides
+	// what the pages are worth, and a result saved into the knowledge base
+	// keeps its citations and its certainty level. It is built before the
+	// proactive service so a watched topic that changed can become an insight.
+	researchClient := infraresearch.NewClient(infraresearch.Options{
+		SearchURL:        cfg.SearchURL,
+		SearchFormat:     cfg.SearchFormat,
+		Timeout:          time.Duration(cfg.ResearchTimeoutSeconds) * time.Second,
+		AllowLocalSearch: cfg.AllowLocalSearch,
+	})
+	// The delivery target is wired after the assistant exists; until then a
+	// finished run has only its report and the event stream, which is the
+	// honest fallback.
+	delivery := &researchDelivery{}
+	researchService := appresearch.NewService(
+		sqlite.NewResearchUnitOfWork(db),
+		clock,
+		appresearch.WithExternal(researchClient),
+		appresearch.WithKnowledge(researchKnowledge{service: memoryService}),
+		appresearch.WithPublisher(broker),
+		appresearch.WithNotifier(delivery),
+	)
+
 	// Roadmap stage 5: full proactivity. The detectors now cross-reference
 	// tasks with the calendar, goals with their deadlines and durable
 	// agreements with their own age, and the outreach engine decides when one
@@ -234,6 +262,7 @@ func main() {
 		proactive.WithDeadlineRisks(goalsService),
 		proactive.WithCalendar(eventService),
 		proactive.WithMemory(memoryAgreements{service: memoryService}),
+		proactive.WithResearch(researchChanges{service: researchService}),
 	)
 
 	// The dashboard shows the day's load and the ideas that are due to resurface.
@@ -324,6 +353,9 @@ func main() {
 		assistant.WithWorkingDirectory(workingDirectory()),
 	)
 	workspaceHub.Bind(assistantService)
+	// A research run started from a conversation answers in that conversation
+	// when it is done: the run outlives the turn that asked for it.
+	delivery.assistant = assistantService
 
 	// Roadmap stage 6: user automations. The registry doubles as the step
 	// executor, so it is built first; the automation tools attach right after
@@ -340,6 +372,11 @@ func main() {
 		automation.WithTimezone(cfg.Timezone),
 	)
 	tools.RegisterAutomationTools(registry, automationService)
+
+	// Roadmap stage 7: the research tools attach to the same registry once it
+	// exists. The service was built earlier, so the proactive detector already
+	// references it.
+	tools.RegisterResearchTools(registry, researchService)
 
 	// Roadmap stage 5: the initiative engine. It writes into the main chat on
 	// LifeOS's own behalf, so it is built after the assistant storage exists.
@@ -385,6 +422,7 @@ func main() {
 		Memory:      memoryService,
 		Goals:       goalsService,
 		Automations: automationService,
+		Research:    researchService,
 		Models:      modelCatalog,
 		Tools:       registry,
 		Broker:      broker,
@@ -419,6 +457,36 @@ func main() {
 	}
 	recoveryCancel()
 
+	// A research run started before the last restart has no owner: the report
+	// is marked failed with the reason, and an external call whose answer never
+	// arrived is marked unknown. Saying that LifeOS does not know is the only
+	// honest option, and it happens before the server accepts a single request
+	// — otherwise a report created on this start could be closed as interrupted
+	// while it is still running. The same rule the automations recovery above
+	// follows, and the same consequence: if the state cannot be proven, LifeOS
+	// does not start — old reports must not stay "running" for the whole life of
+	// the process just because one write failed.
+	var recovered appresearch.Recovery
+	var recoverErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		attemptCtx, attemptCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		recovered, recoverErr = researchService.RecoverInterrupted(attemptCtx)
+		attemptCancel()
+		if recoverErr == nil {
+			break
+		}
+		slog.Warn("research: closing interrupted work failed, retrying", "attempt", attempt, "error", recoverErr)
+		time.Sleep(250 * time.Millisecond)
+	}
+	if recoverErr != nil {
+		slog.Error("research: could not close interrupted work; refusing to start on an unproven run state", "error", recoverErr)
+		os.Exit(1)
+	}
+	if recovered.Reports > 0 || recovered.Calls > 0 {
+		slog.Info("research: closed work interrupted by the previous shutdown",
+			"reports", recovered.Reports, "calls", recovered.Calls)
+	}
+
 	go func() {
 		slog.Info("HTTP server listening", "addr", cfg.ListenAddr)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -435,6 +503,9 @@ func main() {
 	// here when their moment comes, so the browser shows them without polling.
 	go planning.NewDispatcher(planningService, broker, clock, 30*time.Second).Run(ctx)
 	go recurrence.NewWorker(recurrenceService, time.Minute).Run(ctx)
+	// Watched topics are re-checked on their own cadence; the runner only wakes
+	// up often enough to notice.
+	go appresearch.NewRunner(researchService, 15*time.Minute).Run(ctx)
 
 	// Goal progress is recorded synchronously when a completion commits. It
 	// does not depend on a live event subscriber, and the result is on disk
@@ -483,6 +554,20 @@ func main() {
 	case <-automationRunnerDone:
 	case <-time.After(35 * time.Second):
 		slog.Warn("Automation runner did not finish in time; continuing shutdown")
+	}
+
+	// Background research runs on its own context: it is given a moment to
+	// finish and record what it found, and is then stopped. Reports left over
+	// are closed by RecoverInterrupted on the next start, so a shutdown can
+	// never leave a report "в работе" for ever.
+	graceCtx, cancelGrace := context.WithTimeout(context.Background(), 8*time.Second)
+	waitErr := researchService.Wait(graceCtx)
+	cancelGrace()
+	if waitErr != nil {
+		researchService.Close()
+		lastCtx, cancelLast := context.WithTimeout(context.Background(), 3*time.Second)
+		_ = researchService.Wait(lastCtx)
+		cancelLast()
 	}
 }
 
@@ -536,6 +621,122 @@ func (a memoryAgreements) Agreements(ctx context.Context) ([]proactive.Agreement
 			ID:        entry.ID,
 			Content:   entry.Content,
 			UpdatedAt: entry.UpdatedAt,
+		})
+	}
+	return result, nil
+}
+
+// researchKnowledge writes a finished research result into the durable memory.
+//
+// The entry is knowledge, its provenance is the web, and its certainty is what
+// the evidence supported: a report whose claims were corroborated is a fact, a
+// single-source report is an assumption. The citations live in the report, and
+// the entry names the sites, so a later reader can check the claim.
+type researchKnowledge struct {
+	service *appmemory.Service
+}
+
+func (k researchKnowledge) SaveResearch(ctx context.Context, input appresearch.KnowledgeInput) (int64, error) {
+	certainty := domainmemory.Certainty(input.Certainty)
+	if !certainty.IsValid() {
+		certainty = domainmemory.CertaintyAssumption
+	}
+	source := domainmemory.Source{
+		Kind:       domainmemory.SourceWeb,
+		Label:      input.SourceLabel,
+		Excerpt:    input.SourceExcerpt,
+		ObservedAt: time.Now().UTC(),
+	}
+	create := appmemory.CreateInput{
+		Title:     input.Title,
+		Content:   input.Content,
+		Category:  domainmemory.CategoryResearch,
+		Certainty: certainty,
+		Source:    source,
+	}
+	if input.Confidence > 0 {
+		confidence := input.Confidence
+		create.Confidence = &confidence
+	}
+	result, err := k.service.Remember(ctx, appmemory.RememberInput{CreateInput: create})
+	if err != nil {
+		return 0, err
+	}
+	if result.Entry == nil {
+		return 0, appresearch.ErrKnowledgeNotSaved
+	}
+	return result.Entry.ID, nil
+}
+
+// researchChanges feeds the proactive insight about watched topics from the
+// research service: what changed is a report, not a notification.
+// researchDelivery posts a finished report to the conversation that asked for
+// the research: the answer of a background run cannot ride the response that
+// started it.
+type researchDelivery struct {
+	assistant *assistant.Service
+}
+
+func (d *researchDelivery) DeliverResearch(ctx context.Context, conversationID int64, report *domainresearch.Report) error {
+	if d.assistant == nil {
+		return nil
+	}
+	_, err := d.assistant.AppendMessage(ctx, conversationID, researchDeliveryText(report))
+	return err
+}
+
+// researchDeliveryText says in chat what the report concluded: the top
+// findings with their level of certainty, and where the full report lives.
+func researchDeliveryText(report *domainresearch.Report) string {
+	if report == nil {
+		return "Исследование завершено."
+	}
+	var out strings.Builder
+	if report.Status == domainresearch.ReportFailed {
+		fmt.Fprintf(&out, "Исследование «%s» не выполнено", report.Question)
+		if reason := strings.TrimSpace(report.Error); reason != "" {
+			fmt.Fprintf(&out, ": %s", reason)
+		}
+		out.WriteString(".")
+		return out.String()
+	}
+	fmt.Fprintf(&out, "Исследование «%s» готово. ", report.Question)
+	for i, finding := range report.Findings {
+		if i >= 3 {
+			fmt.Fprintf(&out, "И ещё %d вывод(ов) — в полном отчёте. ", len(report.Findings)-3)
+			break
+		}
+		level := "предположение"
+		if finding.Certainty == domainresearch.CertaintyFact {
+			level = "факт"
+		} else if finding.Certainty == domainresearch.CertaintyInference {
+			level = "вывод LifeOS"
+		}
+		fmt.Fprintf(&out, "%s (%s): %s ", level, finding.Statement, strings.Join(finding.Domains, ", "))
+	}
+	if report.KnowledgeEntryID != nil {
+		out.WriteString("Результат сохранён в базу знаний. ")
+	}
+	fmt.Fprintf(&out, "Полный отчёт — в разделе «Исследования», №%d.", report.ID)
+	return out.String()
+}
+
+type researchChanges struct {
+	service *appresearch.Service
+}
+
+func (r researchChanges) RecentChanges(ctx context.Context, since time.Time) ([]proactive.ResearchChange, error) {
+	changes, err := r.service.RecentChanges(ctx, since)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]proactive.ResearchChange, 0, len(changes))
+	for _, change := range changes {
+		result = append(result, proactive.ResearchChange{
+			WatchID:   change.WatchID,
+			Topic:     change.Topic,
+			Summary:   change.Summary,
+			ChangedAt: change.ChangedAt,
 		})
 	}
 	return result, nil

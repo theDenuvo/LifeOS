@@ -103,11 +103,15 @@ const (
 	SourceTask         SourceKind = "task"
 	SourceEvent        SourceKind = "event"
 	SourceSystem       SourceKind = "system"
+	// SourceWeb is a page LifeOS read on the internet. Roadmap stage 7: a fact
+	// learned from the web must be distinguishable from what the user said or
+	// what a document contained.
+	SourceWeb SourceKind = "web"
 )
 
 func (k SourceKind) IsValid() bool {
 	switch k {
-	case SourceUser, SourceAssistant, SourceConversation, SourceDocument, SourceTask, SourceEvent, SourceSystem:
+	case SourceUser, SourceAssistant, SourceConversation, SourceDocument, SourceTask, SourceEvent, SourceSystem, SourceWeb:
 		return true
 	default:
 		return false

@@ -1,0 +1,1497 @@
+// Package research owns the model of LifeOS research and its external
+// sources: a question asked of the web, the evidence collected for it, the
+// sources that evidence came from, and the standing watches that notice when
+// a topic changes.
+//
+// The product rule behind the model: a claim is only a fact when independent
+// sources agree on it. A single source is an assumption, and LifeOS's own
+// conclusion is an inference — the three never mix silently. Every statement
+// keeps the pages it came from, so a later reader can check the reasoning
+// instead of trusting it.
+package research
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"net/url"
+	"regexp"
+	"sort"
+	"strings"
+	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"golang.org/x/net/publicsuffix"
+)
+
+// Certainty separates what sources support from what LifeOS merely suspects.
+//
+// fact — at least two independent sites state the same thing;
+// assumption — one site states it, or the support is too weak to call it a fact;
+// inference — LifeOS derived it; no source says it in these words.
+type Certainty string
+
+const (
+	CertaintyFact       Certainty = "fact"
+	CertaintyAssumption Certainty = "assumption"
+	CertaintyInference  Certainty = "inference"
+)
+
+// IsValid reports whether the certainty level is known.
+func (c Certainty) IsValid() bool {
+	return c == CertaintyFact || c == CertaintyAssumption || c == CertaintyInference
+}
+
+// Trust is how much a source is worth when it is compared with others.
+type Trust string
+
+const (
+	TrustHigh   Trust = "high"
+	TrustNormal Trust = "normal"
+	TrustLow    Trust = "low"
+)
+
+// IsValid reports whether the trust level is known.
+func (t Trust) IsValid() bool {
+	return t == TrustHigh || t == TrustNormal || t == TrustLow
+}
+
+// Weight converts trust into a scoring factor.
+func (t Trust) Weight() float64 {
+	switch t {
+	case TrustHigh:
+		return 1
+	case TrustLow:
+		return 0.5
+	default:
+		return 0.8
+	}
+}
+
+// SourceKind is the way LifeOS talks to an external service.
+type SourceKind string
+
+const (
+	// KindWebSearch is a search endpoint (built-in provider, SearxNG, another
+	// instance) that answers a query with result pages.
+	KindWebSearch SourceKind = "web_search"
+	// KindHTTPAPI is a REST endpoint the user connected: LifeOS calls paths
+	// under it and reads the answer.
+	KindHTTPAPI SourceKind = "http_api"
+	// KindMCP is a tools-only MCP server; LifeOS lists its tools and calls
+	// them over Streamable HTTP.
+	KindMCP SourceKind = "mcp"
+	// KindScript is a command the user configured. It is read-only by
+	// construction: a script is the user's own instrument, and unattended
+	// writes belong to an approved plan, not to a research source.
+	KindScript SourceKind = "script"
+)
+
+// IsValid reports whether the kind is known.
+func (k SourceKind) IsValid() bool {
+	switch k {
+	case KindWebSearch, KindHTTPAPI, KindMCP, KindScript:
+		return true
+	default:
+		return false
+	}
+}
+
+// SupportsWrites reports whether the kind can send changes outward at all.
+func (k SourceKind) SupportsWrites() bool {
+	return k == KindHTTPAPI || k == KindMCP
+}
+
+// SearchFormat is how a search endpoint's answer is parsed.
+type SearchFormat string
+
+const (
+	// FormatSearxng reads the JSON answer of a SearxNG instance.
+	FormatSearxng SearchFormat = "searxng"
+	// FormatDuckDuckGo reads the HTML answer of the DuckDuckGo endpoint.
+	FormatDuckDuckGo SearchFormat = "duckduckgo"
+)
+
+// IsValid reports whether the format is known.
+func (f SearchFormat) IsValid() bool {
+	return f == FormatSearxng || f == FormatDuckDuckGo
+}
+
+// AccessMode is the permission the user granted to one external source.
+//
+// read — LifeOS may read and store what it learned locally;
+// write — LifeOS may also send changes to the service, each one confirmed;
+// sync — both directions: LifeOS keeps its own base and mirrors selected items.
+type AccessMode string
+
+const (
+	ModeRead  AccessMode = "read"
+	ModeWrite AccessMode = "write"
+	ModeSync  AccessMode = "sync"
+)
+
+// IsValid reports whether the mode is known.
+func (m AccessMode) IsValid() bool {
+	return m == ModeRead || m == ModeWrite || m == ModeSync
+}
+
+// AllowsWrite reports whether outbound changes are permitted.
+func (m AccessMode) AllowsWrite() bool { return m == ModeWrite || m == ModeSync }
+
+// AllowsRead reports whether reading is permitted. Every mode allows it: a
+// write permission without reading would make the connection useless.
+func (m AccessMode) AllowsRead() bool { return m.IsValid() }
+
+// Connection is one external source with the permission the user granted it.
+type Connection struct {
+	ID     int64
+	Name   string
+	Kind   SourceKind
+	Mode   AccessMode
+	Trust  Trust
+	Format SearchFormat
+	// Endpoint is the base URL for http_api and mcp, the query URL template
+	// for web_search (with a {query} placeholder) and the command line for
+	// script.
+	Endpoint string
+	Notes    string
+	Enabled  bool
+	// AllowedTools are the tools of an MCP server the user explicitly approved
+	// for use without a write: the server's own annotation is only a claim by
+	// that server, so the decision that a tool is safe to read with belongs to
+	// the user. A tool outside this list is a changing call and needs write
+	// permission.
+	AllowedTools []string
+	// CreatedByAssistant is true when the assistant registered the source.
+	// The user can still use it, but a script source must be authorised by
+	// the user themselves, so the assistant may not create one.
+	CreatedByAssistant bool
+	LastUsedAt         *time.Time
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+	Version            int
+}
+
+var (
+	ErrInvalidName     = errors.New("название источника обязательно и не длиннее 200 символов")
+	ErrInvalidKind     = errors.New("неизвестный тип источника")
+	ErrInvalidMode     = errors.New("неизвестный режим доступа")
+	ErrInvalidTrust    = errors.New("неизвестный уровень доверия")
+	ErrInvalidEndpoint = errors.New("адрес источника некорректен")
+	ErrInvalidFormat   = errors.New("неизвестный формат ответа поиска")
+	ErrInvalidTool     = errors.New("название инструмента источника некорректно")
+	ErrScriptNeedsUser = errors.New("источник-скрипт создаёт только пользователь: ассистент не подключает собственные команды")
+	ErrScriptReadOnly  = errors.New("источник-скрипт работает только на чтение")
+)
+
+// Validate checks the connection as a whole.
+func (c *Connection) Validate() error {
+	name := strings.TrimSpace(c.Name)
+	if name == "" || utf8.RuneCountInString(name) > 200 {
+		return ErrInvalidName
+	}
+	if !c.Kind.IsValid() {
+		return ErrInvalidKind
+	}
+	if !c.Mode.IsValid() {
+		return ErrInvalidMode
+	}
+	if c.Trust == "" {
+		c.Trust = TrustNormal
+	}
+	if !c.Trust.IsValid() {
+		return ErrInvalidTrust
+	}
+	endpoint := strings.TrimSpace(c.Endpoint)
+	if endpoint == "" {
+		return ErrInvalidEndpoint
+	}
+	if utf8.RuneCountInString(endpoint) > 2000 {
+		return ErrInvalidEndpoint
+	}
+	switch c.Kind {
+	case KindWebSearch:
+		if !c.Format.IsValid() {
+			return ErrInvalidFormat
+		}
+		if err := validateHTTPEndpoint(c.Format, endpoint); err != nil {
+			return err
+		}
+	case KindHTTPAPI, KindMCP:
+		parsed, err := url.Parse(endpoint)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return ErrInvalidEndpoint
+		}
+	case KindScript:
+		if strings.ContainsAny(endpoint, "\r\n") {
+			return ErrInvalidEndpoint
+		}
+		if c.Mode != ModeRead {
+			return ErrScriptReadOnly
+		}
+	}
+	if len(c.AllowedTools) > 50 {
+		return ErrInvalidTool
+	}
+	for _, tool := range c.AllowedTools {
+		name := strings.TrimSpace(tool)
+		if name == "" || name != tool || utf8.RuneCountInString(name) > 200 {
+			return ErrInvalidTool
+		}
+	}
+	if utf8.RuneCountInString(c.Notes) > 2000 {
+		return errors.New("описание источника длиннее 2000 символов")
+	}
+	return nil
+}
+
+// AllowsTool reports whether the user approved this tool of the source for use
+// without a write. It is the user's decision, not the server's.
+func (c *Connection) AllowsTool(name string) bool {
+	for _, tool := range c.AllowedTools {
+		if tool == name {
+			return true
+		}
+	}
+	return false
+}
+
+func validateHTTPEndpoint(format SearchFormat, endpoint string) error {
+	sample := strings.ReplaceAll(endpoint, "{query}", "test")
+	parsed, err := url.Parse(sample)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return ErrInvalidEndpoint
+	}
+	_ = format
+	return nil
+}
+
+// ReportStatus is the lifecycle of one research run.
+type ReportStatus string
+
+const (
+	ReportRunning   ReportStatus = "running"
+	ReportCompleted ReportStatus = "completed"
+	ReportFailed    ReportStatus = "failed"
+)
+
+// IsValid reports whether the status is known.
+func (s ReportStatus) IsValid() bool {
+	return s == ReportRunning || s == ReportCompleted || s == ReportFailed
+}
+
+// Terminal reports whether the report will not change any more.
+func (s ReportStatus) Terminal() bool { return s == ReportCompleted || s == ReportFailed }
+
+// Citation is one page that supports a statement.
+type Citation struct {
+	URL       string    `json:"url"`
+	Title     string    `json:"title,omitempty"`
+	Site      string    `json:"site,omitempty"`
+	Excerpt   string    `json:"excerpt,omitempty"`
+	FetchedAt time.Time `json:"fetched_at"`
+	Trust     Trust     `json:"trust"`
+	// Read tells whether LifeOS actually opened the page. A citation that was
+	// not read is a search snippet: a lead, not a source. Reading status and
+	// trust are separate properties — a low-trust source can still be read, and
+	// an unread page is unread no matter how respectable its site is.
+	Read bool `json:"read"`
+	// ReadUnknown marks a citation whose reading status LifeOS does not know:
+	// a report saved before the field existed. It is not the same as unread —
+	// saying the page was never opened would claim knowledge LifeOS does not
+	// have — and it never counts towards a fact.
+	ReadUnknown bool `json:"read_unknown,omitempty"`
+	// ConnectionID is the source the page came through; zero means the
+	// built-in web provider.
+	ConnectionID int64 `json:"connection_id,omitempty"`
+}
+
+// MarshalJSON keeps the reading status honest across formats: a citation whose
+// status is unknown says so, instead of claiming the page was unread.
+func (c Citation) MarshalJSON() ([]byte, error) {
+	type wire struct {
+		URL          string    `json:"url"`
+		Title        string    `json:"title,omitempty"`
+		Site         string    `json:"site,omitempty"`
+		Excerpt      string    `json:"excerpt,omitempty"`
+		FetchedAt    time.Time `json:"fetched_at"`
+		Trust        Trust     `json:"trust"`
+		Read         *bool     `json:"read,omitempty"`
+		ReadUnknown  bool      `json:"read_unknown,omitempty"`
+		ConnectionID int64     `json:"connection_id,omitempty"`
+	}
+	out := wire{
+		URL: c.URL, Title: c.Title, Site: c.Site, Excerpt: c.Excerpt,
+		FetchedAt: c.FetchedAt, Trust: c.Trust, ConnectionID: c.ConnectionID,
+	}
+	if c.ReadUnknown {
+		out.ReadUnknown = true
+	} else {
+		read := c.Read
+		out.Read = &read
+	}
+	return json.Marshal(out)
+}
+
+// UnmarshalJSON tells an unknown reading status from a known one: a report
+// saved before the field existed carries neither, and that is unknown.
+func (c *Citation) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		URL          string    `json:"url"`
+		Title        string    `json:"title"`
+		Site         string    `json:"site"`
+		Excerpt      string    `json:"excerpt"`
+		FetchedAt    time.Time `json:"fetched_at"`
+		Trust        Trust     `json:"trust"`
+		Read         *bool     `json:"read"`
+		ReadUnknown  bool      `json:"read_unknown"`
+		ConnectionID int64     `json:"connection_id"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*c = Citation{
+		URL: raw.URL, Title: raw.Title, Site: raw.Site, Excerpt: raw.Excerpt,
+		FetchedAt: raw.FetchedAt, Trust: raw.Trust,
+		Read: raw.Read != nil && *raw.Read, ReadUnknown: raw.ReadUnknown,
+		ConnectionID: raw.ConnectionID,
+	}
+	if raw.Read == nil && !raw.ReadUnknown {
+		// A citation saved before the field existed: the page may well have
+		// been read, and LifeOS no longer knows which.
+		c.ReadUnknown = true
+	}
+	return nil
+}
+
+// Validate checks that a citation can be shown and re-opened.
+func (c Citation) Validate() error {
+	if strings.TrimSpace(c.URL) == "" || utf8.RuneCountInString(c.URL) > 2000 {
+		return errors.New("у источника нет адреса")
+	}
+	parsed, err := url.Parse(c.URL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return fmt.Errorf("адрес источника %q некорректен", c.URL)
+	}
+	if utf8.RuneCountInString(c.Title) > 300 {
+		return errors.New("заголовок источника длиннее 300 символов")
+	}
+	if utf8.RuneCountInString(c.Excerpt) > 2000 {
+		return errors.New("фрагмент источника длиннее 2000 символов")
+	}
+	return nil
+}
+
+// Finding is one statement with the evidence behind it.
+type Finding struct {
+	Statement     string     `json:"statement"`
+	Certainty     Certainty  `json:"certainty"`
+	Confidence    float64    `json:"confidence"`
+	Corroboration int        `json:"corroboration"`
+	Domains       []string   `json:"domains"`
+	Citations     []Citation `json:"citations"`
+	// Conflict explains a disagreement with another source, when the evidence
+	// does not agree with itself. A disputed statement is never a fact.
+	Conflict string `json:"conflict,omitempty"`
+}
+
+// Validate checks the finding before it reaches storage.
+func (f *Finding) Validate() error {
+	statement := strings.TrimSpace(f.Statement)
+	if statement == "" || utf8.RuneCountInString(statement) > 1200 {
+		return errors.New("вывод должен быть непустым и не длиннее 1200 символов")
+	}
+	if !f.Certainty.IsValid() {
+		return errors.New("неизвестный уровень достоверности вывода")
+	}
+	if f.Confidence < 0 || f.Confidence > 1 {
+		return errors.New("уверенность должна быть от 0 до 1")
+	}
+	if len(f.Citations) == 0 {
+		return errors.New("вывод без источника не сохраняется")
+	}
+	for _, citation := range f.Citations {
+		if err := citation.Validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Report is one completed research run: the question, the evidence and the
+// knowledge entry the result was saved as.
+type Report struct {
+	ID       int64
+	Question string
+	Queries  []string
+	Status   ReportStatus
+	Summary  string
+	Findings []Finding
+	// Sources is the number of distinct pages that supported at least one
+	// finding; it is stored so the list does not have to recompute it.
+	Sources int
+	// KnowledgeEntryID is the memory entry the result was saved as, when the
+	// user (or the assistant on the user's behalf) asked to keep it.
+	KnowledgeEntryID *int64
+	Error            string
+	StartedAt        time.Time
+	FinishedAt       *time.Time
+	Version          int
+}
+
+// Validate checks report invariants.
+func (r *Report) Validate() error {
+	question := strings.TrimSpace(r.Question)
+	if question == "" || utf8.RuneCountInString(question) > 500 {
+		return errors.New("вопрос обязателен и не длиннее 500 символов")
+	}
+	if !r.Status.IsValid() {
+		return errors.New("неизвестный статус исследования")
+	}
+	if utf8.RuneCountInString(r.Summary) > 100000 {
+		return errors.New("итог исследования длиннее 100000 символов")
+	}
+	for i := range r.Findings {
+		if err := r.Findings[i].Validate(); err != nil {
+			return fmt.Errorf("вывод %d: %w", i+1, err)
+		}
+	}
+	return nil
+}
+
+// Cadence is how often a watch re-checks its topic.
+type Cadence string
+
+const (
+	CadenceDaily  Cadence = "daily"
+	CadenceWeekly Cadence = "weekly"
+	CadenceManual Cadence = "manual"
+)
+
+// IsValid reports whether the cadence is known.
+func (c Cadence) IsValid() bool {
+	return c == CadenceDaily || c == CadenceWeekly || c == CadenceManual
+}
+
+// Interval is the gap between two automatic checks. Manual watches have none.
+func (c Cadence) Interval() time.Duration {
+	switch c {
+	case CadenceDaily:
+		return 24 * time.Hour
+	case CadenceWeekly:
+		return 7 * 24 * time.Hour
+	default:
+		return 0
+	}
+}
+
+// Fingerprint is what a watch remembers about one page, so the next check can
+// tell a new page from an unchanged one and a rewritten page from both.
+type Fingerprint struct {
+	URL       string    `json:"url"`
+	Title     string    `json:"title,omitempty"`
+	Hash      string    `json:"hash"`
+	FirstSeen time.Time `json:"first_seen"`
+}
+
+// Watch is a standing question LifeOS re-asks on a cadence and reports on
+// when the answer changes.
+type Watch struct {
+	ID    int64
+	Topic string
+	Query string
+	// Queries are the search phrases the watch runs; the first is derived from
+	// the topic when the user does not give any.
+	Queries           []string
+	Cadence           Cadence
+	Enabled           bool
+	NextCheckAt       *time.Time
+	LastCheckedAt     *time.Time
+	LastChangeAt      *time.Time
+	LastChangeSummary string
+	Seen              []Fingerprint
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+	Version           int
+}
+
+// maxSeen bounds the fingerprints one watch keeps. Older pages fall out of the
+// baseline, so a page that disappears for long enough and returns is reported
+// as new — an honest trade for a bounded row.
+const maxSeen = 200
+
+// Validate checks watch invariants.
+func (w *Watch) Validate() error {
+	topic := strings.TrimSpace(w.Topic)
+	if topic == "" || utf8.RuneCountInString(topic) > 200 {
+		return errors.New("тема наблюдения обязательна и не длиннее 200 символов")
+	}
+	if utf8.RuneCountInString(w.Query) > 500 {
+		return errors.New("запрос наблюдения длиннее 500 символов")
+	}
+	if len(w.Queries) > 5 {
+		return errors.New("у наблюдения не больше пяти запросов")
+	}
+	for _, query := range w.Queries {
+		if strings.TrimSpace(query) == "" || utf8.RuneCountInString(query) > 500 {
+			return errors.New("запрос наблюдения должен быть непустым и не длиннее 500 символов")
+		}
+	}
+	if !w.Cadence.IsValid() {
+		return errors.New("неизвестная периодичность наблюдения")
+	}
+	return nil
+}
+
+// WatchDiff describes what changed since the last check of a watch.
+type WatchDiff struct {
+	// New lists pages the watch had not seen before.
+	New []Fingerprint
+	// Updated lists pages whose content hash changed.
+	Updated []Fingerprint
+	// Unchanged lists pages still present with the same content.
+	Unchanged int
+}
+
+// Changed reports whether the diff is worth telling the user about.
+func (d WatchDiff) Changed() bool { return len(d.New) > 0 || len(d.Updated) > 0 }
+
+// Summary renders the diff in one line.
+func (d WatchDiff) Summary() string {
+	if !d.Changed() {
+		return "Изменений нет"
+	}
+	parts := make([]string, 0, 2)
+	if len(d.New) > 0 {
+		parts = append(parts, fmt.Sprintf("новых источников: %d", len(d.New)))
+	}
+	if len(d.Updated) > 0 {
+		parts = append(parts, fmt.Sprintf("обновлено: %d", len(d.Updated)))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// Diff compares the fresh fingerprints with the watch's baseline and returns
+// the merged baseline together with what changed.
+//
+// Pages are matched by URL. A page whose hash changed counts as updated; the
+// merged baseline keeps the newest hash so the same change is not reported
+// twice. Pages missing from the fresh set keep their old fingerprint until the
+// baseline overflows: a temporarily unreachable page should not look new when
+// it returns.
+func (w *Watch) Diff(fresh []Fingerprint) (WatchDiff, []Fingerprint) {
+	known := make(map[string]Fingerprint, len(w.Seen))
+	for _, item := range w.Seen {
+		known[item.URL] = item
+	}
+	diff := WatchDiff{}
+	for _, item := range fresh {
+		previous, exists := known[item.URL]
+		switch {
+		case !exists:
+			diff.New = append(diff.New, item)
+		case previous.Hash != item.Hash:
+			diff.Updated = append(diff.Updated, item)
+		default:
+			diff.Unchanged++
+			// Keep the original arrival time: the page has not changed.
+			item.FirstSeen = previous.FirstSeen
+		}
+		known[item.URL] = item
+	}
+	// Order the baseline newest-first so the bound drops the oldest pages.
+	merged := make([]Fingerprint, 0, len(known))
+	for _, item := range known {
+		merged = append(merged, item)
+	}
+	sort.SliceStable(merged, func(i, j int) bool {
+		if merged[i].FirstSeen.Equal(merged[j].FirstSeen) {
+			return merged[i].URL < merged[j].URL
+		}
+		return merged[i].FirstSeen.After(merged[j].FirstSeen)
+	})
+	if len(merged) > maxSeen {
+		merged = merged[:maxSeen]
+	}
+	return diff, merged
+}
+
+// NextCheck computes the next automatic check after `now`. Manual watches have
+// no next check.
+func (w *Watch) NextCheck(now time.Time) *time.Time {
+	if !w.Enabled {
+		return nil
+	}
+	interval := w.Cadence.Interval()
+	if interval == 0 {
+		return nil
+	}
+	next := now.Add(interval)
+	return &next
+}
+
+// Candidate is one statement extracted from one page, before the evidence is
+// compared.
+type Candidate struct {
+	Statement string
+	Citation  Citation
+}
+
+// Comparison thresholds. They are deliberately conservative: two pages are
+// treated as saying the same thing only when their statements share most of
+// their significant words *and* attach the same values to them.
+const (
+	agreeThreshold       = 0.45
+	sameSiteThreshold    = 0.8
+	conflictThreshold    = 0.5
+	minSharedForAgree    = 2
+	minSharedForConflict = 2
+	// maxSubstitutionNoise is how many extra content words may differ while the
+	// statements are still read as one claim with a swapped value ("founded by
+	// X" against "founded by Y"). With more differences they are simply two
+	// different claims, and calling them a disagreement would be noise.
+	maxSubstitutionNoise = 3
+	// maxSubstitutionRun bounds how many words on each side may stand in for
+	// each other in one substituted slot: "founded by sam altman" against
+	// "founded by elon musk" is a substitution, while two statements that
+	// disagree in half their words are simply different claims.
+	maxSubstitutionRun = 5
+)
+
+// claim is one statement prepared for comparison: its significant words, the
+// same words in the order they were said, and the values it names. All matter,
+// because two statements can be worded almost identically and still say
+// opposite things — and because a swapped value leaves the wording untouched.
+type claim struct {
+	statement string
+	tokens    []string
+	ordered   []string
+	entities  []string
+}
+
+func newClaim(statement string) claim {
+	return claim{
+		statement: strings.TrimSpace(statement),
+		tokens:    Tokens(statement),
+		ordered:   orderedWords(statement),
+		entities:  Entities(statement),
+	}
+}
+
+// orderedWords returns the significant words in the order they were said. A
+// sorted bag of words can measure how much two statements share, but not where
+// they differ, and "where" is what tells a swapped value from an extra detail.
+func orderedWords(text string) []string {
+	words := rawWords(text)
+	kept := make([]string, 0, len(words))
+	for _, word := range words {
+		if len([]rune(word)) < 3 || stopwords[word] {
+			continue
+		}
+		kept = append(kept, word)
+	}
+	return kept
+}
+
+// sameClaim reports whether two statements say the same thing. They must agree
+// on their significant words (up to the given overlap threshold), must not
+// contradict each other by negation, and must not name different values:
+// "OpenAI was founded by Sam Altman" and "OpenAI was founded by Elon Musk"
+// share most of their words, and merging them would invent a fact that
+// neither source states.
+func (c claim) sameClaim(other claim, threshold float64) bool {
+	if len(c.tokens) == 0 || len(other.tokens) == 0 {
+		return false
+	}
+	shared := sharedTokens(c.tokens, other.tokens)
+	if len(shared) < minSharedForAgree {
+		return false
+	}
+	if overlap(c.tokens, other.tokens) < threshold {
+		return false
+	}
+	if negationDiffers(c.statement, other.statement, shared) {
+		return false
+	}
+	mine, theirs := c.uniqueEntities(other)
+	if len(mine) > 0 && len(theirs) > 0 {
+		return false
+	}
+	return !c.valueSubstitution(other)
+}
+
+// contradicts reports whether two statements about the same subject disagree.
+// A negation of a shared term, or a different value in the same place, is a
+// disagreement: it is never merged and never counted as a fact.
+func (c claim) contradicts(other claim) bool {
+	shared := sharedTokens(c.tokens, other.tokens)
+	if len(shared) < minSharedForConflict {
+		return false
+	}
+	if overlap(c.tokens, other.tokens) < conflictThreshold {
+		return false
+	}
+	if negationDiffers(c.statement, other.statement, shared) {
+		return true
+	}
+	if c.valueSubstitution(other) {
+		return true
+	}
+	mine, theirs := c.uniqueEntities(other)
+	if len(mine) == 0 || len(theirs) == 0 {
+		// One statement simply names more than the other.
+		return false
+	}
+	return len(c.uniqueWords(other)) <= maxSubstitutionNoise &&
+		len(other.uniqueWords(c)) <= maxSubstitutionNoise
+}
+
+// valueSubstitution reports whether the two statements fill one slot with
+// different values. Names are not always capitalised — forum posts, transcripts
+// and machine-generated pages write "sam altman" and "elon musk" in lower case,
+// where no capitalisation heuristic can see them — so the shape of the sentence
+// decides instead: one statement turns into the other by adding or dropping
+// words, never by putting two different words in the same place. Where two
+// different words do face each other, the wording is the same and the values
+// are the whole point.
+//
+// "In Go 1.24 the language adds…" against "The release adds generic type
+// aliases to the language…" agrees on this test: its differences are scattered
+// one-sided extras, not a pair standing in each other's way.
+func (c claim) valueSubstitution(other claim) bool {
+	if alignSequences(c.ordered, other.ordered) {
+		return false
+	}
+	mine := unmatchedWords(c.tokens, other.tokens)
+	theirs := unmatchedWords(other.tokens, c.tokens)
+	if len(mine) == 0 || len(theirs) == 0 {
+		return false
+	}
+	return len(mine) <= maxSubstitutionRun && len(theirs) <= maxSubstitutionRun
+}
+
+// gapSide is which statement has been dropping words at the current point of
+// the alignment. Both may not drop at once: that is the substituted slot.
+type gapSide int
+
+const (
+	gapNone gapSide = iota
+	gapLeft
+	gapRight
+)
+
+// alignSequences reports whether one statement turns into the other by adding
+// or dropping words alone. Between two matching words only one side may have a
+// run of its own; a run on both sides means two different words stood in the
+// same place — the substituted slot.
+//
+// What counts as a match carries the whole weight here, so words match as one
+// value only when they are one word (see sameValueWord). A near-miss anchor
+// like "founded"~"founder" would let the alignment drop "said" and "company"
+// on both sides around it and read "…founded by sam altman said…" and
+// "…founded by elon musk said…" as one statement.
+func alignSequences(a, b []string) bool {
+	type state struct {
+		i, j int
+		side gapSide
+	}
+	memo := make(map[state]bool, len(a)*len(b)*3)
+	done := make(map[state]bool, len(a)*len(b)*3)
+	var walk func(i, j int, side gapSide) bool
+	walk = func(i, j int, side gapSide) bool {
+		if i == len(a) && j == len(b) {
+			return true
+		}
+		key := state{i, j, side}
+		if done[key] {
+			return memo[key]
+		}
+		done[key] = true
+		result := false
+		switch {
+		case i < len(a) && side != gapRight && walk(i+1, j, gapLeft):
+			result = true
+		case j < len(b) && side != gapLeft && walk(i, j+1, gapRight):
+			result = true
+		case i < len(a) && j < len(b) && sameValueWord(a[i], b[j]) && walk(i+1, j+1, gapNone):
+			result = true
+		}
+		memo[key] = result
+		return result
+	}
+	return walk(0, 0, gapNone)
+}
+
+// unmatchedWords returns the words of a that b does not contain in any form,
+// pairing off word forms so only genuine differences remain.
+func unmatchedWords(a, b []string) []string {
+	used := make([]bool, len(b))
+	missing := make([]string, 0, len(a))
+	for _, word := range a {
+		matched := false
+		for i, candidate := range b {
+			if used[i] || !sameValueWord(word, candidate) {
+				continue
+			}
+			used[i] = true
+			matched = true
+			break
+		}
+		if !matched {
+			missing = append(missing, word)
+		}
+	}
+	return missing
+}
+
+// The short endings one word may drop and still be the same word. The
+// inflections of Latin and Cyrillic never mix: a Russian case ending on an
+// English word is not a word form — "Anna" is not "Ann" with a dropped vowel,
+// and "Maya" is not "May" — so each script only drops its own endings, and
+// Latin drops no bare vowel at all. "er" is deliberately absent from both — it
+// makes new words ("found" / "founder"), not forms of one word.
+var latinWordEndings = []string{
+	"ing", "es", "ed", "s",
+}
+
+var cyrillicWordEndings = []string{
+	"ами", "ями", "ов", "ев", "ам", "ям", "ах", "ях", "ой", "ей", "ом", "ем",
+	"а", "я", "ы", "и", "е", "о", "у", "ю",
+}
+
+// stemOf drops at most one short ending, the only change a word form makes, so
+// "supports"/"supported" reduce to one word ("support") and «сэм»/«сэма» do
+// too, while "John"/"Johnson", "Anna"/"Ann" and "Maya"/"May" do not: a shared
+// prefix is not a word form, a dropped vowel of another language is not
+// either, and a name that differs from another name is still another name.
+func stemOf(word string) string {
+	runes := []rune(word)
+	endings := latinWordEndings
+	for _, r := range runes {
+		if unicode.Is(unicode.Cyrillic, r) {
+			endings = cyrillicWordEndings
+			break
+		}
+	}
+	for _, ending := range endings {
+		suffix := []rune(ending)
+		if len(runes) <= len(suffix) {
+			continue
+		}
+		if string(runes[len(runes)-len(suffix):]) != ending {
+			continue
+		}
+		stem := runes[:len(runes)-len(suffix)]
+		if len(stem) < 3 {
+			return word
+		}
+		return string(stem)
+	}
+	return word
+}
+
+// sameValueWord reports whether two unmatched words are still one value: the
+// same word, two spellings of one number, or two forms of one word. Values
+// match exactly or as word forms — never on a shared prefix, because "founded"
+// and "founder" share one and say different things, and a substituted name
+// must not hide behind its neighbour's spelling.
+func sameValueWord(a, b string) bool {
+	if isNumericToken(a) || isNumericToken(b) {
+		return isNumericToken(a) && isNumericToken(b) && normalizeNumber(a) == normalizeNumber(b)
+	}
+	if a == b {
+		return true
+	}
+	return stemOf(a) == stemOf(b)
+}
+
+// uniqueEntities returns the values each statement names that the other does
+// not, so a caller can tell a substitution from an extra detail.
+func (c claim) uniqueEntities(other claim) (mine, theirs []string) {
+	return missingEntities(c.entities, other.entities), missingEntities(other.entities, c.entities)
+}
+
+// uniqueWords returns the non-entity words of c that other does not contain.
+func (c claim) uniqueWords(other claim) []string {
+	index := make(map[string]struct{}, len(other.tokens))
+	for _, token := range other.tokens {
+		index[token] = struct{}{}
+	}
+	result := make([]string, 0, len(c.tokens))
+	for _, token := range c.tokens {
+		if isNumericToken(token) || matchesAny(token, index) {
+			continue
+		}
+		result = append(result, token)
+	}
+	return result
+}
+
+// missingEntities returns the values of a that b does not name.
+func missingEntities(a, b []string) []string {
+	missing := make([]string, 0, len(a))
+	for _, item := range a {
+		if !containsEntity(b, item) {
+			missing = append(missing, item)
+		}
+	}
+	return missing
+}
+
+// containsEntity reports whether the set names the value. Values match exactly
+// or in word forms of one word («сэм»/«сэма»), never by a shared prefix:
+// "John" is not "Johnson". Numbers and other values containing a digit must
+// match exactly, because "2015" and "2016" are different years and not two
+// spellings of one value.
+func containsEntity(set []string, value string) bool {
+	for _, item := range set {
+		if sameValueWord(item, value) {
+			return true
+		}
+	}
+	return false
+}
+
+// BuildFindings merges the candidates into findings, decides which statements
+// independent sources corroborate, and names the disagreements.
+//
+// One statement per page survives: the extraction already picked the passage
+// that answers the question, so merging keeps the reading list short. Two
+// candidates collapse into one finding only when they say the same thing; the
+// finding keeps every citation, so the count of sources stays truthful.
+func BuildFindings(candidates []Candidate) []Finding {
+	type group struct {
+		finding Finding
+		claim   claim
+		sites   map[string]bool
+	}
+	groups := make([]*group, 0, len(candidates))
+	for _, candidate := range candidates {
+		statement := strings.TrimSpace(candidate.Statement)
+		if statement == "" {
+			continue
+		}
+		view := newClaim(statement)
+		site := siteOf(candidate.Citation)
+		merged := false
+		for _, existing := range groups {
+			// A page that repeats its own claim is not a second source, and
+			// two different claims of one page are not one claim: two pages of
+			// the same site merge only when they say the same thing almost
+			// word for word, while different claims stay separate.
+			threshold := agreeThreshold
+			if existing.sites[site] {
+				threshold = sameSiteThreshold
+			}
+			if !view.sameClaim(existing.claim, threshold) {
+				continue
+			}
+			existing.finding.Citations = append(existing.finding.Citations, candidate.Citation)
+			existing.sites[site] = true
+			merged = true
+			break
+		}
+		if merged {
+			continue
+		}
+		groups = append(groups, &group{
+			finding: Finding{
+				Statement: statement,
+				Citations: []Citation{candidate.Citation},
+			},
+			claim: view,
+			sites: map[string]bool{site: true},
+		})
+	}
+
+	findings := make([]Finding, 0, len(groups))
+	for _, item := range groups {
+		// Two pages under one publisher are not independent confirmations:
+		// independence is counted per registrable site, not per hostname.
+		sites := map[string]struct{}{}
+		readSites := map[string]struct{}{}
+		for _, citation := range item.finding.Citations {
+			domain := RegistrableSite(siteOf(citation))
+			sites[domain] = struct{}{}
+			if citation.Read {
+				readSites[domain] = struct{}{}
+			}
+		}
+		domains := make([]string, 0, len(sites))
+		for site := range sites {
+			domains = append(domains, site)
+		}
+		sort.Strings(domains)
+		item.finding.Domains = domains
+		// Corroboration counts the independent sites that support the
+		// statement; one site is not a confirmation of itself.
+		item.finding.Corroboration = len(domains)
+
+		conflict := ""
+		for _, other := range groups {
+			if other == item {
+				continue
+			}
+			if item.claim.contradicts(other.claim) {
+				conflict = describeConflict(item.finding, other.finding)
+				break
+			}
+		}
+		item.finding.Conflict = conflict
+
+		switch {
+		case conflict != "":
+			// Disagreeing evidence is never a fact, however many pages agree
+			// with one of the versions.
+			item.finding.Certainty = CertaintyAssumption
+		case item.finding.Corroboration >= 2 && len(readSites) >= 1:
+			// A search snippet is a lead, not a source: two snippets that agree
+			// are still two leads, so a fact needs at least one opened page.
+			item.finding.Certainty = CertaintyFact
+		default:
+			item.finding.Certainty = CertaintyAssumption
+		}
+		item.finding.Confidence = confidence(item.finding)
+		findings = append(findings, item.finding)
+	}
+
+	sort.SliceStable(findings, func(i, j int) bool {
+		if findings[i].Certainty != findings[j].Certainty {
+			return findings[i].Certainty == CertaintyFact
+		}
+		if findings[i].Confidence != findings[j].Confidence {
+			return findings[i].Confidence > findings[j].Confidence
+		}
+		return findings[i].Statement < findings[j].Statement
+	})
+	return findings
+}
+
+// confidence scores a finding in [0.05, 0.95]: independent sources raise it,
+// an unread source, a named disagreement and a doubtful source lower it.
+func confidence(finding Finding) float64 {
+	value := 0.4
+	if finding.Corroboration >= 2 {
+		value += 0.25
+		value += 0.05 * float64(finding.Corroboration-2)
+	}
+	weight := 0.0
+	read := 0
+	for _, citation := range finding.Citations {
+		weight += citation.Trust.Weight()
+		if citation.Read {
+			read++
+		}
+	}
+	if len(finding.Citations) > 0 {
+		value += (weight/float64(len(finding.Citations)) - 0.8) * 0.15
+	}
+	if read == 0 && len(finding.Citations) > 0 {
+		value -= 0.1
+	}
+	if finding.Conflict != "" {
+		value -= 0.15
+	}
+	if value < 0.05 {
+		return 0.05
+	}
+	if value > 0.95 {
+		return 0.95
+	}
+	return value
+}
+
+// negationDiffers reports whether one statement negates a shared term and the
+// other does not.
+func negationDiffers(a, b string, shared []string) bool {
+	aNegated := negatedTerms(a, shared)
+	bNegated := negatedTerms(b, shared)
+	for term := range aNegated {
+		if _, ok := bNegated[term]; !ok {
+			return true
+		}
+	}
+	for term := range bNegated {
+		if _, ok := aNegated[term]; !ok {
+			return true
+		}
+	}
+	return false
+}
+
+var negationWords = map[string]bool{
+	"не": true, "нет": true, "никогда": true, "нельзя": true, "без": true,
+	"not": true, "no": true, "never": true, "without": true, "none": true,
+}
+
+// negatedTerms returns the shared terms that a negation word modifies in text.
+// Up to two words may sit between the negation and the term ("не поддерживает
+// полностью"), which is how Russian and English negate a noun phrase.
+func negatedTerms(text string, shared []string) map[string]bool {
+	words := rawWords(text)
+	wanted := make(map[string]bool, len(shared))
+	for _, term := range shared {
+		wanted[term] = true
+	}
+	found := map[string]bool{}
+	for i, word := range words {
+		if !negationWords[word] {
+			continue
+		}
+		for offset := 1; offset <= 2 && i+offset < len(words); offset++ {
+			candidate := words[i+offset]
+			if !wanted[candidate] {
+				// Inflected forms still count, so the term list and the raw
+				// words are matched by stem.
+				matched := false
+				for term := range wanted {
+					if SameWord(term, candidate) {
+						matched = true
+						break
+					}
+				}
+				if !matched {
+					continue
+				}
+			}
+			found[candidate] = true
+		}
+	}
+	return found
+}
+
+// describeConflict names the disagreement in user language.
+func describeConflict(finding, other Finding) string {
+	site := "другой источник"
+	if len(other.Citations) > 0 {
+		site = siteOf(other.Citations[0])
+	}
+	return fmt.Sprintf("Источники расходятся: %s утверждает иначе — «%s».",
+		site, truncateRunes(other.Statement, 240))
+}
+
+// Tokens splits text into significant lowercase words: short words and a small
+// stopword list are dropped, so agreement is measured on what the statement is
+// actually about.
+func Tokens(text string) []string {
+	words := rawWords(text)
+	seen := map[string]bool{}
+	tokens := make([]string, 0, len(words))
+	for _, word := range words {
+		if len([]rune(word)) < 3 || stopwords[word] {
+			continue
+		}
+		if seen[word] {
+			continue
+		}
+		seen[word] = true
+		tokens = append(tokens, word)
+	}
+	sort.Strings(tokens)
+	return tokens
+}
+
+// rawWords lowercases text and splits it on anything that is not a letter or a
+// digit.
+func rawWords(text string) []string {
+	return strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+}
+
+// entityWord matches a word or a number in the original text, keeping its case:
+// the case is what tells a name from a common noun.
+var entityWord = regexp.MustCompile(`[\p{L}\p{N}][\p{L}\p{N}'’._\-]*`)
+
+// Entities returns the values a statement names: capitalised words (people,
+// organisations, products, places), acronyms and numbers. They are what a
+// substitution changes, so two statements that name different people, dates or
+// amounts are not the same claim however similar the rest of the wording is.
+//
+// A statement that merely starts with a capital letter contributes nothing on
+// that account: sentence-initial function words are dropped, and every other
+// capitalised word is kept, because a missing name is worse than an extra one.
+func Entities(text string) []string {
+	matches := entityWord.FindAllString(text, -1)
+	seen := map[string]bool{}
+	entities := make([]string, 0, len(matches))
+	for _, word := range matches {
+		value, ok := entityOf(word)
+		if !ok || seen[value] {
+			continue
+		}
+		seen[value] = true
+		entities = append(entities, value)
+	}
+	sort.Strings(entities)
+	return entities
+}
+
+// entityOf normalizes one word into an entity value, or reports that the word
+// is not one.
+func entityOf(word string) (string, bool) {
+	trimmed := strings.Trim(word, ".,;:!?()[]{}«»\"'’_-—")
+	if trimmed == "" {
+		return "", false
+	}
+	if isNumericToken(trimmed) {
+		return normalizeNumber(trimmed), true
+	}
+	first, _ := utf8.DecodeRuneInString(trimmed)
+	if !unicode.IsUpper(first) {
+		return "", false
+	}
+	lower := strings.ToLower(trimmed)
+	if len([]rune(trimmed)) < 2 || functionWords[lower] {
+		return "", false
+	}
+	return lower, true
+}
+
+// isNumericToken reports whether a token carries a number. Numbers are compared
+// by value and never by stem: "2015" and "20150" are not the same year.
+func isNumericToken(token string) bool {
+	for _, r := range token {
+		if unicode.IsDigit(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeNumber compares numbers by value: "100,000" and "100000" are one
+// amount, "3,50" and "3.5" are one amount, and "2.0" is two. Thousands
+// separators are dropped first, so a comma cannot turn an amount into a decimal
+// fraction; a trailing fraction of zeros then goes, so two spellings of the
+// same value match.
+func normalizeNumber(value string) string {
+	cleaned := strings.ReplaceAll(strings.TrimSpace(value), " ", "")
+	for _, separator := range []string{",", "."} {
+		parts := strings.Split(cleaned, separator)
+		if len(parts) > 1 && allThousandsGroups(parts[1:]) {
+			cleaned = strings.Join(parts, "")
+		}
+	}
+	cleaned = strings.ReplaceAll(cleaned, ",", ".")
+	if strings.Contains(cleaned, ".") {
+		cleaned = strings.TrimRight(cleaned, "0")
+		cleaned = strings.TrimRight(cleaned, ".")
+	}
+	return strings.ToLower(cleaned)
+}
+
+// allThousandsGroups reports whether every group is exactly three digits, which
+// is what makes a separator a thousands separator rather than a decimal point.
+func allThousandsGroups(groups []string) bool {
+	for _, group := range groups {
+		if len(group) != 3 {
+			return false
+		}
+		for _, r := range group {
+			if !unicode.IsDigit(r) {
+				return false
+			}
+		}
+	}
+	return len(groups) > 0
+}
+
+// functionWords are the capitalised words that say nothing about the subject:
+// articles, pronouns and sentence openers. They appear at the start of a
+// sentence by the rules of the language, not because they name something.
+var functionWords = map[string]bool{
+	"a": true, "an": true, "the": true, "this": true, "that": true,
+	"these": true, "those": true, "it": true, "its": true, "they": true,
+	"their": true, "there": true, "then": true, "than": true, "and": true,
+	"but": true, "or": true, "if": true, "in": true, "on": true, "at": true,
+	"by": true, "for": true, "from": true, "with": true, "as": true,
+	"of": true, "to": true, "when": true, "while": true, "however": true,
+	"according": true, "both": true, "each": true, "such": true, "some": true,
+	"most": true, "many": true, "more": true, "also": true, "here": true,
+	"и": true, "в": true, "во": true, "на": true, "с": true, "со": true,
+	"по": true, "для": true, "но": true, "а": true, "о": true, "об": true,
+	"это": true, "этот": true, "эта": true, "эти": true, "то": true,
+	"он": true, "она": true, "они": true, "оно": true, "его": true,
+	"её": true, "их": true, "как": true, "так": true, "также": true,
+	"если": true, "или": true, "при": true, "над": true, "под": true,
+	"про": true, "что": true, "чтобы": true, "когда": true, "однако": true,
+	"согласно": true, "кроме": true, "более": true, "менее": true,
+}
+
+var stopwords = map[string]bool{
+	"это": true, "этот": true, "эта": true, "эти": true, "для": true,
+	"что": true, "чтобы": true, "как": true, "так": true, "также": true,
+	"или": true, "при": true, "над": true, "под": true, "про": true,
+	"все": true, "всё": true, "весь": true, "был": true, "была": true,
+	"были": true, "быть": true, "есть": true, "его": true, "она": true,
+	"они": true, "оно": true, "который": true, "которая": true, "которые": true,
+	"может": true, "можно": true, "нужно": true, "более": true, "менее": true,
+	"только": true, "уже": true, "ещё": true, "еще": true, "чем": true,
+	"the": true, "and": true, "for": true, "with": true, "that": true,
+	"this": true, "from": true, "are": true, "was": true, "were": true,
+	"have": true, "has": true, "had": true, "you": true, "your": true,
+	"but": true, "not": true, "can": true, "will": true, "would": true,
+	"there": true, "their": true, "about": true, "which": true, "when": true,
+	"what": true, "how": true, "who": true, "whom": true, "its": true,
+}
+
+// SameWord reports whether two tokens are the same significant word. Word
+// forms differ by inflection — «задач» and «задачи», «release» and «releases» —
+// so the shorter token must be a prefix of the longer one and at least four
+// letters long. Exact equality always matches.
+func SameWord(a, b string) bool {
+	if a == b {
+		return true
+	}
+	short, long := a, b
+	if len([]rune(short)) > len([]rune(long)) {
+		short, long = long, short
+	}
+	if len([]rune(short)) < 4 {
+		return false
+	}
+	return strings.HasPrefix(long, short)
+}
+
+// matchesAny reports whether the token appears in the set, allowing inflected
+// forms.
+func matchesAny(token string, set map[string]struct{}) bool {
+	if _, ok := set[token]; ok {
+		return true
+	}
+	for item := range set {
+		if SameWord(item, token) {
+			return true
+		}
+	}
+	return false
+}
+
+// overlap returns the share of the smaller token set that the other set also
+// contains. Statements of different length are still comparable this way.
+func overlap(a, b []string) float64 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	shared := 0
+	for _, item := range a {
+		if matchesAny(item, index(b)) {
+			shared++
+		}
+	}
+	smallest := len(a)
+	if len(b) < smallest {
+		smallest = len(b)
+	}
+	return float64(shared) / float64(smallest)
+}
+
+func index(tokens []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(tokens))
+	for _, item := range tokens {
+		set[item] = struct{}{}
+	}
+	return set
+}
+
+func sharedTokens(a, b []string) []string {
+	set := index(a)
+	shared := make([]string, 0, len(b))
+	for _, item := range b {
+		if matchesAny(item, set) {
+			shared = append(shared, item)
+		}
+	}
+	return shared
+}
+
+// siteOf is the site a citation belongs to: its host without a leading www.
+func siteOf(citation Citation) string {
+	if citation.Site != "" {
+		return strings.ToLower(citation.Site)
+	}
+	parsed, err := url.Parse(citation.URL)
+	if err != nil || parsed.Host == "" {
+		return "unknown"
+	}
+	return normalizeHost(parsed.Host)
+}
+
+// Host returns the normalized site of a URL, for grouping results.
+func Host(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	return normalizeHost(parsed.Host)
+}
+
+func normalizeHost(host string) string {
+	host = strings.ToLower(host)
+	host = strings.TrimPrefix(host, "www.")
+	if index := strings.Index(host, ":"); index > 0 {
+		host = host[:index]
+	}
+	return host
+}
+
+// RegistrableSite reduces a host to the site that owns it: the registrable
+// domain, so blog.example.com and docs.example.com count as one site. Two pages
+// under one publisher are not an independent confirmation, and counting
+// hostnames would let a single publisher corroborate itself.
+func RegistrableSite(host string) string {
+	host = normalizeHost(host)
+	if host == "" {
+		return ""
+	}
+	if net.ParseIP(host) != nil {
+		// An address has no registrable domain; it is its own site.
+		return host
+	}
+	if domain, err := publicsuffix.EffectiveTLDPlusOne(host); err == nil {
+		return domain
+	}
+	return host
+}
+
+// CanonicalURL normalizes a result URL so the same page found by two queries
+// is only fetched once: the fragment goes, the trailing slash goes, tracking
+// parameters go.
+//
+// Only the scheme and the host are lowercased. Paths and query values are
+// case-sensitive on many sites, and lowercasing them would turn a working
+// address into a broken one.
+func CanonicalURL(rawURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	parsed.Host = strings.ToLower(parsed.Host)
+	parsed.Fragment = ""
+	query := parsed.Query()
+	for key := range query {
+		lower := strings.ToLower(key)
+		if strings.HasPrefix(lower, "utm_") || lower == "gclid" || lower == "fbclid" ||
+			lower == "ref" || lower == "yclid" || lower == "mc_cid" || lower == "mc_eid" {
+			query.Del(key)
+		}
+	}
+	parsed.RawQuery = query.Encode()
+	path := strings.TrimRight(parsed.Path, "/")
+	if path == "" {
+		path = "/"
+	}
+	parsed.Path = path
+	return parsed.String()
+}
+
+func truncateRunes(value string, limit int) string {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit]) + "…"
+}

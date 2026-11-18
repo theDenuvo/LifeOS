@@ -351,6 +351,7 @@ func (s *Service) SendMessageWithInteraction(ctx context.Context, conversationID
 // runTool executes a read-only tool, a direct reversible mutation or records a
 // pending action for a confirmation-gated change.
 func (s *Service) runTool(ctx context.Context, conversationID, messageID int64, call ToolCall, now time.Time) (string, *domainassistant.PendingAction, []domainassistant.Attachment, error) {
+	ctx = WithToolConversation(ctx, conversationID)
 	if s.tools.IsReadOnly(call.Name) || s.tools.IsDirect(call.Name) {
 		result, err := s.tools.Execute(ctx, call.Name, call.Arguments)
 		if err != nil {
@@ -463,6 +464,40 @@ func documentAttachments(refs []DocumentRef) []domainassistant.Attachment {
 		result = append(result, domainassistant.Attachment{Kind: domainassistant.AttachmentDocument, Data: data})
 	}
 	return result
+}
+
+// toolConversationKey carries the conversation into a tool call.
+type toolConversationKey struct{}
+
+// WithToolConversation tells a tool which conversation asked for the work, so
+// a tool whose work outlives the turn knows where the answer belongs.
+func WithToolConversation(ctx context.Context, conversationID int64) context.Context {
+	return context.WithValue(ctx, toolConversationKey{}, conversationID)
+}
+
+// ToolConversation returns the conversation that ran the tool, if any.
+func ToolConversation(ctx context.Context) (int64, bool) {
+	id, ok := ctx.Value(toolConversationKey{}).(int64)
+	return id, ok && id != 0
+}
+
+// AppendMessage posts one assistant message without running the model. It is
+// how work started in a conversation answers there when it is done: a research
+// run finishes minutes after the turn that asked for it, and the result belongs
+// in the chat, not only in a view the user has to go and find.
+func (s *Service) AppendMessage(ctx context.Context, conversationID int64, content string) (*domainassistant.Message, error) {
+	now := s.clock.Now().UTC()
+	message, err := s.persistAssistantMessage(ctx, conversationID, truncateRunes(content, 4000), nil, nil, "", now)
+	if err != nil {
+		return nil, err
+	}
+	s.publish("assistant.message", map[string]any{
+		"conversation_id": conversationID,
+		"message_id":      message.ID,
+		"role":            string(message.Role),
+		"content":         message.Content,
+	})
+	return message, nil
 }
 
 // persistAssistantMessage stores one assistant message and touches the conversation.

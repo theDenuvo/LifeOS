@@ -26,6 +26,7 @@ import (
 	"github.com/theDenuvo/LifeOS/internal/application/proactive"
 	"github.com/theDenuvo/LifeOS/internal/application/profile"
 	"github.com/theDenuvo/LifeOS/internal/application/recurrence"
+	appresearch "github.com/theDenuvo/LifeOS/internal/application/research"
 	"github.com/theDenuvo/LifeOS/internal/application/search"
 	"github.com/theDenuvo/LifeOS/internal/application/settings"
 	"github.com/theDenuvo/LifeOS/internal/application/summary"
@@ -55,6 +56,7 @@ type Services struct {
 	Memory      *appmemory.Service
 	Goals       *goals.Service
 	Automations *automation.Service
+	Research    *appresearch.Service
 	Models      *agent.ModelCatalog
 	Tools       *tools.Registry
 	Broker      *events.Broker
@@ -196,6 +198,21 @@ func (h *Handler) apiRoutes() http.Handler {
 	mux.HandleFunc("POST /automations/{id}/run", h.runAutomationNow)
 	mux.HandleFunc("GET /automations/{id}/runs", h.listAutomationRuns)
 	mux.HandleFunc("GET /automations/{id}/runs/{runId}", h.getAutomationRun)
+	mux.HandleFunc("GET /research/reports", h.listResearchReports)
+	mux.HandleFunc("POST /research/reports", h.runResearch)
+	mux.HandleFunc("GET /research/reports/{id}", h.getResearchReport)
+	mux.HandleFunc("DELETE /research/reports/{id}", h.deleteResearchReport)
+	mux.HandleFunc("GET /research/sources", h.listResearchSources)
+	mux.HandleFunc("POST /research/sources", h.createResearchSource)
+	mux.HandleFunc("PATCH /research/sources/{id}", h.patchResearchSource)
+	mux.HandleFunc("DELETE /research/sources/{id}", h.deleteResearchSource)
+	mux.HandleFunc("POST /research/sources/{id}/call", h.callResearchSource)
+	mux.HandleFunc("GET /research/sources/{id}/calls", h.listResearchCalls)
+	mux.HandleFunc("GET /research/watches", h.listResearchWatches)
+	mux.HandleFunc("POST /research/watches", h.createResearchWatch)
+	mux.HandleFunc("PATCH /research/watches/{id}", h.patchResearchWatch)
+	mux.HandleFunc("DELETE /research/watches/{id}", h.deleteResearchWatch)
+	mux.HandleFunc("POST /research/watches/{id}/check", h.checkResearchWatch)
 	mux.HandleFunc("GET /settings", h.listSettings)
 	mux.HandleFunc("GET /settings/{key}", h.getSetting)
 	mux.HandleFunc("PUT /settings/{key}", h.putSetting)

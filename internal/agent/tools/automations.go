@@ -42,6 +42,9 @@ func (c automationToolCheck) AllowedForAutomation(name string) (bool, string) {
 	if infrastructureTools[name] {
 		return false, "изменения на машине выполняются только по отдельному согласованному плану"
 	}
+	if researchPermissionTools[name] {
+		return false, "доступ к внешним источникам согласует пользователь, а не расписание"
+	}
 	if !c.registry.Has(name) {
 		return false, "инструмент не зарегистрирован"
 	}

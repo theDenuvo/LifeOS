@@ -36,6 +36,9 @@ type fakeTools struct {
 	executed []string
 	previews map[string]string
 	result   any
+	// conversations records which conversation each tool call came from: a
+	// tool whose work outlives the turn answers there.
+	conversations []int64
 }
 
 func (f *fakeTools) Specs() []assistant.ToolSpec {
@@ -46,7 +49,9 @@ func (f *fakeTools) IsReadOnly(name string) bool { return f.readOnly[name] }
 
 func (f *fakeTools) IsDirect(name string) bool { return false }
 
-func (f *fakeTools) Execute(_ context.Context, name string, _ json.RawMessage) (any, error) {
+func (f *fakeTools) Execute(ctx context.Context, name string, _ json.RawMessage) (any, error) {
+	conversation, _ := assistant.ToolConversation(ctx)
+	f.conversations = append(f.conversations, conversation)
 	f.executed = append(f.executed, name)
 	if f.result != nil {
 		return f.result, nil
@@ -215,6 +220,11 @@ func TestSendMessageExecutesReadTools(t *testing.T) {
 	}
 	if len(tools.executed) != 1 || tools.executed[0] != "list_tasks" {
 		t.Errorf("executed = %v", tools.executed)
+	}
+	// The tool knows which conversation asked: that is where an asynchronous
+	// tool sends its answer when the work is done.
+	if len(tools.conversations) != 1 || tools.conversations[0] != result.ConversationID {
+		t.Errorf("tool conversations = %v, want %d", tools.conversations, result.ConversationID)
 	}
 	if len(provider.last) < 2 || provider.last[0].Role != "system" {
 		t.Errorf("provider did not receive a system prompt: %v", provider.last)

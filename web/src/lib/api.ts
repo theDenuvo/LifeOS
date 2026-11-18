@@ -1318,3 +1318,271 @@ export function listAutomationRuns(id: number, query: { limit?: number; offset?:
 		`/api/v1/automations/${id}/runs${suffix ? `?${suffix}` : ''}`
 	);
 }
+
+// ─── Исследования и внешние источники ──────────────────────────────────────
+
+export type ResearchCertainty = 'fact' | 'assumption' | 'inference';
+export type ResearchStatus = 'running' | 'completed' | 'failed';
+export type ResearchSourceKind = 'web_search' | 'http_api' | 'mcp' | 'script';
+export type ResearchAccessMode = 'read' | 'write' | 'sync';
+export type ResearchTrust = 'high' | 'normal' | 'low';
+export type ResearchSearchFormat = 'searxng' | 'duckduckgo';
+export type ResearchCadence = 'daily' | 'weekly' | 'manual';
+// started — a changing call is on its way, unknown — LifeOS was restarted
+// while it was in flight and the result was never confirmed.
+export type ResearchCallOutcome = 'started' | 'ok' | 'refused' | 'failed' | 'unknown';
+
+export interface ResearchCitation {
+	url: string;
+	title?: string;
+	site?: string;
+	excerpt?: string;
+	trust: ResearchTrust;
+	// read is false when only a search snippet was available: the page exists
+	// as a lead, not as a source LifeOS opened.
+	read: boolean;
+	// read_unknown marks a report saved before reading status existed: the
+	// page may have been read and LifeOS no longer knows. It is not "unread".
+	read_unknown?: boolean;
+}
+
+export interface ResearchFinding {
+	statement: string;
+	certainty: ResearchCertainty;
+	confidence: number;
+	corroboration: number;
+	domains: string[];
+	citations: ResearchCitation[];
+	conflict?: string;
+}
+
+export interface ResearchReport {
+	id: number;
+	question: string;
+	queries: string[];
+	status: ResearchStatus;
+	summary: string;
+	findings: ResearchFinding[];
+	sources: number;
+	knowledge_entry_id?: number | null;
+	error?: string;
+	started_at: string;
+	finished_at?: string | null;
+	version: number;
+}
+
+export interface ResearchReportList {
+	data: ResearchReport[];
+	meta: { limit: number; offset: number; total: number };
+}
+
+export interface ResearchRunInput {
+	question: string;
+	queries?: string[];
+	max_pages?: number;
+	save_knowledge?: boolean;
+	knowledge_title?: string;
+	source_id?: number;
+}
+
+export interface ResearchSource {
+	id: number;
+	name: string;
+	kind: ResearchSourceKind;
+	mode: ResearchAccessMode;
+	trust: ResearchTrust;
+	format?: ResearchSearchFormat | '';
+	endpoint: string;
+	notes: string;
+	enabled: boolean;
+	// allowed_tools are the tools of an MCP source the user approved for use
+	// without a write. Only the user edits this list.
+	allowed_tools: string[];
+	last_used_at?: string | null;
+	created_at: string;
+	updated_at: string;
+	version: number;
+}
+
+export interface ResearchSourceInput {
+	name: string;
+	kind: ResearchSourceKind;
+	endpoint: string;
+	mode?: ResearchAccessMode;
+	trust?: ResearchTrust;
+	format?: ResearchSearchFormat;
+	notes?: string;
+	enabled?: boolean;
+	allowed_tools?: string[];
+}
+
+export interface ResearchSourceUpdate {
+	name?: string;
+	notes?: string;
+	trust?: ResearchTrust;
+	mode?: ResearchAccessMode;
+	endpoint?: string;
+	format?: ResearchSearchFormat | '';
+	enabled?: boolean;
+	allowed_tools?: string[];
+	expected_version: number;
+}
+
+export interface ResearchCall {
+	id: number;
+	connection_id: number;
+	name: string;
+	kind: ResearchSourceKind;
+	mode: ResearchAccessMode;
+	method: string;
+	operation: string;
+	outcome: ResearchCallOutcome;
+	detail?: string;
+	duration_ms: number;
+	created_at: string;
+}
+
+export interface ResearchFingerprint {
+	url: string;
+	title?: string;
+}
+
+export interface ResearchWatch {
+	id: number;
+	topic: string;
+	query: string;
+	queries: string[];
+	cadence: ResearchCadence;
+	enabled: boolean;
+	next_check_at?: string | null;
+	last_checked_at?: string | null;
+	last_change_at?: string | null;
+	last_change_summary: string;
+	version: number;
+}
+
+export interface ResearchWatchCheck {
+	watch: ResearchWatch;
+	change?: {
+		summary: string;
+		new: ResearchFingerprint[];
+		updated: ResearchFingerprint[];
+		unchanged: number;
+	};
+	error?: string;
+}
+
+export function listResearchReports(
+	query: { q?: string; limit?: number; offset?: number } = {}
+): Promise<ResearchReportList> {
+	const params = new URLSearchParams();
+	if (query.q) params.set('q', query.q);
+	if (query.limit !== undefined) params.set('limit', String(query.limit));
+	if (query.offset !== undefined) params.set('offset', String(query.offset));
+	const suffix = params.toString();
+	return request<ResearchReportList>(`/api/v1/research/reports${suffix ? `?${suffix}` : ''}`);
+}
+
+export function runResearch(input: ResearchRunInput): Promise<ResearchReport> {
+	return request<ResearchReport>('/api/v1/research/reports', {
+		method: 'POST',
+		body: JSON.stringify(input)
+	});
+}
+
+export function getResearchReport(id: number): Promise<ResearchReport> {
+	return request<ResearchReport>(`/api/v1/research/reports/${id}`);
+}
+
+export function deleteResearchReport(id: number): Promise<void> {
+	return request<void>(`/api/v1/research/reports/${id}`, { method: 'DELETE' });
+}
+
+export function listResearchSources(
+	query: { kind?: ResearchSourceKind; enabled?: boolean } = {}
+): Promise<{ data: ResearchSource[]; meta: { total: number } }> {
+	const params = new URLSearchParams();
+	if (query.kind) params.set('kind', query.kind);
+	if (query.enabled !== undefined) params.set('enabled', String(query.enabled));
+	const suffix = params.toString();
+	return request<{ data: ResearchSource[]; meta: { total: number } }>(
+		`/api/v1/research/sources${suffix ? `?${suffix}` : ''}`
+	);
+}
+
+export function createResearchSource(input: ResearchSourceInput): Promise<ResearchSource> {
+	return request<ResearchSource>('/api/v1/research/sources', {
+		method: 'POST',
+		body: JSON.stringify(input)
+	});
+}
+
+export function updateResearchSource(id: number, input: ResearchSourceUpdate): Promise<ResearchSource> {
+	return request<ResearchSource>(`/api/v1/research/sources/${id}`, {
+		method: 'PATCH',
+		body: JSON.stringify(input)
+	});
+}
+
+export function deleteResearchSource(id: number): Promise<void> {
+	return request<void>(`/api/v1/research/sources/${id}`, { method: 'DELETE' });
+}
+
+export function callResearchSource(
+	id: number,
+	input: { operation?: string; method?: string; body?: string; query?: string; write?: boolean }
+): Promise<{ status: number; content_type: string; body: string; duration_ms: number }> {
+	return request<{ status: number; content_type: string; body: string; duration_ms: number }>(
+		`/api/v1/research/sources/${id}/call`,
+		{ method: 'POST', body: JSON.stringify(input) }
+	);
+}
+
+export function listResearchCalls(id: number, limit = 20): Promise<{ data: ResearchCall[]; meta: { total: number } }> {
+	return request<{ data: ResearchCall[]; meta: { total: number } }>(
+		`/api/v1/research/sources/${id}/calls?limit=${limit}`
+	);
+}
+
+export function listResearchWatches(includeDisabled = false): Promise<{ data: ResearchWatch[]; meta: { total: number } }> {
+	return request<{ data: ResearchWatch[]; meta: { total: number } }>(
+		`/api/v1/research/watches${includeDisabled ? '?include_disabled=true' : ''}`
+	);
+}
+
+export function createResearchWatch(input: {
+	topic: string;
+	query: string;
+	queries?: string[];
+	cadence?: ResearchCadence;
+	enabled?: boolean;
+}): Promise<ResearchWatch> {
+	return request<ResearchWatch>('/api/v1/research/watches', {
+		method: 'POST',
+		body: JSON.stringify(input)
+	});
+}
+
+export function updateResearchWatch(
+	id: number,
+	input: {
+		topic?: string;
+		query?: string;
+		cadence?: ResearchCadence;
+		enabled?: boolean;
+		expected_version: number;
+	}
+): Promise<ResearchWatch> {
+	return request<ResearchWatch>(`/api/v1/research/watches/${id}`, {
+		method: 'PATCH',
+		body: JSON.stringify(input)
+	});
+}
+
+export function deleteResearchWatch(id: number): Promise<void> {
+	return request<void>(`/api/v1/research/watches/${id}`, { method: 'DELETE' });
+}
+
+export function checkResearchWatch(id: number): Promise<ResearchWatchCheck> {
+	return request<ResearchWatchCheck>(`/api/v1/research/watches/${id}/check`, { method: 'POST' });
+}

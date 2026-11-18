@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	appassistant "github.com/theDenuvo/LifeOS/internal/application/assistant"
 	appresearch "github.com/theDenuvo/LifeOS/internal/application/research"
 	domainresearch "github.com/theDenuvo/LifeOS/internal/domain/research"
 )
@@ -114,7 +115,7 @@ func RegisterResearchTools(registry *Registry, service *researchService) {
 
 	registry.Register(Tool{
 		Spec: assistantSpec("research_topic",
-			"Провести исследование: найти источники, прочитать их, сопоставить и показать выводы с ссылками и уровнем достоверности. Вывод считается фактом только если его подтверждают минимум два независимых сайта; расхождения источников показываются отдельно. Результат сохраняется в базу знаний с указанием источников.",
+			"Провести исследование: найти источники, прочитать их, сопоставить и показать выводы с ссылками и уровнем достоверности. Вывод считается фактом только если его подтверждают минимум два независимых сайта; расхождения источников показываются отдельно. Результат сохраняется в базу знаний с указанием источников. Исследование выполняется в фоне: ответом придёт подтверждение, а готовый результат — сообщением в этот же диалог.",
 			objectSchema(map[string]any{
 				"question":        stringProp("Вопрос, на который нужен ответ"),
 				"queries":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Поисковые запросы (до 3); без них используется сам вопрос"},
@@ -142,25 +143,43 @@ func RegisterResearchTools(registry *Registry, service *researchService) {
 			if args.SaveKnowledge != nil {
 				save = *args.SaveKnowledge
 			}
-			report, err := service.Research(ctx, appresearch.ResearchInput{
+			input := appresearch.ResearchInput{
 				Question:       args.Question,
 				Queries:        args.Queries,
 				MaxPages:       args.MaxPages,
 				SaveKnowledge:  save,
 				KnowledgeTitle: args.KnowledgeTitle,
 				ConnectionID:   args.SourceID,
-			})
-			if report != nil && err != nil {
-				// The report exists with the failure recorded; the assistant
-				// still sees what happened instead of losing it.
-				view := researchReportView(report)
-				view["error"] = err.Error()
-				return view, nil
+				ConversationID: conversationID(ctx),
 			}
+			if input.ConversationID == 0 {
+				// Nobody is waiting in a chat — an automation captures the
+				// tool result itself, and its run is not bound by the HTTP
+				// write timeout, so the answer comes back in one piece.
+				report, err := service.Research(ctx, input)
+				if report != nil && err != nil {
+					// The report exists with the failure recorded; the caller
+					// still sees what happened instead of losing it.
+					view := researchReportView(report)
+					view["error"] = err.Error()
+					return view, nil
+				}
+				if err != nil {
+					return nil, researchToolError(err)
+				}
+				return researchReportView(report), nil
+			}
+			// In a conversation the run must outlive the turn that asked for
+			// it: reading up to eight pages takes longer than an HTTP answer
+			// may last. The report arrives in the conversation as a message
+			// when it is done and stays readable in the research view.
+			report, err := service.StartResearch(ctx, input)
 			if err != nil {
 				return nil, researchToolError(err)
 			}
-			return researchReportView(report), nil
+			view := researchReportView(report)
+			view["status_detail"] = "Исследование выполняется в фоне. Готовый результат придёт в этот диалог сообщением и сохранится в разделе «Исследования»; отчёт можно открыть по номеру."
+			return view, nil
 		},
 		Preview: func(raw json.RawMessage) (string, error) {
 			var args struct {
@@ -679,6 +698,13 @@ func registerWatchTools(registry *Registry, service *researchService) {
 // readPageLimit bounds how much page text reaches the model in one answer; a
 // longer page is still readable through several calls.
 const readPageLimit = 12000
+
+// conversationID reads the conversation the tool was called from, if any: the
+// result of the background run is delivered there.
+func conversationID(ctx context.Context) int64 {
+	id, _ := appassistant.ToolConversation(ctx)
+	return id
+}
 
 func researchReportView(report *domainresearch.Report) map[string]any {
 	if report == nil {

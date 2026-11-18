@@ -397,6 +397,9 @@ type fakeWeb struct {
 	callBody  string
 	// callErr is what Call returns, for the refusals the adapter decides on.
 	callErr error
+	// beforeCall runs while the call is still in flight: it is how a test
+	// observes the journal mid-call.
+	beforeCall func()
 	// cancelOnSearch cancels the run while the evidence is being gathered,
 	// which is what a closed HTTP connection does.
 	cancelOnSearch context.CancelFunc
@@ -455,6 +458,9 @@ func (w *fakeWeb) Fetch(_ context.Context, rawURL string) (appresearch.Page, err
 }
 
 func (w *fakeWeb) Call(_ context.Context, _ *domainresearch.Connection, request appresearch.CallRequest) (appresearch.CallResult, error) {
+	if w.beforeCall != nil {
+		w.beforeCall()
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.calls = append(w.calls, request)
@@ -1274,6 +1280,51 @@ func TestSummaryStatesThatOneSourceIsNotAFact(t *testing.T) {
 
 // ─── разрешения, журнал и восстановление ───────────────────────────────────
 
+// The journal promises to record every interaction with a connected source —
+// not only the changing ones — and a promise to record cannot be kept by
+// writing afterwards: a crash would lose the call entirely. A read is entered
+// before it leaves and closed with its outcome; a changed row count of one per
+// call proves both halves happened.
+func TestEveryCallIsJournalledBeforeItLeaves(t *testing.T) {
+	repo := newMemoryRepository()
+	web := newFakeWeb()
+	service, _, _ := newService(repo, web, nil)
+	source, err := service.CreateConnection(context.Background(), &domainresearch.Connection{
+		Name: "API", Kind: domainresearch.KindHTTPAPI, Mode: domainresearch.ModeRead,
+		Endpoint: "https://api.example.com", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	var seenMidFlight []appresearch.CallRecord
+	web.beforeCall = func() {
+		// The answer has not arrived yet; the journal already has the call.
+		records, _, err := service.ListCalls(context.Background(), source.ID, 10)
+		if err != nil || len(records) != 1 {
+			t.Errorf("mid-flight journal: %d records, %v", len(records), err)
+			return
+		}
+		seenMidFlight = append(seenMidFlight, *records[0])
+	}
+
+	if _, err := service.CallSource(context.Background(), source.ID, appresearch.CallRequest{Operation: "/status", Method: "GET"}); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(seenMidFlight) != 1 || seenMidFlight[0].Outcome != appresearch.CallStarted {
+		t.Fatalf("the read must be journalled before it leaves, got %+v", seenMidFlight)
+	}
+
+	records, _, err := service.ListCalls(context.Background(), source.ID, 10)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	// The started row is closed, not duplicated.
+	if len(records) != 1 || records[0].Outcome != appresearch.CallOK {
+		t.Fatalf("one call is one closed journal entry, got %+v", records)
+	}
+}
+
 // A source in read mode must refuse a changing call before it reaches the
 // network, and the refusal itself belongs in the journal.
 func TestReadOnlyRefusalFromTheAdapterIsJournalledAsARefusal(t *testing.T) {
@@ -1516,5 +1567,74 @@ func TestStartResearchKeepsRunningInTheBackground(t *testing.T) {
 	announced := strings.Join(broker.announced(), ",")
 	if !strings.Contains(announced, "research.started") || !strings.Contains(announced, "research.completed") {
 		t.Fatalf("events = %q", announced)
+	}
+}
+
+// fakeNotifier records where a finished report was delivered.
+type fakeNotifier struct {
+	mu           sync.Mutex
+	conversation int64
+	reports      []*domainresearch.Report
+}
+
+func (f *fakeNotifier) DeliverResearch(_ context.Context, conversationID int64, report *domainresearch.Report) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.conversation = conversationID
+	f.reports = append(f.reports, report)
+	return nil
+}
+
+// A run that outlives its request answers where the question was asked: the
+// conversation gets the result as a message, not only a report in a view the
+// user has to go and find. A run nobody is waiting for delivers nothing.
+func TestBackgroundResearchDeliversTheResultToTheConversation(t *testing.T) {
+	repo := newMemoryRepository()
+	web := newFakeWeb()
+	clock := newClock()
+	notifier := &fakeNotifier{}
+	service := appresearch.NewService(memoryUnitOfWork{repo: repo}, clock,
+		appresearch.WithExternal(web), appresearch.WithNotifier(notifier))
+	web.results["golang language"] = []appresearch.SearchResult{{Title: "Go", URL: "https://go.dev/doc"}}
+	web.pages["https://go.dev/doc"] = page("https://go.dev/doc", "Go",
+		"Go is a statically typed, compiled programming language designed at Google for building reliable software.")
+
+	started, err := service.StartResearch(context.Background(), appresearch.ResearchInput{
+		Question: "Что такое язык Go?", Queries: []string{"golang language"}, ConversationID: 42,
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := service.Wait(waitCtx); err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	notifier.mu.Lock()
+	defer notifier.mu.Unlock()
+	if notifier.conversation != 42 {
+		t.Fatalf("the result must reach the asking conversation, got %d", notifier.conversation)
+	}
+	if len(notifier.reports) != 1 || notifier.reports[0].ID != started.ID {
+		t.Fatalf("delivered = %+v", notifier.reports)
+	}
+
+	// Without a conversation nobody is waiting: nothing is delivered.
+	notifier.conversation = 0
+	notifier.reports = nil
+	if _, err := service.StartResearch(context.Background(), appresearch.ResearchInput{
+		Question: "Ещё вопрос?", Queries: []string{"golang language"},
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	notifier.mu.Unlock()
+	waitCtx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel2()
+	if err := service.Wait(waitCtx2); err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	notifier.mu.Lock()
+	if len(notifier.reports) != 0 {
+		t.Fatalf("a run without a conversation delivers nothing, got %+v", notifier.reports)
 	}
 }

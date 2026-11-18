@@ -1121,18 +1121,22 @@ LifeOS. Расхождение источников не скрывается: �
 `normal`, `low` (насколько сайту доверяет пользователь); `read` — открыла ли
 LifeOS страницу. Доверие и прочтение — разные свойства: источник с низким
 доверием бывает прочитан, а выдержка с уважаемого сайта — не прочитана.
-`knowledge_entry_id` появляется, когда результат сохранён в базу знаний.
+`read_unknown: true` — цитата из отчёта, сохранённого до появления поля:
+страница могла быть прочитана, и LifeOS этого больше не знает. Это не `read:
+false`: «неизвестно» не утверждает, что страницу не открывали, и в факт такой
+источник не идёт. `knowledge_entry_id` появляется, когда результат сохранён в
+базу знаний.
 
 #### Endpoints
 
 ```
 GET    /api/v1/research/reports?q=&limit=20&offset=0
-POST   /api/v1/research/reports                 # {"question","queries","max_pages","save_knowledge","knowledge_title","source_id"} → 201
+POST   /api/v1/research/reports                 # {"question","queries","max_pages","save_knowledge","knowledge_title","source_id"} → 202
 GET    /api/v1/research/reports/{id}
 DELETE /api/v1/research/reports/{id}            # запись в базе знаний остаётся
 GET    /api/v1/research/sources?kind=&enabled=
-POST   /api/v1/research/sources                 # {"name","kind","endpoint","mode","trust","format","notes","enabled"}
-PATCH  /api/v1/research/sources/{id}            # name/notes/trust/mode/endpoint/format/enabled + expected_version
+POST   /api/v1/research/sources                 # {"name","kind","endpoint","mode","trust","format","notes","enabled","allowed_tools"}
+PATCH  /api/v1/research/sources/{id}            # name/notes/trust/mode/endpoint/format/enabled/allowed_tools + expected_version
 DELETE /api/v1/research/sources/{id}
 POST   /api/v1/research/sources/{id}/call       # {"operation","method","body","query","write"}
 GET    /api/v1/research/sources/{id}/calls?limit=20
@@ -1209,17 +1213,22 @@ POST   /api/v1/research/watches/{id}/check      # {"watch": {...}, "change": {"s
   `sync` — двусторонняя работа. Изменяющий вызов (`write: true` или метод не
   `GET`/`HEAD` для API) к источнику `read` отклоняется с `403`, и отказ попадает
   в журнал.
-- Для MCP операция — это имя инструмента, а не HTTP-метод: сервер сам говорит,
-  что инструмент только читает (`annotations.readOnlyHint`). Без `write: true`
-  вызывается только инструмент с этой пометкой; инструмент без аннотации
-  считается изменяющим, неизвестный инструмент отклоняется. Поэтому
-  `write: true` для MCP — это заявленное намерение изменить что-то вовне, а не
-  способ обойти проверку.
-- Изменяющий вызов журналируется **до** отправки: строка появляется со
-  `outcome: "started"` и закрывается результатом (`ok`, `refused`, `failed`).
-  Если журнал записать нельзя, вызов не выполняется (`503`). Если LifeOS
-  перезапустили во время вызова, строка становится `outcome: "unknown"` —
-  внешний сервис мог принять изменение, и LifeOS об этом честно говорит.
+- Для MCP операция — это имя инструмента, а не HTTP-метод, и без `write: true`
+  инструмент выполняется только при двух условиях сразу: пользователь включил
+  его в `allowed_tools` источника **и** сервер пометил его `readOnlyHint: true`.
+  Пометка — это заявление самого сервера, а не гарантия: сервер, назвавший
+  изменяющий инструмент читающим, ничего не решает без записи в вашем списке.
+  Список заполняет только пользователь; ассистент его не создает и не меняет.
+  Инструмент вне списка, без пометки или неизвестный серверу отклоняется, и
+  отказ попадает в журнал. `write: true` для MCP — заявленное намерение
+  изменить что-то вовне: оно идёт через режим `write`/`sync` и подтверждение.
+- Журналируется **каждое** обращение, а не только изменяющее: строка
+  появляется до отправки со `outcome: "started"` и закрывается результатом
+  (`ok`, `refused`, `failed`). Если журнал записать нельзя, изменяющий вызов не
+  выполняется (`503`), а чтение идёт с предупреждением в логе — оно ничего не
+  меняет. Если LifeOS перезапустили во время вызова, строка становится
+  `outcome: "unknown"` — внешний сервис мог принять запрос, и LifeOS об этом
+  честно говорит.
 - Журнал хранит `method` отдельно от `operation`: по нему видно, чтением был
   вызов или удалением. Поиск через подключённый источник тоже попадает в
   журнал и обновляет `last_used_at`.

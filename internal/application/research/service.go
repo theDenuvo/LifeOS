@@ -49,9 +49,10 @@ type Service struct {
 	// takes longer than an HTTP write timeout, and a closed connection must not
 	// leave a report stuck in "running". The ledger below waits for those runs
 	// on shutdown.
-	jobs    sync.WaitGroup
-	baseCtx context.Context
-	cancel  context.CancelFunc
+	jobs     sync.WaitGroup
+	baseCtx  context.Context
+	cancel   context.CancelFunc
+	notifier Notifier
 }
 
 // Option customises the service.
@@ -74,6 +75,12 @@ func WithPublisher(publisher events.Publisher) Option {
 }
 
 // NewService builds the research service.
+// WithNotifier delivers finished reports back to the conversation that asked
+// for them.
+func WithNotifier(notifier Notifier) Option {
+	return func(s *Service) { s.notifier = notifier }
+}
+
 func NewService(uow UnitOfWork, clock Clock, opts ...Option) *Service {
 	if clock == nil {
 		clock = systemClock{}
@@ -140,11 +147,28 @@ func (s *Service) StartResearch(ctx context.Context, input ResearchInput) (*doma
 		// must not abort the research or strand the report.
 		jobCtx, cancel := context.WithTimeout(s.baseCtx, researchRunTimeout)
 		defer cancel()
-		if _, err := s.execute(jobCtx, report, input); err != nil {
+		final, err := s.execute(jobCtx, report, input)
+		if err != nil {
 			slog.Warn("research: background run finished with an error", "report_id", report.ID, "error", err)
 		}
+		s.deliver(jobCtx, input.ConversationID, final)
 	}()
 	return report, nil
+}
+
+// deliver posts the result where the question was asked: the answer of a
+// background run cannot ride a response that is long gone, and a conversation
+// that asked a question deserves the answer in the conversation.
+func (s *Service) deliver(ctx context.Context, conversationID int64, report *domainresearch.Report) {
+	if s.notifier == nil || conversationID == 0 || report == nil {
+		return
+	}
+	notifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+	if err := s.notifier.DeliverResearch(notifyCtx, conversationID, report); err != nil {
+		slog.Warn("research: delivering the result to the conversation failed",
+			"report_id", report.ID, "conversation_id", conversationID, "error", err)
+	}
 }
 
 // insertRunning validates the question and stores the report as running.
@@ -522,20 +546,26 @@ func (s *Service) Search(ctx context.Context, query string, limit int, connectio
 
 // searchSource performs one search and journals it when it went through a
 // connected source. The journal is the answer to "what did LifeOS do with this
-// service", and a search is exactly such an action.
+// service", and a search is exactly such an action: it is entered before it
+// leaves and closed with its outcome, like every other call.
 func (s *Service) searchSource(ctx context.Context, connection *domainresearch.Connection, query string, limit int) ([]SearchResult, error) {
 	if connection == nil {
 		return s.external.Search(ctx, nil, query, limit)
 	}
+	intentID, journalErr := s.auditCall(ctx, connection, http.MethodGet, "search", CallStarted,
+		fmt.Sprintf("запрос: %s", query), 0)
+	if journalErr != nil {
+		slog.Warn("research: the journal is unavailable, the search proceeds without a record", "source_id", connection.ID)
+	}
 	started := time.Now()
 	results, err := s.external.Search(ctx, connection, query, limit)
-	duration := time.Since(started).Milliseconds()
+	duration := time.Since(started)
 	if err != nil {
-		s.auditCall(ctx, connection, http.MethodGet, "search", CallFailed,
+		s.finishCall(ctx, connection, intentID, http.MethodGet, "search", CallFailed,
 			fmt.Sprintf("%s → %v", query, err), duration)
 		return nil, err
 	}
-	s.auditCall(ctx, connection, http.MethodGet, "search", CallOK,
+	s.finishCall(ctx, connection, intentID, http.MethodGet, "search", CallOK,
 		fmt.Sprintf("%s → результатов: %d", query, len(results)), duration)
 	s.touchConnection(ctx, connection)
 	return results, nil
@@ -622,6 +652,9 @@ func (s *Service) CreateConnection(ctx context.Context, connection *domainresear
 		if connection.Mode != domainresearch.ModeRead {
 			return nil, fmt.Errorf("%w: ассистент подключает источник только на чтение", ErrSourceReadOnly)
 		}
+		// Which tools of an external service may be used is the user's
+		// decision: the assistant may not approve tools on their behalf.
+		connection.AllowedTools = nil
 	}
 	now := s.clock.Now().UTC()
 	connection.Name = strings.TrimSpace(connection.Name)
@@ -685,6 +718,9 @@ type ConnectionUpdate struct {
 	Endpoint *string
 	Format   *domainresearch.SearchFormat
 	Enabled  *bool
+	// AllowedTools is the user's list of approved source tools; the assistant
+	// never sends it, so an edit it makes cannot widen the list.
+	AllowedTools *[]string
 }
 
 // UpdateConnection applies a partial edit under the optimistic version.
@@ -718,6 +754,9 @@ func (s *Service) UpdateConnection(ctx context.Context, id int64, expectedVersio
 		}
 		if update.Enabled != nil {
 			next.Enabled = *update.Enabled
+		}
+		if update.AllowedTools != nil {
+			next.AllowedTools = append([]string(nil), (*update.AllowedTools)...)
 		}
 		next.UpdatedAt = now
 		if err := next.Validate(); err != nil {
@@ -784,21 +823,35 @@ func (s *Service) CallSource(ctx context.Context, id int64, request CallRequest)
 		s.auditCall(ctx, connection, method, operation, CallRefused, "источнику разрешено только чтение", 0)
 		return nil, fmt.Errorf("%w: %s", ErrSourceReadOnly, connection.Name)
 	}
+	// An MCP tool without a write runs only where the user said it may: the
+	// tool list itself is how the user learns the tool names, so listing stays
+	// open, and every other tool must be approved by name first. The server's
+	// own annotation is checked by the adapter; neither claim alone is the
+	// decision.
+	if !write && connection.Kind == domainresearch.KindMCP &&
+		operation != "" && operation != "tools/list" && !connection.AllowsTool(operation) {
+		s.auditCall(ctx, connection, method, operation, CallRefused, "инструмент не в списке разрешённых пользователем", 0)
+		return nil, fmt.Errorf("%w: инструмент %q не входит в список разрешённых", ErrSourceReadOnly, operation)
+	}
 	request.Operation = operation
 	request.Method = method
 	request.Write = write
 
-	// A changing call is journalled before it leaves: if the journal cannot be
-	// written, LifeOS must not change something outside and then have no record
-	// of it. The row starts as "started" and is finished once the answer is in,
-	// so a crash leaves an honest "unknown" behind instead of nothing.
-	var intentID int64
-	if write {
-		id, err := s.auditCall(ctx, connection, method, operation, CallStarted, "запрос отправляется", 0)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrJournalUnavailable, err)
+	// Every call is journalled before it leaves, not only the changing ones: a
+	// journal that promises to record each interaction cannot wait for the
+	// answer to know it happened. The row starts as "started" and is finished
+	// once the answer is in, so a crash leaves an honest "unknown" behind
+	// instead of nothing. A changing call whose entry cannot be written does
+	// not run at all — an unrecorded change outside LifeOS is worse than no
+	// change — while a read may proceed without a record, because reading
+	// changes nothing and refusing it would break the product over a broken
+	// journal.
+	intentID, journalErr := s.auditCall(ctx, connection, method, operation, CallStarted, "запрос отправляется", 0)
+	if journalErr != nil {
+		if write {
+			return nil, fmt.Errorf("%w: %v", ErrJournalUnavailable, journalErr)
 		}
-		intentID = id
+		slog.Warn("research: the journal is unavailable, the read proceeds without a record", "source_id", connection.ID)
 	}
 
 	started := time.Now()

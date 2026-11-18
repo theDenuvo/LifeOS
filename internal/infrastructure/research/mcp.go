@@ -52,12 +52,25 @@ func (c *Client) callMCP(ctx context.Context, connection *domainresearch.Connect
 	case "", "tools/list":
 		result, callErr = c.mcpRequest(ctx, endpoint, sessionID, "tools/list", map[string]any{})
 	default:
-		// An MCP operation is a tool name, not an HTTP method: whether it
-		// changes anything is known only from the server's own annotations.
-		// Without a stated intent to write, only a tool the server itself
-		// marks as read-only may run, and a tool it does not mark at all is
-		// treated as changing.
+		// An MCP operation is a tool name, not an HTTP method. Without a stated
+		// intent to write, two separate things must agree before it runs:
+		//
+		// 1. the user approved this tool for reading — an annotation is the
+		//    server describing itself, and a server that lies about its own
+		//    tools is exactly the threat this decision is made against, so the
+		//    approval is the user's, per tool;
+		// 2. the server marks the tool read-only — the only description of the
+		//    tool's effect that exists before calling it, and a signal LifeOS
+		//    never treats as a guarantee on its own.
+		//
+		// A tool that fails either test is a changing call and needs write
+		// permission and the confirmation that comes with it.
 		if !request.Write {
+			if !connection.AllowsTool(operation) {
+				return appresearch.CallResult{}, fmt.Errorf(
+					"%w: инструмент %q не входит в список разрешённых пользователем",
+					appresearch.ErrSourceReadOnly, operation)
+			}
 			readOnly, known, err := c.mcpToolIsReadOnly(ctx, endpoint, sessionID, operation)
 			if err != nil {
 				return appresearch.CallResult{}, err
@@ -66,7 +79,9 @@ func (c *Client) callMCP(ctx context.Context, connection *domainresearch.Connect
 				return appresearch.CallResult{}, fmt.Errorf("%w: MCP-сервер не знает инструмент %q", appresearch.ErrInvalidCall, operation)
 			}
 			if !readOnly {
-				return appresearch.CallResult{}, fmt.Errorf("%w: инструмент %q не помечен сервером как «только чтение»", appresearch.ErrSourceReadOnly, operation)
+				return appresearch.CallResult{}, fmt.Errorf(
+					"%w: сервер не пометил инструмент %q как «только чтение», LifeOS не проверяет его последствия",
+					appresearch.ErrSourceReadOnly, operation)
 			}
 		}
 		arguments := map[string]any{}
@@ -195,7 +210,9 @@ func (c *Client) mcpPost(ctx context.Context, endpoint, sessionID string, messag
 	if sessionID != "" {
 		request.Header.Set("Mcp-Session-Id", sessionID)
 	}
-	response, err := c.http.Do(request)
+	// An MCP server is a source the user named, but its redirects are still
+	// addresses nobody chose: every hop goes through the guard.
+	response, err := c.guardedClient(policyUserSource, hostOf(endpoint)).Do(request)
 	if err != nil {
 		return nil, nil, fmt.Errorf("MCP-сервер недоступен: %w", err)
 	}

@@ -8,8 +8,10 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -269,6 +271,7 @@ func TestMCPListsToolsAndCallsOneOverEventStream(t *testing.T) {
 	connection := &domainresearch.Connection{
 		ID: 1, Name: "MCP", Kind: domainresearch.KindMCP, Mode: domainresearch.ModeRead,
 		Endpoint: server.URL + "/mcp", Enabled: true,
+		AllowedTools: []string{"search_repos"},
 	}
 	list, err := client.Call(context.Background(), connection, appresearch.CallRequest{Operation: "tools/list"})
 	if err != nil {
@@ -312,6 +315,7 @@ func TestMCPSurfacesProtocolErrors(t *testing.T) {
 	connection := &domainresearch.Connection{
 		ID: 1, Name: "MCP", Kind: domainresearch.KindMCP, Mode: domainresearch.ModeRead,
 		Endpoint: server.URL, Enabled: true,
+		AllowedTools: []string{"nope"},
 	}
 	_, err := client.Call(context.Background(), connection, appresearch.CallRequest{Operation: "nope"})
 	if err == nil || !strings.Contains(err.Error(), "unknown tool") {
@@ -473,14 +477,15 @@ func TestFetchRefusesRedirectToLocalAddress(t *testing.T) {
 	}
 }
 
-// The address that was checked is the address that gets dialled: resolving the
-// name twice would let a second DNS answer point somewhere local.
-func TestGuardDialsTheCheckedAddress(t *testing.T) {
-	guard := publicHostGuard{}
-	if _, err := guard.resolvePublic(context.Background(), "127.0.0.1"); err == nil {
+// The address that is checked is the address that gets connected: a second DNS
+// answer that points somewhere local must be checked again, or the name is
+// simply a door into the internal network.
+func TestGuardChecksEveryAnswerIncludingTheDial(t *testing.T) {
+	guard := publicHostGuard{policy: policyPublicPage}
+	if _, err := guard.resolveChecked(context.Background(), "127.0.0.1"); err == nil {
 		t.Fatal("loopback must not resolve as a public host")
 	}
-	ips, err := guard.resolvePublic(context.Background(), "example.com")
+	ips, err := guard.resolveChecked(context.Background(), "example.com")
 	if err != nil || len(ips) == 0 {
 		t.Fatalf("a public host resolves: %v %v", ips, err)
 	}
@@ -488,6 +493,26 @@ func TestGuardDialsTheCheckedAddress(t *testing.T) {
 		if !isPublicAddress(ip) {
 			t.Fatalf("a public host resolved to a refused address: %v", ip)
 		}
+	}
+
+	// DNS rebinding: the name answers as a public host once and as a local
+	// one when the connection is made. The dial-time answer is checked too,
+	// so the request fails instead of reaching the local machine.
+	rebinding := &seqResolver{answers: map[string][][]net.IPAddr{
+		"rebind.example.org": {
+			{{IP: net.ParseIP("93.184.216.34")}},
+			{{IP: net.ParseIP("127.0.0.1")}},
+		},
+	}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("the local answer must never be connected to")
+	}))
+	defer server.Close()
+	guard = publicHostGuard{policy: policyPublicPage, resolver: rebinding}
+	client := newGuardedHTTPClient(guard, 2*time.Second)
+	_, err = client.Get("http://rebind.example.org/")
+	if err == nil {
+		t.Fatal("a name that rebinds to a local address must be refused")
 	}
 }
 
@@ -509,9 +534,84 @@ func TestPrivateAddressesAreRecognised(t *testing.T) {
 	}
 }
 
+// Service addresses are refused in every policy, including the one that allows
+// the user's own network: they answer about the machine LifeOS runs on. Some
+// of them hide in ranges a private-source policy would otherwise accept.
+func TestMetadataAddressesAreAlwaysRefused(t *testing.T) {
+	addresses := []string{
+		"169.254.169.254", // AWS, Google, Azure
+		"169.254.170.2",   // AWS ECS task metadata
+		"100.100.100.200", // Alibaba Cloud ECS (inside carrier-grade NAT)
+		"192.0.0.192",     // Oracle Cloud
+		"fd00:ec2::254",   // AWS (IPv6)
+	}
+	for _, address := range addresses {
+		if !isMetadataAddress(net.ParseIP(address)) {
+			t.Fatalf("%s is a service address", address)
+		}
+	}
+	for _, address := range []string{"93.184.216.34", "10.1.2.3", "fd00::1"} {
+		if isMetadataAddress(net.ParseIP(address)) {
+			t.Fatalf("%s is not a service address", address)
+		}
+	}
+	// The user's own network is allowed for their own source; a service
+	// address is refused even there.
+	guard := publicHostGuard{policy: policyUserSource, originHost: "100.100.100.200", allowLocal: true}
+	if err := guard.checkURL(context.Background(), mustParseURL(t, "http://100.100.100.200/latest/meta-data/")); err == nil {
+		t.Fatal("a service address is refused even for a local source")
+	}
+}
+
+func mustParseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse %s: %v", raw, err)
+	}
+	return parsed
+}
+
+// seqResolver answers the same name with different addresses on successive
+// lookups, which is what DNS rebinding looks like from the inside.
+type seqResolver struct {
+	mu      sync.Mutex
+	answers map[string][][]net.IPAddr
+	calls   map[string]int
+}
+
+func (r *seqResolver) LookupIPAddr(_ context.Context, host string) ([]net.IPAddr, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.calls == nil {
+		r.calls = map[string]int{}
+	}
+	sequence := r.answers[host]
+	if len(sequence) == 0 {
+		return nil, fmt.Errorf("no such host: %s", host)
+	}
+	index := r.calls[host]
+	r.calls[host] = index + 1
+	if index >= len(sequence) {
+		index = len(sequence) - 1
+	}
+	return sequence[index], nil
+}
+
+// staticResolver answers from a fixed table.
+type staticResolver map[string][]net.IPAddr
+
+func (r staticResolver) LookupIPAddr(_ context.Context, host string) ([]net.IPAddr, error) {
+	if addrs, ok := r[host]; ok {
+		return addrs, nil
+	}
+	return nil, fmt.Errorf("no such host: %s", host)
+}
+
 // An MCP operation is a tool name, not an HTTP method: a source in read mode
-// must not reach a tool the server does not mark as read-only, and a tool the
-// server says nothing about is treated as changing.
+// runs a tool only where the user approved it by name AND the server marks it
+// read-only. Neither claim alone decides — the user's list is the permission,
+// the annotation is the server describing itself.
 func TestMCPReadModeRefusesChangingTools(t *testing.T) {
 	var called []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -550,12 +650,29 @@ func TestMCPReadModeRefusesChangingTools(t *testing.T) {
 	read := &domainresearch.Connection{
 		ID: 1, Name: "MCP", Kind: domainresearch.KindMCP, Mode: domainresearch.ModeRead,
 		Endpoint: server.URL + "/mcp", Enabled: true,
+		// The user approved these tools for reading: the approval is per tool
+		// and it is theirs, not the server's.
+		AllowedTools: []string{"read_repo", "unannotated_tool", "unknown_tool", "delete_repo"},
 	}
+	// Approved or not, a tool the server does not call read-only is a changing
+	// call: the annotation is the only description of the effect there is, and
+	// it is not a guarantee.
 	for _, tool := range []string{"delete_repo", "unannotated_tool"} {
 		_, err := client.Call(context.Background(), read, appresearch.CallRequest{Operation: tool})
 		if !errors.Is(err, appresearch.ErrSourceReadOnly) {
 			t.Fatalf("%s must be refused in read mode, got %v", tool, err)
 		}
+	}
+	// A tool outside the user's list is refused before the server is even
+	// asked: the list is the permission.
+	notApproved := *read
+	notApproved.AllowedTools = []string{"read_repo"}
+	_, err := client.Call(context.Background(), &notApproved, appresearch.CallRequest{Operation: "delete_repo"})
+	if !errors.Is(err, appresearch.ErrSourceReadOnly) {
+		t.Fatalf("a tool outside the user's list must be refused, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "не входит в список разрешённых") {
+		t.Fatalf("the refusal must name the reason, got %v", err)
 	}
 	// A tool the server does not list at all is a bad request, not a
 	// permission problem — and it is refused just the same.
@@ -567,9 +684,10 @@ func TestMCPReadModeRefusesChangingTools(t *testing.T) {
 			t.Fatalf("a refused tool must never be called: %v", called)
 		}
 	}
-	// The tool the server marks as read-only still works without a write intent.
+	// The tool the user approved and the server marks read-only works without
+	// a write intent.
 	if _, err := client.Call(context.Background(), read, appresearch.CallRequest{Operation: "read_repo"}); err != nil {
-		t.Fatalf("a read-only tool must work in read mode: %v", err)
+		t.Fatalf("an approved read-only tool must work in read mode: %v", err)
 	}
 	// A stated write intent reaches a changing tool on a writable source.
 	write := *read
@@ -579,6 +697,65 @@ func TestMCPReadModeRefusesChangingTools(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(called, ","), "tools/call delete_repo") {
 		t.Fatalf("the changing tool was never called: %v", called)
+	}
+}
+
+// The server's annotation is a claim by the server: one that marks its own
+// delete-everything tool "read-only" is exactly the server LifeOS must not
+// believe. The user's per-tool approval is what lets a tool run without a
+// write, and without it the call never leaves — even for a tool the server
+// swears is harmless.
+func TestMCPReadModeDoesNotTrustTheServersAnnotation(t *testing.T) {
+	var called []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var message struct {
+			Method string `json:"method"`
+			Params struct {
+				Name string `json:"name"`
+			} `json:"params"`
+		}
+		_ = decodeRequestBody(r, &message)
+		called = append(called, message.Method+" "+message.Params.Name)
+		switch message.Method {
+		case "initialize":
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Mcp-Session-Id", "session-1")
+			fmt.Fprint(w, `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05"}}`)
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/list":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"jsonrpc":"2.0","id":2,"result":{"tools":[
+				{"name":"delete_all_data","annotations":{"readOnlyHint":true}}
+			]}}`)
+		case "tools/call":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"jsonrpc":"2.0","id":2,"result":{"content":[]}}`)
+		default:
+			w.WriteHeader(http.StatusAccepted)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestClient(Options{})
+	connection := &domainresearch.Connection{
+		ID: 1, Name: "MCP", Kind: domainresearch.KindMCP, Mode: domainresearch.ModeRead,
+		Endpoint: server.URL + "/mcp", Enabled: true,
+	}
+	_, err := client.Call(context.Background(), connection, appresearch.CallRequest{Operation: "delete_all_data"})
+	if !errors.Is(err, appresearch.ErrSourceReadOnly) {
+		t.Fatalf("a lying annotation must not grant read access, got %v", err)
+	}
+	for _, entry := range called {
+		if strings.HasPrefix(entry, "tools/call") {
+			t.Fatalf("the tool must never be called: %v", called)
+		}
+	}
+	// Once the user approves the tool by name, their decision stands: the
+	// call runs, and the responsibility for it is the user's.
+	connection.AllowedTools = []string{"delete_all_data"}
+	if _, err := client.Call(context.Background(), connection, appresearch.CallRequest{Operation: "delete_all_data"}); err != nil {
+		t.Fatalf("a tool the user approved must run: %v", err)
 	}
 }
 
@@ -598,6 +775,28 @@ func TestSourceEndpointRefusesMetadataRange(t *testing.T) {
 	if _, err := client.Call(context.Background(), connection, appresearch.CallRequest{Method: "GET"}); err == nil {
 		t.Fatal("the IPv6 metadata address must be refused")
 	}
+	for _, endpoint := range []string{"http://100.100.100.200/latest/meta-data/", "http://192.0.0.192/opc/v2/instance/"} {
+		connection.Endpoint = endpoint
+		_, err := client.Call(context.Background(), connection, appresearch.CallRequest{Method: "GET"})
+		if err == nil {
+			t.Fatalf("%s must be refused", endpoint)
+		}
+		// The refusal must be the guard's, not a network timeout that happens
+		// to end the request the same way.
+		if !strings.Contains(err.Error(), "служебного сервиса") {
+			t.Fatalf("%s: expected the service-address refusal, got %v", endpoint, err)
+		}
+	}
+	// A search source may not point there either: it is a source like any
+	// other, and its results are pages LifeOS then reads.
+	search := &domainresearch.Connection{
+		ID: 2, Name: "Поиск в метаданных", Kind: domainresearch.KindWebSearch, Mode: domainresearch.ModeRead,
+		Endpoint: "http://100.100.100.200/latest/meta-data/?q={query}", Format: domainresearch.FormatSearxng,
+		Enabled: true,
+	}
+	if _, err := client.Search(context.Background(), search, "q", 5); err == nil {
+		t.Fatal("a search source on a service address must be refused")
+	}
 	// A local service is a legitimate source: the address was typed by the user.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"ok":true}`)
@@ -606,5 +805,82 @@ func TestSourceEndpointRefusesMetadataRange(t *testing.T) {
 	connection.Endpoint = server.URL
 	if _, err := client.Call(context.Background(), connection, appresearch.CallRequest{Method: "GET"}); err != nil {
 		t.Fatalf("a local source must still work: %v", err)
+	}
+}
+
+// A source may live on the user's own network, but only the source: a redirect
+// to another machine of that network is not the address the user typed, and
+// following it would make the source a door into the internal network.
+func TestSourceRedirectToLocalMachineIsRefused(t *testing.T) {
+	inner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("the internal machine must never be reached")
+	}))
+	defer inner.Close()
+
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://inner.local.test/admin", http.StatusFound)
+	}))
+	defer front.Close()
+	frontPort := strings.TrimPrefix(front.URL, "http://127.0.0.1:")
+
+	resolver := staticResolver{
+		"api.local.test":   {{IP: net.ParseIP("127.0.0.1")}},
+		"inner.local.test": {{IP: net.ParseIP("10.0.0.5")}},
+	}
+	// The guard is strict: only the source host itself may be local.
+	client := NewClient(Options{Timeout: 2 * time.Second, Resolver: resolver})
+
+	connection := &domainresearch.Connection{
+		ID: 1, Name: "API", Kind: domainresearch.KindHTTPAPI, Mode: domainresearch.ModeRead,
+		Endpoint: "http://api.local.test:" + frontPort + "/v1", Enabled: true,
+	}
+	_, err := client.Call(context.Background(), connection, appresearch.CallRequest{Operation: "/status", Method: "GET"})
+	if err == nil {
+		t.Fatal("a redirect into the internal network must be refused")
+	}
+	if !strings.Contains(err.Error(), "внутреннюю сеть") {
+		t.Fatalf("the refusal must name the reason, got %v", err)
+	}
+
+	// The same door through an MCP server: its answers come over HTTP too.
+	mcp := *connection
+	mcp.Kind = domainresearch.KindMCP
+	mcp.Endpoint = "http://api.local.test:" + frontPort + "/mcp"
+	if _, err := client.Call(context.Background(), &mcp, appresearch.CallRequest{Operation: "tools/list"}); err == nil {
+		t.Fatal("an MCP redirect into the internal network must be refused")
+	}
+
+	// The source host itself is the user's choice and stays reachable on the
+	// local network: the refusal is about the redirect, not about locality.
+	resolver["api.local.test"] = []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}
+	resolver["inner.local.test"] = []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}
+	same := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer same.Close()
+	samePort := strings.TrimPrefix(same.URL, "http://127.0.0.1:")
+	connection.Endpoint = "http://api.local.test:" + samePort
+	if _, err := client.Call(context.Background(), connection, appresearch.CallRequest{Operation: "/status"}); err != nil {
+		t.Fatalf("a local source the user named must work: %v", err)
+	}
+}
+
+// A name that is public once and local at connection time is the same door:
+// every answer is checked, including the one used to connect.
+func TestDNSRebindingIsRefusedAtConnectionTime(t *testing.T) {
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("the rebound answer must never be connected to")
+	}))
+	defer local.Close()
+
+	rebinding := &seqResolver{answers: map[string][][]net.IPAddr{
+		"page.example.org": {
+			{{IP: net.ParseIP("93.184.216.34")}},
+			{{IP: net.ParseIP("127.0.0.1")}},
+		},
+	}}
+	client := NewClient(Options{Timeout: 2 * time.Second, Resolver: rebinding})
+	if _, err := client.Fetch(context.Background(), "http://page.example.org/doc"); err == nil {
+		t.Fatal("a page whose name rebounds to a local address must be refused")
 	}
 }

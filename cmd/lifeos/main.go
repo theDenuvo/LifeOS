@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -37,6 +38,7 @@ import (
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	"github.com/theDenuvo/LifeOS/internal/config"
 	domainmemory "github.com/theDenuvo/LifeOS/internal/domain/memory"
+	domainresearch "github.com/theDenuvo/LifeOS/internal/domain/research"
 	"github.com/theDenuvo/LifeOS/internal/domain/task"
 	"github.com/theDenuvo/LifeOS/internal/events"
 	infradocuments "github.com/theDenuvo/LifeOS/internal/infrastructure/documents"
@@ -232,12 +234,17 @@ func main() {
 		SearchFormat: cfg.SearchFormat,
 		Timeout:      time.Duration(cfg.ResearchTimeoutSeconds) * time.Second,
 	})
+	// The delivery target is wired after the assistant exists; until then a
+	// finished run has only its report and the event stream, which is the
+	// honest fallback.
+	delivery := &researchDelivery{}
 	researchService := appresearch.NewService(
 		sqlite.NewResearchUnitOfWork(db),
 		clock,
 		appresearch.WithExternal(researchClient),
 		appresearch.WithKnowledge(researchKnowledge{service: memoryService}),
 		appresearch.WithPublisher(broker),
+		appresearch.WithNotifier(delivery),
 	)
 
 	// Roadmap stage 5: full proactivity. The detectors now cross-reference
@@ -345,6 +352,9 @@ func main() {
 		assistant.WithWorkingDirectory(workingDirectory()),
 	)
 	workspaceHub.Bind(assistantService)
+	// A research run started from a conversation answers in that conversation
+	// when it is done: the run outlives the turn that asked for it.
+	delivery.assistant = assistantService
 
 	// Roadmap stage 6: user automations. The registry doubles as the step
 	// executor, so it is built first; the automation tools attach right after
@@ -446,6 +456,20 @@ func main() {
 	}
 	recoveryCancel()
 
+	// A research run started before the last restart has no owner: the report
+	// is marked failed with the reason, and an external call whose answer never
+	// arrived is marked unknown. Saying that LifeOS does not know is the only
+	// honest option, and it happens before the server accepts a single request
+	// — otherwise a report created on this start could be closed as interrupted
+	// while it is still running. The same rule the automations recovery above
+	// follows.
+	if recovered, err := researchService.RecoverInterrupted(context.Background()); err != nil {
+		slog.Error("research: closing interrupted work failed", "error", err)
+	} else if recovered.Reports > 0 || recovered.Calls > 0 {
+		slog.Info("research: closed work interrupted by the previous shutdown",
+			"reports", recovered.Reports, "calls", recovered.Calls)
+	}
+
 	go func() {
 		slog.Info("HTTP server listening", "addr", cfg.ListenAddr)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -465,18 +489,6 @@ func main() {
 	// Watched topics are re-checked on their own cadence; the runner only wakes
 	// up often enough to notice.
 	go appresearch.NewRunner(researchService, 15*time.Minute).Run(ctx)
-
-	// A research run started before the last restart has no owner: the report
-	// is marked failed with the reason, and a changing external call whose
-	// answer never arrived is marked unknown. Saying that LifeOS does not know
-	// is the only honest option, and it must happen before the interface shows
-	// stale "в работе" rows.
-	if recovered, err := researchService.RecoverInterrupted(context.Background()); err != nil {
-		slog.Error("research: closing interrupted work failed", "error", err)
-	} else if recovered.Reports > 0 || recovered.Calls > 0 {
-		slog.Info("research: closed work interrupted by the previous shutdown",
-			"reports", recovered.Reports, "calls", recovered.Calls)
-	}
 
 	// Goal progress is recorded synchronously when a completion commits. It
 	// does not depend on a live event subscriber, and the result is on disk
@@ -641,6 +653,57 @@ func (k researchKnowledge) SaveResearch(ctx context.Context, input appresearch.K
 
 // researchChanges feeds the proactive insight about watched topics from the
 // research service: what changed is a report, not a notification.
+// researchDelivery posts a finished report to the conversation that asked for
+// the research: the answer of a background run cannot ride the response that
+// started it.
+type researchDelivery struct {
+	assistant *assistant.Service
+}
+
+func (d *researchDelivery) DeliverResearch(ctx context.Context, conversationID int64, report *domainresearch.Report) error {
+	if d.assistant == nil {
+		return nil
+	}
+	_, err := d.assistant.AppendMessage(ctx, conversationID, researchDeliveryText(report))
+	return err
+}
+
+// researchDeliveryText says in chat what the report concluded: the top
+// findings with their level of certainty, and where the full report lives.
+func researchDeliveryText(report *domainresearch.Report) string {
+	if report == nil {
+		return "Исследование завершено."
+	}
+	var out strings.Builder
+	if report.Status == domainresearch.ReportFailed {
+		fmt.Fprintf(&out, "Исследование «%s» не выполнено", report.Question)
+		if reason := strings.TrimSpace(report.Error); reason != "" {
+			fmt.Fprintf(&out, ": %s", reason)
+		}
+		out.WriteString(".")
+		return out.String()
+	}
+	fmt.Fprintf(&out, "Исследование «%s» готово. ", report.Question)
+	for i, finding := range report.Findings {
+		if i >= 3 {
+			fmt.Fprintf(&out, "И ещё %d вывод(ов) — в полном отчёте. ", len(report.Findings)-3)
+			break
+		}
+		level := "предположение"
+		if finding.Certainty == domainresearch.CertaintyFact {
+			level = "факт"
+		} else if finding.Certainty == domainresearch.CertaintyInference {
+			level = "вывод LifeOS"
+		}
+		fmt.Fprintf(&out, "%s (%s): %s ", level, finding.Statement, strings.Join(finding.Domains, ", "))
+	}
+	if report.KnowledgeEntryID != nil {
+		out.WriteString("Результат сохранён в базу знаний. ")
+	}
+	fmt.Fprintf(&out, "Полный отчёт — в разделе «Исследования», №%d.", report.ID)
+	return out.String()
+}
+
 type researchChanges struct {
 	service *appresearch.Service
 }

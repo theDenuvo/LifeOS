@@ -220,6 +220,18 @@ type ResearchInput struct {
 	// ConnectionID forces one connected search source instead of the built-in
 	// provider.
 	ConnectionID int64
+	// ConversationID names the conversation the question was asked in, so a
+	// run that outlives the request can answer there when it is done. Zero
+	// means nobody is waiting in a conversation.
+	ConversationID int64
+}
+
+// Notifier delivers a finished report back where the question came from. A
+// research run outlives the HTTP request that started it, so the answer cannot
+// ride the response: it is posted to the conversation that asked, and the
+// report itself is always readable in the research view.
+type Notifier interface {
+	DeliverResearch(ctx context.Context, conversationID int64, report *domainresearch.Report) error
 }
 
 // WatchInput is a standing question to keep an eye on.

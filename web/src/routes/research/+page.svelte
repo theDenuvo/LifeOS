@@ -362,6 +362,31 @@
 		}
 	}
 
+	// Which tools of an MCP source may run without a write is the user's
+	// decision, not the server's claim about itself: the list is edited by the
+	// user and never widened by anyone else.
+	async function saveAllowedTools(source: ResearchSource, value: string) {
+		const tools = value
+			.split(',')
+			.map((tool) => tool.trim())
+			.filter((tool) => tool.length > 0);
+		busy = true;
+		try {
+			await updateResearchSource(source.id, {
+				allowed_tools: tools,
+				expected_version: source.version
+			});
+			notice = tools.length
+				? `Разрешённые инструменты источника «${source.name}»: ${tools.join(', ')}.`
+				: `Список разрешённых инструментов источника «${source.name}» очищен: без записи ничего не выполняется.`;
+			await loadSources();
+		} catch (err) {
+			error = errorMessage(err);
+		} finally {
+			busy = false;
+		}
+	}
+
 	async function setSourceMode(source: ResearchSource, mode: ResearchAccessMode) {
 		busy = true;
 		try {
@@ -635,7 +660,9 @@
 																	{citation.title || citation.site || citation.url}
 																</a>
 																<span class="citation-site">{citation.site}</span>
-																{#if citation.trust === 'low'}
+																{#if citation.read_unknown}
+																	<span class="citation-warning">статус чтения неизвестен</span>
+																{:else if !citation.read}
 																	<span class="citation-warning">страница не прочитана</span>
 																{/if}
 															</li>
@@ -915,6 +942,19 @@
 										{/each}
 									</select>
 								</label>
+								{#if source.kind === 'mcp'}
+									<label class="inline-field tools-field">
+										<span>Инструменты для чтения</span>
+										<input
+											type="text"
+											value={(source.allowed_tools ?? []).join(', ')}
+											placeholder="read_repo, list_issues"
+											disabled={busy}
+											on:change={(event) =>
+												saveAllowedTools(source, (event.currentTarget as HTMLInputElement).value)}
+										/>
+									</label>
+								{/if}
 								{#if source.enabled}
 									<button class="ghost small" disabled={busy} on:click={() => testSource(source)}>
 										<Globe size={13} aria-hidden="true" /> Проверить связь
@@ -924,6 +964,15 @@
 									<Trash2 size={13} aria-hidden="true" /> Удалить
 								</button>
 							</div>
+
+							{#if source.kind === 'mcp'}
+								<p class="hint">
+									Без изменения данных выполняются только инструменты из списка, и список
+									составляете вы. Пометка сервера «только чтение» — его собственное заявление,
+									LifeOS не считает её гарантией: инструмент без вашей записи требует
+									изменяющего вызова с подтверждением.
+								</p>
+							{/if}
 
 							<section aria-label="Журнал обращений">
 								<h2>Журнал обращений</h2>
@@ -1147,8 +1196,17 @@
 	.field input,
 	.field textarea,
 	.field select,
-	.inline-field select {
+	.inline-field select,
+	.inline-field input {
 		width: 100%;
+	}
+
+	.tools-field {
+		flex-basis: 100%;
+	}
+
+	.inline-field select,
+	.inline-field input {
 		padding: 0.45rem 0.6rem;
 		border: 1px solid var(--border);
 		border-radius: var(--radius-md);
@@ -1156,6 +1214,10 @@
 		color: var(--fg-primary);
 		font: inherit;
 		font-size: var(--text-base);
+	}
+
+	.inline-field input {
+		min-height: 44px;
 	}
 
 	.checkbox {

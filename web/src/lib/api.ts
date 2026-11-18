@@ -1341,6 +1341,9 @@ export interface ResearchCitation {
 	// read is false when only a search snippet was available: the page exists
 	// as a lead, not as a source LifeOS opened.
 	read: boolean;
+	// read_unknown marks a report saved before reading status existed: the
+	// page may have been read and LifeOS no longer knows. It is not "unread".
+	read_unknown?: boolean;
 }
 
 export interface ResearchFinding {
@@ -1392,6 +1395,9 @@ export interface ResearchSource {
 	endpoint: string;
 	notes: string;
 	enabled: boolean;
+	// allowed_tools are the tools of an MCP source the user approved for use
+	// without a write. Only the user edits this list.
+	allowed_tools: string[];
 	last_used_at?: string | null;
 	created_at: string;
 	updated_at: string;
@@ -1407,6 +1413,7 @@ export interface ResearchSourceInput {
 	format?: ResearchSearchFormat;
 	notes?: string;
 	enabled?: boolean;
+	allowed_tools?: string[];
 }
 
 export interface ResearchSourceUpdate {
@@ -1417,6 +1424,7 @@ export interface ResearchSourceUpdate {
 	endpoint?: string;
 	format?: ResearchSearchFormat | '';
 	enabled?: boolean;
+	allowed_tools?: string[];
 	expected_version: number;
 }
 

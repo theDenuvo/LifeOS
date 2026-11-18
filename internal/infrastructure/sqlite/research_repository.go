@@ -206,10 +206,34 @@ func nullableID(value *int64) any {
 	return *value
 }
 
+// encodeToolsJSON stores the user-approved tool names of a source.
+func encodeToolsJSON(tools []string) (string, error) {
+	if len(tools) == 0 {
+		return "[]", nil
+	}
+	encoded, err := json.Marshal(tools)
+	if err != nil {
+		return "", fmt.Errorf("encode allowed tools: %w", err)
+	}
+	return string(encoded), nil
+}
+
+// decodeToolsJSON reads the user-approved tool names of a source.
+func decodeToolsJSON(raw string) ([]string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var tools []string
+	if err := json.Unmarshal([]byte(raw), &tools); err != nil {
+		return nil, fmt.Errorf("decode allowed tools: %w", err)
+	}
+	return tools, nil
+}
+
 // ─── Connections ────────────────────────────────────────────────────────────
 
 const connectionColumns = `id, name, kind, mode, trust, format, endpoint, notes, enabled,
-	created_by_assistant, last_used_at, created_at, updated_at, version`
+	allowed_tools, created_by_assistant, last_used_at, created_at, updated_at, version`
 
 func scanConnection(row rowScanner) (*domainresearch.Connection, error) {
 	var (
@@ -223,12 +247,18 @@ func scanConnection(row rowScanner) (*domainresearch.Connection, error) {
 		lastUsedAt  sql.NullInt64
 		createdAt   int64
 		updatedAt   int64
+		toolsJSON   string
 	)
 	if err := row.Scan(&connection.ID, &connection.Name, &kind, &mode, &trust, &format,
-		&connection.Endpoint, &connection.Notes, &enabled, &byAssistant,
+		&connection.Endpoint, &connection.Notes, &enabled, &toolsJSON, &byAssistant,
 		&lastUsedAt, &createdAt, &updatedAt, &connection.Version); err != nil {
 		return nil, err
 	}
+	tools, err := decodeToolsJSON(toolsJSON)
+	if err != nil {
+		return nil, err
+	}
+	connection.AllowedTools = tools
 	connection.Kind = domainresearch.SourceKind(kind)
 	connection.Mode = domainresearch.AccessMode(mode)
 	connection.Trust = domainresearch.Trust(trust)
@@ -246,13 +276,17 @@ func (r *researchRepository) InsertConnection(ctx context.Context, connection *d
 	if err := connection.Validate(); err != nil {
 		return 0, err
 	}
+	toolsJSON, err := encodeToolsJSON(connection.AllowedTools)
+	if err != nil {
+		return 0, err
+	}
 	result, err := r.tx.ExecContext(ctx, `
 		INSERT INTO research_connections (name, kind, mode, trust, format, endpoint, notes,
-			enabled, created_by_assistant, last_used_at, created_at, updated_at, version)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			enabled, allowed_tools, created_by_assistant, last_used_at, created_at, updated_at, version)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		connection.Name, string(connection.Kind), string(connection.Mode), string(connection.Trust),
 		string(connection.Format), connection.Endpoint, connection.Notes,
-		boolToInt(connection.Enabled), boolToInt(connection.CreatedByAssistant),
+		boolToInt(connection.Enabled), toolsJSON, boolToInt(connection.CreatedByAssistant),
 		unixNullableTime(connection.LastUsedAt),
 		unixSeconds(connection.CreatedAt), unixSeconds(connection.UpdatedAt), connection.Version,
 	)
@@ -315,15 +349,19 @@ func (r *researchRepository) UpdateConnection(ctx context.Context, id int64, exp
 	if err := connection.Validate(); err != nil {
 		return nil, err
 	}
+	toolsJSON, err := encodeToolsJSON(connection.AllowedTools)
+	if err != nil {
+		return nil, err
+	}
 	result, err := r.tx.ExecContext(ctx, `
 		UPDATE research_connections SET
 			name = ?, kind = ?, mode = ?, trust = ?, format = ?, endpoint = ?, notes = ?,
-			enabled = ?, created_by_assistant = ?, last_used_at = ?, updated_at = ?,
+			enabled = ?, allowed_tools = ?, created_by_assistant = ?, last_used_at = ?, updated_at = ?,
 			version = version + 1
 		WHERE id = ? AND version = ?`,
 		connection.Name, string(connection.Kind), string(connection.Mode), string(connection.Trust),
 		string(connection.Format), connection.Endpoint, connection.Notes,
-		boolToInt(connection.Enabled), boolToInt(connection.CreatedByAssistant),
+		boolToInt(connection.Enabled), toolsJSON, boolToInt(connection.CreatedByAssistant),
 		unixNullableTime(connection.LastUsedAt), unixSeconds(connection.UpdatedAt),
 		id, expectedVersion,
 	)

@@ -43,30 +43,43 @@ type Options struct {
 	UserAgent    string
 	Timeout      time.Duration
 	MaxPageBytes int64
-	Client       *http.Client
-	// AllowPrivateHosts lets page reading reach loopback and private addresses.
-	// It exists for tests and for a single-user install that deliberately reads
+	// Client replaces the transport. It is used as-is only together with
+	// AllowPrivateHosts, which is the explicit "my network is my own" switch;
+	// otherwise every request goes through the guard whatever client is
+	// configured.
+	Client *http.Client
+	// Resolver resolves host names; tests replace it to describe a network
+	// that does not exist.
+	Resolver Resolver
+	// AllowPrivateHosts lets traffic reach loopback and private addresses. It
+	// exists for tests and for a single-user install that deliberately uses
 	// its own network; the default refuses them, because a page address comes
-	// from a search result or from the model, not from the user.
+	// from a search result or from the model, not from the user. Service
+	// addresses are refused either way.
 	AllowPrivateHosts bool
 }
 
 // Client implements research.External.
 type Client struct {
-	http         *http.Client
+	injected     *http.Client
+	resolver     Resolver
 	searchURL    string
 	searchFormat domainresearch.SearchFormat
 	userAgent    string
 	maxPageBytes int64
 	timeout      time.Duration
-	// allowPrivateHosts disables the public-address check for page reading.
+	// allowPrivateHosts accepts non-public addresses; service addresses stay
+	// refused.
 	allowPrivateHosts bool
 }
 
 // NewClient builds the adapter.
 func NewClient(options Options) *Client {
+	// Only a client the caller actually supplied counts as injected: the
+	// guard is the default for every request, and an injected transport is an
+	// explicit "my network is my own" that comes with AllowPrivateHosts.
 	client := options.Client
-	if client == nil {
+	if client == nil && !options.AllowPrivateHosts {
 		timeout := options.Timeout
 		if timeout <= 0 {
 			timeout = defaultTimeout
@@ -101,7 +114,8 @@ func NewClient(options Options) *Client {
 		maxPage = defaultMaxPageBytes
 	}
 	return &Client{
-		http:              client,
+		injected:          client,
+		resolver:          options.Resolver,
 		searchURL:         searchURL,
 		searchFormat:      format,
 		userAgent:         userAgent,
@@ -134,8 +148,9 @@ func (c *Client) Search(ctx context.Context, connection *domainresearch.Connecti
 		return nil, err
 	}
 	// The search endpoint is the user's own choice and may live on the local
-	// network; its redirects are still checked like any other page.
-	body, contentType, err := c.getWith(ctx, c.guardedClient(hostOf(target)), target)
+	// network; that allowance is for its own host only, and every redirect is
+	// checked like any other address.
+	body, contentType, err := c.getWith(ctx, c.guardedClient(policyUserSource, hostOf(target)), target)
 	if err != nil {
 		return nil, err
 	}
@@ -154,10 +169,11 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) (appresearch.Page, er
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
 		return appresearch.Page{}, fmt.Errorf("адрес страницы некорректен: %q", rawURL)
 	}
-	client := c.guardedClient("")
-	if err := (publicHostGuard{}).checkURL(ctx, parsed); err != nil && !c.allowPrivateHosts {
+	guard := publicHostGuard{policy: policyPublicPage, allowLocal: c.allowPrivateHosts, resolver: c.resolver}
+	if err := guard.checkURL(ctx, parsed); err != nil {
 		return appresearch.Page{}, err
 	}
+	client := c.guardedClient(policyPublicPage, "")
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return appresearch.Page{}, err
@@ -199,9 +215,20 @@ func (c *Client) Call(ctx context.Context, connection *domainresearch.Connection
 		return appresearch.CallResult{}, appresearch.ErrInvalidCall
 	}
 	if connection.Kind != domainresearch.KindScript {
-		// A source is the user's own choice of address, but the service
-		// metadata range is never a service anyone connects on purpose.
-		if err := (publicHostGuard{}).checkSourceEndpoint(ctx, connection.Endpoint); err != nil {
+		// A source is the user's own choice of address and may live on their
+		// network; a service address is not a service anyone connects on
+		// purpose, and redirects away from the source are checked hop by hop.
+		endpoint, err := url.Parse(strings.TrimSpace(connection.Endpoint))
+		if err != nil {
+			return appresearch.CallResult{}, appresearch.ErrInvalidCall
+		}
+		guard := publicHostGuard{
+			policy:     policyUserSource,
+			originHost: hostOf(connection.Endpoint),
+			allowLocal: c.allowPrivateHosts,
+			resolver:   c.resolver,
+		}
+		if err := guard.checkURL(ctx, endpoint); err != nil {
 			return appresearch.CallResult{}, err
 		}
 	}
@@ -250,7 +277,7 @@ func (c *Client) callHTTPAPI(ctx context.Context, connection *domainresearch.Con
 		httpRequest.Header.Set("Content-Type", "application/json")
 	}
 	started := time.Now()
-	response, err := c.http.Do(httpRequest)
+	response, err := c.guardedClient(policyUserSource, hostOf(connection.Endpoint)).Do(httpRequest)
 	if err != nil {
 		return appresearch.CallResult{}, fmt.Errorf("источник недоступен: %w", err)
 	}
@@ -313,14 +340,8 @@ func buildSearchURL(endpoint, query string) (string, error) {
 	return endpoint + "?q=" + escaped, nil
 }
 
-// get performs a GET and returns the body.
-func (c *Client) get(ctx context.Context, target string) ([]byte, string, error) {
-	return c.getWith(ctx, c.http, target)
-}
-
-// getWith performs a GET with a specific client, which is how page reads and
-// searches carry the public-address check while the rest of the traffic keeps
-// its own client.
+// getWith performs a GET with the guarded client of the caller's policy, which
+// is how page reads, searches and source calls all carry the same check.
 func (c *Client) getWith(ctx context.Context, client *http.Client, target string) ([]byte, string, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {

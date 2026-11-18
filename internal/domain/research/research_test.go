@@ -1,6 +1,8 @@
 package research
 
 import (
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -143,6 +145,99 @@ func TestBuildFindingsSubstitutedValueIsNotAFact(t *testing.T) {
 
 // A statement that names more than the other is still the same claim: "the
 // release" and "the release in Go 1.24" do not disagree.
+// Names are not always capitalised: forum posts, transcripts and generated
+// pages write "sam altman" in lower case, where a capitalisation heuristic
+// sees no value at all. Two statements that fill the same slot with different
+// words are a disagreement in any case.
+func TestBuildFindingsLowercaseValuesStayApart(t *testing.T) {
+	cases := []struct {
+		name string
+		a    string
+		b    string
+	}{
+		{
+			name: "lowercase person",
+			a:    "the openai company was founded by sam altman and launched its first product in 2020.",
+			b:    "the openai company was founded by elon musk and launched its first product in 2020.",
+		},
+		{
+			name: "lowercase organisation",
+			a:    "метрики сервиса доступны в grafana cloud.",
+			b:    "метрики сервиса доступны в datadog.",
+		},
+		{
+			name: "lowercase product",
+			a:    "the build runs on the runner image by default.",
+			b:    "the build runs on the container image by default.",
+		},
+		{
+			name: "same context, different value",
+			a:    "the endpoint answers in 200 milliseconds under load.",
+			b:    "the endpoint answers in 400 milliseconds under load.",
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			findings := BuildFindings([]Candidate{
+				{Statement: testCase.a, Citation: citation("https://a.example.org/x", "A")},
+				{Statement: testCase.b, Citation: citation("https://b.example.net/x", "B")},
+			})
+			if len(findings) != 2 {
+				t.Fatalf("different values must stay apart, got %d: %+v", len(findings), findings)
+			}
+			for _, finding := range findings {
+				if finding.Certainty == CertaintyFact {
+					t.Fatalf("contradicting statements are never a fact: %+v", finding)
+				}
+				if finding.Conflict == "" {
+					t.Fatalf("the disagreement must be named for %q", finding.Statement)
+				}
+			}
+		})
+	}
+}
+
+// The same name written in different cases is one name, not a substitution:
+// one site writes "Sam Altman", the other "sam altman", and they confirm each
+// other. Word forms of one name are the same name too.
+func TestBuildFindingsSameValueInAnotherCaseOrFormAgrees(t *testing.T) {
+	cases := []struct {
+		name string
+		a    string
+		b    string
+	}{
+		{
+			name: "case",
+			a:    "the openai company was founded by Sam Altman.",
+			b:    "the openai company was founded by sam altman.",
+		},
+		{
+			name: "word form",
+			a:    "Компанию основал сэм альтман в 2015 году.",
+			b:    "Компанию основал сэма альтмана в 2015 году.",
+		},
+		{
+			name: "organisation case",
+			a:    "Метрики сервиса доступны в Grafana Cloud.",
+			b:    "метрики сервиса доступны в grafana cloud.",
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			findings := BuildFindings([]Candidate{
+				{Statement: testCase.a, Citation: citation("https://a.example.org/x", "A")},
+				{Statement: testCase.b, Citation: citation("https://b.example.net/x", "B")},
+			})
+			if len(findings) != 1 {
+				t.Fatalf("the same value is one claim, got %d: %+v", len(findings), findings)
+			}
+			if findings[0].Certainty != CertaintyFact {
+				t.Fatalf("two independent sites are a fact, got %s", findings[0].Certainty)
+			}
+		})
+	}
+}
+
 func TestBuildFindingsExtraDetailStillAgrees(t *testing.T) {
 	findings := BuildFindings([]Candidate{
 		{Statement: "The release adds generic type aliases to the language.", Citation: citation("https://a.example.org/1", "A")},
@@ -271,6 +366,43 @@ func TestBuildFindingsOrdersFactsFirst(t *testing.T) {
 	})
 	if findings[0].Certainty != CertaintyFact {
 		t.Fatalf("facts come first, got %s: %+v", findings[0].Certainty, findings)
+	}
+}
+
+// A citation saved before the reading-status field existed must not claim the
+// page was unread: LifeOS does not know, and "неизвестно" is not "нет".
+func TestLegacyCitationKeepsReadingStatusUnknown(t *testing.T) {
+	legacy := `{"url":"https://go.dev/doc/go1.24","title":"Go 1.24","site":"go.dev",` +
+		`"excerpt":"…","fetched_at":"2025-03-01T09:00:00Z","trust":"normal"}`
+	var citation Citation
+	if err := json.Unmarshal([]byte(legacy), &citation); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !citation.ReadUnknown {
+		t.Fatalf("a citation without the field has an unknown status: %+v", citation)
+	}
+	if citation.Read {
+		t.Fatalf("unknown is not read: %+v", citation)
+	}
+	encoded, err := json.Marshal(citation)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"read_unknown":true`) {
+		t.Fatalf("the round trip must keep the unknown status: %s", encoded)
+	}
+	if strings.Contains(string(encoded), `"read":`) {
+		t.Fatalf("an unknown status must not claim read or unread: %s", encoded)
+	}
+
+	// A new citation states its status plainly, and re-reading keeps it.
+	fresh := `{"url":"https://go.dev/doc/go1.24","fetched_at":"2025-03-01T09:00:00Z","trust":"normal","read":false}`
+	citation = Citation{}
+	if err := json.Unmarshal([]byte(fresh), &citation); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if citation.ReadUnknown || citation.Read {
+		t.Fatalf("a stated status is known: %+v", citation)
 	}
 }
 
@@ -416,6 +548,30 @@ func TestConnectionValidation(t *testing.T) {
 	search := &Connection{Name: "Searx", Kind: KindWebSearch, Mode: ModeRead, Format: FormatSearxng, Endpoint: "https://search.example.com/search?q={query}&format=json"}
 	if err := search.Validate(); err != nil {
 		t.Fatalf("valid search source rejected: %v", err)
+	}
+}
+
+// Which tools of an MCP server may be used without a write is the user's
+// decision, not the server's claim about itself.
+func TestConnectionToolAllowlist(t *testing.T) {
+	connection := Connection{
+		Name: "MCP", Kind: KindMCP, Mode: ModeRead,
+		Endpoint: "https://mcp.example.com/mcp", AllowedTools: []string{"read_repo", "list_issues"},
+	}
+	if err := connection.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if !connection.AllowsTool("read_repo") || connection.AllowsTool("delete_repo") {
+		t.Fatalf("the allowlist decides: %+v", connection.AllowedTools)
+	}
+	bad := connection
+	bad.AllowedTools = []string{"read_repo", "  "}
+	if err := bad.Validate(); !errors.Is(err, ErrInvalidTool) {
+		t.Fatalf("a blank tool name is invalid, got %v", err)
+	}
+	bad.AllowedTools = []string{strings.Repeat("x", 201)}
+	if err := bad.Validate(); !errors.Is(err, ErrInvalidTool) {
+		t.Fatalf("an oversized tool name is invalid, got %v", err)
 	}
 }
 

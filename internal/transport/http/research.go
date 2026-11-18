@@ -21,6 +21,9 @@ type researchCitationBody struct {
 	Excerpt string `json:"excerpt,omitempty"`
 	Trust   string `json:"trust"`
 	Read    bool   `json:"read"`
+	// ReadUnknown marks a report saved before reading status existed: the page
+	// may have been read, and LifeOS no longer knows. It is not "unread".
+	ReadUnknown bool `json:"read_unknown,omitempty"`
 }
 
 type researchFindingBody struct {
@@ -76,7 +79,8 @@ func newResearchReportBody(report *domainresearch.Report) researchReportBody {
 		for _, citation := range finding.Citations {
 			item.Citations = append(item.Citations, researchCitationBody{
 				URL: citation.URL, Title: citation.Title, Site: citation.Site,
-				Excerpt: citation.Excerpt, Trust: string(citation.Trust), Read: citation.Read,
+				Excerpt: citation.Excerpt, Trust: string(citation.Trust),
+				Read: citation.Read, ReadUnknown: citation.ReadUnknown,
 			})
 		}
 		body.Findings = append(body.Findings, item)
@@ -85,36 +89,45 @@ func newResearchReportBody(report *domainresearch.Report) researchReportBody {
 }
 
 type researchSourceBody struct {
-	ID         int64   `json:"id"`
-	Name       string  `json:"name"`
-	Kind       string  `json:"kind"`
-	Mode       string  `json:"mode"`
-	Trust      string  `json:"trust"`
-	Format     string  `json:"format,omitempty"`
-	Endpoint   string  `json:"endpoint"`
-	Notes      string  `json:"notes"`
-	Enabled    bool    `json:"enabled"`
-	LastUsedAt *string `json:"last_used_at,omitempty"`
-	CreatedAt  string  `json:"created_at"`
-	UpdatedAt  string  `json:"updated_at"`
-	Version    int     `json:"version"`
+	ID       int64  `json:"id"`
+	Name     string `json:"name"`
+	Kind     string `json:"kind"`
+	Mode     string `json:"mode"`
+	Trust    string `json:"trust"`
+	Format   string `json:"format,omitempty"`
+	Endpoint string `json:"endpoint"`
+	Notes    string `json:"notes"`
+	Enabled  bool   `json:"enabled"`
+	// AllowedTools are the tools of this source the user approved for use
+	// without a write. Only the user edits this list.
+	AllowedTools []string `json:"allowed_tools"`
+	LastUsedAt   *string  `json:"last_used_at,omitempty"`
+	CreatedAt    string   `json:"created_at"`
+	UpdatedAt    string   `json:"updated_at"`
+	Version      int      `json:"version"`
 }
 
 func newResearchSourceBody(connection *domainresearch.Connection) researchSourceBody {
+	allowedTools := connection.AllowedTools
+	if allowedTools == nil {
+		// The field is a list, not a maybe: a client reads `.join` on it.
+		allowedTools = []string{}
+	}
 	return researchSourceBody{
-		ID:         connection.ID,
-		Name:       connection.Name,
-		Kind:       string(connection.Kind),
-		Mode:       string(connection.Mode),
-		Trust:      string(connection.Trust),
-		Format:     string(connection.Format),
-		Endpoint:   connection.Endpoint,
-		Notes:      connection.Notes,
-		Enabled:    connection.Enabled,
-		LastUsedAt: formatOptionalTime(connection.LastUsedAt),
-		CreatedAt:  formatTime(connection.CreatedAt),
-		UpdatedAt:  formatTime(connection.UpdatedAt),
-		Version:    connection.Version,
+		ID:           connection.ID,
+		Name:         connection.Name,
+		Kind:         string(connection.Kind),
+		Mode:         string(connection.Mode),
+		Trust:        string(connection.Trust),
+		Format:       string(connection.Format),
+		Endpoint:     connection.Endpoint,
+		Notes:        connection.Notes,
+		Enabled:      connection.Enabled,
+		AllowedTools: allowedTools,
+		LastUsedAt:   formatOptionalTime(connection.LastUsedAt),
+		CreatedAt:    formatTime(connection.CreatedAt),
+		UpdatedAt:    formatTime(connection.UpdatedAt),
+		Version:      connection.Version,
 	}
 }
 
@@ -334,28 +347,30 @@ func (h *Handler) createResearchSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Name     string `json:"name"`
-		Kind     string `json:"kind"`
-		Mode     string `json:"mode"`
-		Trust    string `json:"trust"`
-		Format   string `json:"format"`
-		Endpoint string `json:"endpoint"`
-		Notes    string `json:"notes"`
-		Enabled  *bool  `json:"enabled"`
+		Name         string   `json:"name"`
+		Kind         string   `json:"kind"`
+		Mode         string   `json:"mode"`
+		Trust        string   `json:"trust"`
+		Format       string   `json:"format"`
+		Endpoint     string   `json:"endpoint"`
+		Notes        string   `json:"notes"`
+		Enabled      *bool    `json:"enabled"`
+		AllowedTools []string `json:"allowed_tools"`
 	}
 	if err := decodeResearchBody(r, &body); err != nil {
 		h.writeProblem(w, r, http.StatusBadRequest, "validation-failed", "Validation Failed", err.Error())
 		return
 	}
 	connection := &domainresearch.Connection{
-		Name:     body.Name,
-		Kind:     domainresearch.SourceKind(body.Kind),
-		Mode:     domainresearch.AccessMode(body.Mode),
-		Trust:    domainresearch.Trust(body.Trust),
-		Format:   domainresearch.SearchFormat(body.Format),
-		Endpoint: body.Endpoint,
-		Notes:    body.Notes,
-		Enabled:  true,
+		Name:         body.Name,
+		Kind:         domainresearch.SourceKind(body.Kind),
+		Mode:         domainresearch.AccessMode(body.Mode),
+		Trust:        domainresearch.Trust(body.Trust),
+		Format:       domainresearch.SearchFormat(body.Format),
+		Endpoint:     body.Endpoint,
+		Notes:        body.Notes,
+		Enabled:      true,
+		AllowedTools: body.AllowedTools,
 	}
 	if connection.Mode == "" {
 		connection.Mode = domainresearch.ModeRead
@@ -382,14 +397,15 @@ func (h *Handler) patchResearchSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Name            *string `json:"name"`
-		Notes           *string `json:"notes"`
-		Trust           *string `json:"trust"`
-		Mode            *string `json:"mode"`
-		Endpoint        *string `json:"endpoint"`
-		Format          *string `json:"format"`
-		Enabled         *bool   `json:"enabled"`
-		ExpectedVersion int     `json:"expected_version"`
+		Name            *string   `json:"name"`
+		Notes           *string   `json:"notes"`
+		Trust           *string   `json:"trust"`
+		Mode            *string   `json:"mode"`
+		Endpoint        *string   `json:"endpoint"`
+		Format          *string   `json:"format"`
+		Enabled         *bool     `json:"enabled"`
+		AllowedTools    *[]string `json:"allowed_tools"`
+		ExpectedVersion int       `json:"expected_version"`
 	}
 	if err := decodeResearchBody(r, &body); err != nil {
 		h.writeProblem(w, r, http.StatusBadRequest, "validation-failed", "Validation Failed", err.Error())
@@ -397,6 +413,7 @@ func (h *Handler) patchResearchSource(w http.ResponseWriter, r *http.Request) {
 	}
 	update := appresearch.ConnectionUpdate{
 		Name: body.Name, Notes: body.Notes, Endpoint: body.Endpoint, Enabled: body.Enabled,
+		AllowedTools: body.AllowedTools,
 	}
 	if body.Trust != nil {
 		trust := domainresearch.Trust(*body.Trust)

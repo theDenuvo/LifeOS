@@ -11,6 +11,7 @@
 package research
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -157,6 +158,12 @@ type Connection struct {
 	Endpoint string
 	Notes    string
 	Enabled  bool
+	// AllowedTools are the tools of an MCP server the user explicitly approved
+	// for use without a write: the server's own annotation is only a claim by
+	// that server, so the decision that a tool is safe to read with belongs to
+	// the user. A tool outside this list is a changing call and needs write
+	// permission.
+	AllowedTools []string
 	// CreatedByAssistant is true when the assistant registered the source.
 	// The user can still use it, but a script source must be authorised by
 	// the user themselves, so the assistant may not create one.
@@ -174,6 +181,7 @@ var (
 	ErrInvalidTrust    = errors.New("неизвестный уровень доверия")
 	ErrInvalidEndpoint = errors.New("адрес источника некорректен")
 	ErrInvalidFormat   = errors.New("неизвестный формат ответа поиска")
+	ErrInvalidTool     = errors.New("название инструмента источника некорректно")
 	ErrScriptNeedsUser = errors.New("источник-скрипт создаёт только пользователь: ассистент не подключает собственные команды")
 	ErrScriptReadOnly  = errors.New("источник-скрипт работает только на чтение")
 )
@@ -224,10 +232,30 @@ func (c *Connection) Validate() error {
 			return ErrScriptReadOnly
 		}
 	}
+	if len(c.AllowedTools) > 50 {
+		return ErrInvalidTool
+	}
+	for _, tool := range c.AllowedTools {
+		name := strings.TrimSpace(tool)
+		if name == "" || name != tool || utf8.RuneCountInString(name) > 200 {
+			return ErrInvalidTool
+		}
+	}
 	if utf8.RuneCountInString(c.Notes) > 2000 {
 		return errors.New("описание источника длиннее 2000 символов")
 	}
 	return nil
+}
+
+// AllowsTool reports whether the user approved this tool of the source for use
+// without a write. It is the user's decision, not the server's.
+func (c *Connection) AllowsTool(name string) bool {
+	for _, tool := range c.AllowedTools {
+		if tool == name {
+			return true
+		}
+	}
+	return false
 }
 
 func validateHTTPEndpoint(format SearchFormat, endpoint string) error {
@@ -270,9 +298,72 @@ type Citation struct {
 	// trust are separate properties — a low-trust source can still be read, and
 	// an unread page is unread no matter how respectable its site is.
 	Read bool `json:"read"`
+	// ReadUnknown marks a citation whose reading status LifeOS does not know:
+	// a report saved before the field existed. It is not the same as unread —
+	// saying the page was never opened would claim knowledge LifeOS does not
+	// have — and it never counts towards a fact.
+	ReadUnknown bool `json:"read_unknown,omitempty"`
 	// ConnectionID is the source the page came through; zero means the
 	// built-in web provider.
 	ConnectionID int64 `json:"connection_id,omitempty"`
+}
+
+// MarshalJSON keeps the reading status honest across formats: a citation whose
+// status is unknown says so, instead of claiming the page was unread.
+func (c Citation) MarshalJSON() ([]byte, error) {
+	type wire struct {
+		URL          string    `json:"url"`
+		Title        string    `json:"title,omitempty"`
+		Site         string    `json:"site,omitempty"`
+		Excerpt      string    `json:"excerpt,omitempty"`
+		FetchedAt    time.Time `json:"fetched_at"`
+		Trust        Trust     `json:"trust"`
+		Read         *bool     `json:"read,omitempty"`
+		ReadUnknown  bool      `json:"read_unknown,omitempty"`
+		ConnectionID int64     `json:"connection_id,omitempty"`
+	}
+	out := wire{
+		URL: c.URL, Title: c.Title, Site: c.Site, Excerpt: c.Excerpt,
+		FetchedAt: c.FetchedAt, Trust: c.Trust, ConnectionID: c.ConnectionID,
+	}
+	if c.ReadUnknown {
+		out.ReadUnknown = true
+	} else {
+		read := c.Read
+		out.Read = &read
+	}
+	return json.Marshal(out)
+}
+
+// UnmarshalJSON tells an unknown reading status from a known one: a report
+// saved before the field existed carries neither, and that is unknown.
+func (c *Citation) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		URL          string    `json:"url"`
+		Title        string    `json:"title"`
+		Site         string    `json:"site"`
+		Excerpt      string    `json:"excerpt"`
+		FetchedAt    time.Time `json:"fetched_at"`
+		Trust        Trust     `json:"trust"`
+		Read         *bool     `json:"read"`
+		ReadUnknown  bool      `json:"read_unknown"`
+		ConnectionID int64     `json:"connection_id"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*c = Citation{
+		URL: raw.URL, Title: raw.Title, Site: raw.Site, Excerpt: raw.Excerpt,
+		FetchedAt: raw.FetchedAt, Trust: raw.Trust,
+		Read: raw.Read != nil && *raw.Read, ReadUnknown: raw.ReadUnknown,
+		ConnectionID: raw.ConnectionID,
+	}
+	if raw.Read == nil && !raw.ReadUnknown {
+		// A citation saved before the field existed: the page may well have
+		// been read, and LifeOS no longer knows which.
+		c.ReadUnknown = true
+	}
+	return nil
 }
 
 // Validate checks that a citation can be shown and re-opened.
@@ -562,14 +653,21 @@ const (
 	// X" against "founded by Y"). With more differences they are simply two
 	// different claims, and calling them a disagreement would be noise.
 	maxSubstitutionNoise = 3
+	// maxSubstitutionRun bounds how many words on each side may stand in for
+	// each other in one substituted slot: "founded by sam altman" against
+	// "founded by elon musk" is a substitution, while two statements that
+	// disagree in half their words are simply different claims.
+	maxSubstitutionRun = 5
 )
 
-// claim is one statement prepared for comparison: its significant words and
-// the values it names. Both matter, because two statements can be worded
-// almost identically and still say opposite things.
+// claim is one statement prepared for comparison: its significant words, the
+// same words in the order they were said, and the values it names. All matter,
+// because two statements can be worded almost identically and still say
+// opposite things — and because a swapped value leaves the wording untouched.
 type claim struct {
 	statement string
 	tokens    []string
+	ordered   []string
 	entities  []string
 }
 
@@ -577,8 +675,24 @@ func newClaim(statement string) claim {
 	return claim{
 		statement: strings.TrimSpace(statement),
 		tokens:    Tokens(statement),
+		ordered:   orderedWords(statement),
 		entities:  Entities(statement),
 	}
+}
+
+// orderedWords returns the significant words in the order they were said. A
+// sorted bag of words can measure how much two statements share, but not where
+// they differ, and "where" is what tells a swapped value from an extra detail.
+func orderedWords(text string) []string {
+	words := rawWords(text)
+	kept := make([]string, 0, len(words))
+	for _, word := range words {
+		if len([]rune(word)) < 3 || stopwords[word] {
+			continue
+		}
+		kept = append(kept, word)
+	}
+	return kept
 }
 
 // sameClaim reports whether two statements say the same thing. They must agree
@@ -605,7 +719,7 @@ func (c claim) sameClaim(other claim, threshold float64) bool {
 	if len(mine) > 0 && len(theirs) > 0 {
 		return false
 	}
-	return true
+	return !c.valueSubstitution(other)
 }
 
 // contradicts reports whether two statements about the same subject disagree.
@@ -622,6 +736,9 @@ func (c claim) contradicts(other claim) bool {
 	if negationDiffers(c.statement, other.statement, shared) {
 		return true
 	}
+	if c.valueSubstitution(other) {
+		return true
+	}
 	mine, theirs := c.uniqueEntities(other)
 	if len(mine) == 0 || len(theirs) == 0 {
 		// One statement simply names more than the other.
@@ -629,6 +746,125 @@ func (c claim) contradicts(other claim) bool {
 	}
 	return len(c.uniqueWords(other)) <= maxSubstitutionNoise &&
 		len(other.uniqueWords(c)) <= maxSubstitutionNoise
+}
+
+// valueSubstitution reports whether the two statements fill one slot with
+// different values. Names are not always capitalised — forum posts, transcripts
+// and machine-generated pages write "sam altman" and "elon musk" in lower case,
+// where no capitalisation heuristic can see them — so the shape of the sentence
+// decides instead: one statement turns into the other by adding or dropping
+// words, never by putting two different words in the same place. Where two
+// different words do face each other, the wording is the same and the values
+// are the whole point.
+//
+// "In Go 1.24 the language adds…" against "The release adds generic type
+// aliases to the language…" agrees on this test: its differences are scattered
+// one-sided extras, not a pair standing in each other's way.
+func (c claim) valueSubstitution(other claim) bool {
+	if alignSequences(c.ordered, other.ordered) {
+		return false
+	}
+	mine := unmatchedWords(c.tokens, other.tokens)
+	theirs := unmatchedWords(other.tokens, c.tokens)
+	if len(mine) == 0 || len(theirs) == 0 {
+		return false
+	}
+	return len(mine) <= maxSubstitutionRun && len(theirs) <= maxSubstitutionRun
+}
+
+// gapSide is which statement has been dropping words at the current point of
+// the alignment. Both may not drop at once: that is the substituted slot.
+type gapSide int
+
+const (
+	gapNone gapSide = iota
+	gapLeft
+	gapRight
+)
+
+// alignSequences reports whether one statement turns into the other by adding
+// or dropping words alone. Between two matching words only one side may have a
+// run of its own; a run on both sides means two different words stood in the
+// same place.
+func alignSequences(a, b []string) bool {
+	type state struct {
+		i, j int
+		side gapSide
+	}
+	memo := make(map[state]bool, len(a)*len(b)*3)
+	done := make(map[state]bool, len(a)*len(b)*3)
+	var walk func(i, j int, side gapSide) bool
+	walk = func(i, j int, side gapSide) bool {
+		if i == len(a) && j == len(b) {
+			return true
+		}
+		key := state{i, j, side}
+		if done[key] {
+			return memo[key]
+		}
+		done[key] = true
+		result := false
+		switch {
+		case i < len(a) && side != gapRight && walk(i+1, j, gapLeft):
+			result = true
+		case j < len(b) && side != gapLeft && walk(i, j+1, gapRight):
+			result = true
+		case i < len(a) && j < len(b) && sameValueWord(a[i], b[j]) && walk(i+1, j+1, gapNone):
+			result = true
+		}
+		memo[key] = result
+		return result
+	}
+	return walk(0, 0, gapNone)
+}
+
+// unmatchedWords returns the words of a that b does not contain in any form,
+// pairing off word forms so only genuine differences remain.
+func unmatchedWords(a, b []string) []string {
+	used := make([]bool, len(b))
+	missing := make([]string, 0, len(a))
+	for _, word := range a {
+		matched := false
+		for i, candidate := range b {
+			if used[i] || !sameValueWord(word, candidate) {
+				continue
+			}
+			used[i] = true
+			matched = true
+			break
+		}
+		if !matched {
+			missing = append(missing, word)
+		}
+	}
+	return missing
+}
+
+// sameValueWord reports whether two unmatched words are still one value: the
+// same word, two spellings of one number, or two forms of one word.
+func sameValueWord(a, b string) bool {
+	if isNumericToken(a) || isNumericToken(b) {
+		return isNumericToken(a) && isNumericToken(b) && normalizeNumber(a) == normalizeNumber(b)
+	}
+	if SameWord(a, b) {
+		return true
+	}
+	short, long := []rune(a), []rune(b)
+	if len(short) > len(long) {
+		short, long = long, short
+	}
+	if len(short) < 3 {
+		return false
+	}
+	common := 0
+	for common < len(short) && short[common] == long[common] {
+		common++
+	}
+	// Inflection changes the ending and almost nothing else: «сэм»/«сэма»,
+	// "supports"/"supported". A longer difference is another word ("runs" and
+	// "runner" share a stem and mean different things), and a substituted value
+	// must be able to look like one.
+	return common >= 3 && len(short)-common <= 1 && len(long)-common <= 2
 }
 
 // uniqueEntities returns the values each statement names that the other does

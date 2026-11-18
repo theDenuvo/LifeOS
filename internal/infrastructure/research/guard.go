@@ -11,28 +11,58 @@ import (
 	"time"
 )
 
-// Page reading is the one place where LifeOS follows an address it did not
-// choose: a search result, a link the model proposed, a redirect on a page.
-// That address can point at the machine LifeOS runs on — a local admin panel, a
-// database port, a cloud metadata endpoint — so every hop is checked against
-// the public internet before a connection is made.
+// Everything LifeOS sends out follows an address it did not choose: a search
+// result, a link the model proposed, a redirect on a page or on a call to a
+// connected source. That address can point at the machine LifeOS runs on — a
+// local admin panel, a database port, a cloud metadata endpoint — so one guard
+// decides every hop of every request: page reading, web search and the calls
+// to connected sources all go through it, and the connection is made to the
+// address the guard checked.
 
-// errPrivateAddress is returned when a page address leads somewhere local.
+// errPrivateAddress is returned when an address leads somewhere local.
 var errPrivateAddress = errors.New("адрес ведёт во внутреннюю сеть")
 
-// maxPageRedirects bounds how many times a page may redirect.
+// maxPageRedirects bounds how many times a request may redirect.
 const maxPageRedirects = 5
 
-// publicHostGuard decides whether a host may be contacted for page reading.
-// allowHost is the one host the user configured themselves (a search endpoint),
-// which may legitimately live on the local network; everything else must be a
-// public address.
-type publicHostGuard struct {
-	allowHost string
-	resolver  *net.Resolver
+// netPolicy says where traffic of one kind is allowed to go.
+type netPolicy int
+
+const (
+	// policyPublicPage is page reading: the address came from a search result
+	// or from the model, so it must lead to the public internet and nowhere
+	// else.
+	policyPublicPage netPolicy = iota
+	// policyUserSource is an endpoint the user typed: a search endpoint, an
+	// HTTP API, an MCP server. It may live on the user's own network — a
+	// self-hosted search service is a normal thing to connect — but only that
+	// one host is local: a redirect to another machine of the internal network
+	// is not the source the user named, and a service address is never allowed.
+	policyUserSource
+)
+
+// Resolver turns a host name into addresses. Tests replace it to describe a
+// network that does not exist, including one whose DNS answers change between
+// two lookups.
+type Resolver interface {
+	LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error)
 }
 
-// checkURL validates the address before any connection is made.
+// publicHostGuard decides which addresses LifeOS may contact and dials only
+// addresses it has checked. Resolving a name twice — once to check, once to
+// connect — would leave a window for DNS rebinding, where the second answer
+// points somewhere local.
+type publicHostGuard struct {
+	policy     netPolicy
+	originHost string
+	// allowLocal accepts non-public addresses everywhere. It exists for tests
+	// and for a single-user build that reads its own network on purpose; a
+	// service address stays refused even then.
+	allowLocal bool
+	resolver   Resolver
+}
+
+// checkURL validates an address before any connection is made to it.
 func (g publicHostGuard) checkURL(ctx context.Context, target *url.URL) error {
 	if target == nil {
 		return errPrivateAddress
@@ -44,26 +74,18 @@ func (g publicHostGuard) checkURL(ctx context.Context, target *url.URL) error {
 	if host == "" {
 		return fmt.Errorf("адрес страницы некорректен: %q", target.String())
 	}
-	if g.allowHost != "" && strings.EqualFold(host, g.allowHost) {
-		return nil
-	}
-	_, err := g.resolvePublic(ctx, host)
+	_, err := g.resolveChecked(ctx, host)
 	return err
 }
 
 // dial checks the address again at connection time and connects to the address
-// that was checked. Resolving twice would leave a window for DNS rebinding: the
-// name would pass the check, then resolve somewhere local for the real dial.
+// that was checked.
 func (g publicHostGuard) dial(ctx context.Context, network, address string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
 		return nil, err
 	}
-	if g.allowHost != "" && strings.EqualFold(host, g.allowHost) {
-		var dialer net.Dialer
-		return dialer.DialContext(ctx, network, address)
-	}
-	ips, err := g.resolvePublic(ctx, host)
+	ips, err := g.resolveChecked(ctx, host)
 	if err != nil {
 		return nil, err
 	}
@@ -82,13 +104,14 @@ func (g publicHostGuard) dial(ctx context.Context, network, address string) (net
 	return nil, lastErr
 }
 
-// resolvePublic resolves a host and returns its addresses, refusing the whole
-// host if any of them is not public: one local answer is enough to make the
-// name untrustworthy.
-func (g publicHostGuard) resolvePublic(ctx context.Context, host string) ([]net.IP, error) {
+// resolveChecked resolves a host and returns its addresses, refusing the host
+// when any of them is off limits: one bad answer is enough to make the name
+// untrustworthy.
+func (g publicHostGuard) resolveChecked(ctx context.Context, host string) ([]net.IP, error) {
+	local := g.allowLocal || (g.policy == policyUserSource && strings.EqualFold(host, g.originHost))
 	if ip := net.ParseIP(host); ip != nil {
-		if !isPublicAddress(ip) {
-			return nil, fmt.Errorf("%w: %s", errPrivateAddress, host)
+		if err := g.checkIP(ip, host, local); err != nil {
+			return nil, err
 		}
 		return []net.IP{ip}, nil
 	}
@@ -105,17 +128,30 @@ func (g publicHostGuard) resolvePublic(ctx context.Context, host string) ([]net.
 	}
 	ips := make([]net.IP, 0, len(addrs))
 	for _, addr := range addrs {
-		if !isPublicAddress(addr.IP) {
-			return nil, fmt.Errorf("%w: %s", errPrivateAddress, host)
+		if err := g.checkIP(addr.IP, host, local); err != nil {
+			return nil, err
 		}
 		ips = append(ips, addr.IP)
 	}
 	return ips, nil
 }
 
+// checkIP applies the rules to one resolved address.
+func (g publicHostGuard) checkIP(ip net.IP, host string, local bool) error {
+	if isMetadataAddress(ip) {
+		// A service address is refused in every policy: it answers about the
+		// machine LifeOS runs on, and nothing legitimate is hosted there.
+		return fmt.Errorf("%w: %s — адрес служебного сервиса", errPrivateAddress, host)
+	}
+	if !local && !isPublicAddress(ip) {
+		return fmt.Errorf("%w: %s", errPrivateAddress, host)
+	}
+	return nil
+}
+
 // isPublicAddress reports whether an address belongs to the public internet.
-// Loopback, private, link-local (which includes the cloud metadata endpoint),
-// carrier-grade NAT, multicast and unspecified addresses are not public.
+// Loopback, private, link-local, carrier-grade NAT, multicast and unspecified
+// addresses are not public.
 func isPublicAddress(ip net.IP) bool {
 	if ip == nil {
 		return false
@@ -138,71 +174,52 @@ func isPublicAddress(ip net.IP) bool {
 	return true
 }
 
-// checkSourceEndpoint refuses a connected source that points at the link-local
-// range, where cloud metadata endpoints live. A source is an address the user
-// typed, so loopback and private addresses stay allowed — a local service is a
-// legitimate source — but nothing legitimate lives at 169.254.0.0/16, and
-// reaching it is the classic escalation from an allowed address.
-func (g publicHostGuard) checkSourceEndpoint(ctx context.Context, rawURL string) error {
-	parsed, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil || parsed.Host == "" {
-		return nil
-	}
-	host := parsed.Hostname()
-	if ip := net.ParseIP(host); ip != nil {
-		if isMetadataAddress(ip) {
-			return fmt.Errorf("%w: %s — адрес служебного сервиса", errPrivateAddress, host)
-		}
-		return nil
-	}
-	resolver := g.resolver
-	if resolver == nil {
-		resolver = net.DefaultResolver
-	}
-	addrs, err := resolver.LookupIPAddr(ctx, host)
-	if err != nil {
-		// A name that does not resolve fails at the call itself, with a better
-		// message than this pre-check could give.
-		return nil
-	}
-	for _, addr := range addrs {
-		if isMetadataAddress(addr.IP) {
-			return fmt.Errorf("%w: %s — адрес служебного сервиса", errPrivateAddress, host)
-		}
-	}
-	return nil
+// metadataAddresses are the fixed service addresses clouds answer on. The
+// link-local range covers most of them (169.254.169.254 and friends); the
+// others sit in ranges a private-source policy would otherwise allow.
+var metadataAddresses = map[string]bool{
+	"100.100.100.200": true, // Alibaba Cloud ECS
+	"192.0.0.192":     true, // Oracle Cloud
+	"fd00:ec2::254":   true, // Amazon EC2 (IPv6)
 }
 
-// metadataAddress is the IPv6 metadata endpoint some clouds publish. It is a
-// unique-local address, so it is not link-local by classification, but it is
-// never a service a source should reach.
-var metadataAddress = net.ParseIP("fd00:ec2::254")
-
 // isMetadataAddress reports whether an address belongs to a service-metadata
-// range rather than to a real service.
+// endpoint rather than to a real service.
 func isMetadataAddress(ip net.IP) bool {
 	if ip == nil {
 		return true
 	}
-	if ip.IsLinkLocalUnicast() || ip.Equal(metadataAddress) {
+	if ip.IsLinkLocalUnicast() {
 		return true
 	}
-	return false
+	return metadataAddresses[strings.ToLower(ip.String())]
 }
 
-// guardedClient builds the HTTP client used for page reading: every request and
-// every redirect goes through the same check.
-func (c *Client) guardedClient(allowHost string) *http.Client {
+// guardedClient builds the HTTP client for one kind of traffic: every request
+// and every redirect goes through the same check, and the connection is made
+// to an address the check has seen.
+func (c *Client) guardedClient(policy netPolicy, originHost string) *http.Client {
+	if c.allowPrivateHosts && c.injected != nil {
+		// An explicitly injected client with the guard off: tests replace the
+		// transport to describe their own network.
+		return c.injected
+	}
 	timeout := c.timeout
 	if timeout <= 0 {
 		timeout = defaultTimeout
 	}
-	guard := publicHostGuard{allowHost: strings.ToLower(allowHost)}
-	if c.allowPrivateHosts {
-		// The guard is off, so the configured client is used as it is: an
-		// injected transport keeps working, which is what tests rely on.
-		return c.http
+	guard := publicHostGuard{
+		policy:     policy,
+		originHost: strings.ToLower(strings.TrimSpace(originHost)),
+		allowLocal: c.allowPrivateHosts,
+		resolver:   c.resolver,
 	}
+	return newGuardedHTTPClient(guard, timeout)
+}
+
+// newGuardedHTTPClient binds one guard into a client: the transport dials only
+// checked addresses and every redirect is checked before it is followed.
+func newGuardedHTTPClient(guard publicHostGuard, timeout time.Duration) *http.Client {
 	transport := &http.Transport{
 		Proxy:                 nil,
 		DialContext:           guard.dial,
@@ -219,6 +236,9 @@ func (c *Client) guardedClient(allowHost string) *http.Client {
 			if len(via) >= maxPageRedirects {
 				return fmt.Errorf("страница перенаправляет слишком много раз")
 			}
+			// A redirect is a new address and is checked like one: a page that
+			// points into the local network is the same hole as a page that
+			// lives there.
 			return guard.checkURL(request.Context(), request.URL)
 		},
 	}

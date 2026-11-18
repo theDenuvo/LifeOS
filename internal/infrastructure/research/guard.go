@@ -112,12 +112,39 @@ func (g publicHostGuard) resolveChecked(ctx context.Context, host string) ([]net
 	if err != nil {
 		return nil, err
 	}
+	if err := g.refuseMixedAnswers(host, ips); err != nil {
+		return nil, err
+	}
 	for _, ip := range ips {
-		if err := g.checkIP(ctx, ip, host); err != nil {
+		if err := g.checkIP(ctx, ip, host, false); err != nil {
 			return nil, err
 		}
 	}
 	return ips, nil
+}
+
+// refuseMixedAnswers refuses a name whose answer mixes addresses the rules
+// treat differently. A name that answers both a public address and an internal
+// one is not a host with two addresses, it is a trap: whichever way the
+// connection lands, one of the two answers is a lie, and a check that judged
+// the answers one by one would let the local one through on the strength of
+// the other.
+func (g publicHostGuard) refuseMixedAnswers(host string, ips []net.IP) error {
+	if g.allowLocal {
+		return nil
+	}
+	hasPublic, hasInternal := false, false
+	for _, ip := range ips {
+		if isPublicAddress(ip) {
+			hasPublic = true
+		} else {
+			hasInternal = true
+		}
+	}
+	if hasPublic && hasInternal {
+		return fmt.Errorf("%w: %s — DNS-ответ смешивает публичные и внутренние адреса", errPrivateAddress, host)
+	}
+	return nil
 }
 
 // resolveAddresses resolves a host without judging the answers.
@@ -145,10 +172,12 @@ func (g publicHostGuard) resolveAddresses(ctx context.Context, host string) ([]n
 
 // checkIP applies the rules to one resolved address. A local address is not
 // refused for its own sake: the user may point a source at their own machine.
-// But the name does not decide — the check does. A local address is let in
-// only when it was in the answer that the endpoint check accepted; a name that
-// answers differently a moment later (DNS rebinding) is refused at the door.
-func (g publicHostGuard) checkIP(ctx context.Context, ip net.IP, host string) error {
+// But neither the name nor the answer decides — the check does. A local
+// address is let in when the endpoint check established it (the address the
+// user pointed at) and later only when it is still that same address; a name
+// that answers differently a moment later (DNS rebinding) is refused at the
+// door.
+func (g publicHostGuard) checkIP(ctx context.Context, ip net.IP, host string, establishing bool) error {
 	if isMetadataAddress(ip) {
 		// A service address is refused in every policy: it answers about the
 		// machine LifeOS runs on, and nothing legitimate is hosted there.
@@ -158,7 +187,7 @@ func (g publicHostGuard) checkIP(ctx context.Context, ip net.IP, host string) er
 		return nil
 	}
 	if g.policy == policyUserSource && strings.EqualFold(host, g.originHost) {
-		if pinnedAddress(ctx, host, ip) {
+		if establishing || pinnedAddress(ctx, host, ip) {
 			return nil
 		}
 		// The name answered as something else than when it was checked: the
@@ -191,13 +220,19 @@ func (g publicHostGuard) pinEndpoint(ctx context.Context, target *url.URL) (cont
 	if err != nil {
 		return nil, err
 	}
-	ctx = withPinnedAddresses(ctx, host, ips)
+	if err := g.refuseMixedAnswers(host, ips); err != nil {
+		return nil, err
+	}
+	// The answer is judged before it is remembered: being in the first answer
+	// is not a permission, or a name could hand itself a local address by
+	// answering it alongside a public one. Only addresses that passed the
+	// check are pinned, and the connection may land on nothing else.
 	for _, ip := range ips {
-		if err := g.checkIP(ctx, ip, host); err != nil {
+		if err := g.checkIP(ctx, ip, host, true); err != nil {
 			return nil, err
 		}
 	}
-	return ctx, nil
+	return withPinnedAddresses(ctx, host, ips), nil
 }
 
 // withPinnedAddresses records the checked answer for a host in the context the

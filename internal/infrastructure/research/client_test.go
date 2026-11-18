@@ -584,6 +584,60 @@ func TestSourceDNSRebindingToLocalIsRefused(t *testing.T) {
 	}
 }
 
+// A mixed DNS answer is the same door with both keys in one lock: a name that
+// answers a public address *and* a local one in a single response would pass
+// the local address on the strength of the public one if the answers were
+// judged one by one. The answer as a whole is refused — for a connected HTTP
+// API, for MCP and for search — and the internal handler never sees a request.
+func TestSourceMixedDNSAnswerIsRefused(t *testing.T) {
+	landed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("the internal address of a mixed answer must never be connected to")
+	}))
+	defer landed.Close()
+	landedPort := strings.TrimPrefix(landed.URL, "http://127.0.0.1:")
+	mixed := func() Resolver {
+		return staticResolver{
+			"api.example.com": {
+				{IP: net.ParseIP("127.0.0.1")},
+				{IP: net.ParseIP("93.184.216.34")},
+			},
+		}
+	}
+
+	httpAPI := &domainresearch.Connection{
+		ID: 1, Name: "API", Kind: domainresearch.KindHTTPAPI, Mode: domainresearch.ModeRead,
+		Endpoint: "http://api.example.com:" + landedPort, Enabled: true,
+	}
+	client := NewClient(Options{Timeout: 2 * time.Second, Resolver: mixed()})
+	if _, err := client.Call(context.Background(), httpAPI, appresearch.CallRequest{Operation: "/status", Method: "GET"}); err == nil {
+		t.Fatal("a mixed DNS answer must be refused for the HTTP API")
+	} else if !strings.Contains(err.Error(), "смешивает") {
+		t.Fatalf("the refusal must name the mixed answer, got %v", err)
+	}
+
+	mcp := *httpAPI
+	mcp.Kind = domainresearch.KindMCP
+	mcp.Endpoint = "http://api.example.com:" + landedPort + "/mcp"
+	client = NewClient(Options{Timeout: 2 * time.Second, Resolver: mixed()})
+	if _, err := client.Call(context.Background(), &mcp, appresearch.CallRequest{Operation: "tools/list"}); err == nil {
+		t.Fatal("a mixed DNS answer must be refused for MCP")
+	} else if !strings.Contains(err.Error(), "смешивает") {
+		t.Fatalf("the refusal must name the mixed answer, got %v", err)
+	}
+
+	// Search with the mixed answer: even the explicitly allowed local search
+	// takes an answer that mixes the two worlds for a lie.
+	client = NewClient(Options{
+		Timeout: 2 * time.Second, Resolver: mixed(), AllowLocalSearch: true,
+		SearchURL: "http://api.example.com:" + landedPort + "/search?q={query}", SearchFormat: "searxng",
+	})
+	if _, err := client.Search(context.Background(), nil, "go", 5); err == nil {
+		t.Fatal("a mixed DNS answer must be refused for search")
+	} else if !strings.Contains(err.Error(), "смешивает") {
+		t.Fatalf("the refusal must name the mixed answer, got %v", err)
+	}
+}
+
 // The built-in search endpoint lives on the local network only when the user
 // says so. Without the switch it is refused; with it, the pinned address keeps
 // it reachable and the pin keeps it honest — the name cannot wander to another

@@ -140,6 +140,12 @@ func (s *Service) StartResearch(ctx context.Context, input ResearchInput) (*doma
 	if err != nil {
 		return nil, err
 	}
+	// The caller gets a snapshot and the job gets the report itself: the run
+	// writes status, findings and summary while the response is being
+	// serialised, and one report cannot be in two hands at once. The snapshot
+	// is taken before the goroutine exists — otherwise the copy and the first
+	// write race each other.
+	snapshot := cloneReport(report)
 	s.jobs.Add(1)
 	go func() {
 		defer s.jobs.Done()
@@ -153,10 +159,7 @@ func (s *Service) StartResearch(ctx context.Context, input ResearchInput) (*doma
 		}
 		s.deliver(jobCtx, input.ConversationID, final)
 	}()
-	// The caller gets a snapshot and the job gets the report itself: the run
-	// writes status, findings and summary while the response is being
-	// serialised, and one report cannot be in two hands at once.
-	return cloneReport(report), nil
+	return snapshot, nil
 }
 
 // cloneReport copies a report deep enough that a snapshot does not share

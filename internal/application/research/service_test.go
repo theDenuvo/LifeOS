@@ -1532,6 +1532,50 @@ func TestCancelledRunStillRecordsItsOutcome(t *testing.T) {
 
 // StartResearch answers while the work is still going, and the report is
 // finished in the background.
+// TestStartResearchReturnsASnapshot pins the ownership split behind the
+// background run: the answer a caller serialises is a snapshot, and the run
+// owns a report of its own. They must not be the same report — the race
+// detector sees the sharing as a write against the response, and a reader
+// sees a report whose status changes under it.
+func TestStartResearchReturnsASnapshot(t *testing.T) {
+	repo := newMemoryRepository()
+	web := newFakeWeb()
+	service, _, _ := newService(repo, web, nil)
+	web.results["golang language"] = []appresearch.SearchResult{{Title: "Go", URL: "https://go.dev/doc"}}
+	web.pages["https://go.dev/doc"] = page("https://go.dev/doc", "Go",
+		"Go is a statically typed, compiled programming language designed at Google for building reliable software.")
+
+	started, err := service.StartResearch(context.Background(), appresearch.ResearchInput{
+		Question: "Что такое язык Go?", Queries: []string{"golang language"},
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := service.Wait(waitCtx); err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	// The run has finished and rewritten its report; the snapshot handed to
+	// the caller must still say exactly what it said when it was taken.
+	if started.Status != domainresearch.ReportRunning {
+		t.Fatalf("the snapshot moved under its reader: %s", started.Status)
+	}
+	if len(started.Findings) != 0 || started.Summary != "" || started.FinishedAt != nil {
+		t.Fatalf("the snapshot was filled in by the run: %+v", started)
+	}
+	finished, err := service.GetReport(context.Background(), started.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if finished.Status != domainresearch.ReportCompleted {
+		t.Fatalf("the run must finish its own report, got %s (%s)", finished.Status, finished.Error)
+	}
+	if len(finished.Findings) == 0 {
+		t.Fatalf("the report has no findings: %+v", finished)
+	}
+}
+
 func TestStartResearchKeepsRunningInTheBackground(t *testing.T) {
 	repo := newMemoryRepository()
 	web := newFakeWeb()

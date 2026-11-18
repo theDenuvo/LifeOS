@@ -230,9 +230,10 @@ func main() {
 	// keeps its citations and its certainty level. It is built before the
 	// proactive service so a watched topic that changed can become an insight.
 	researchClient := infraresearch.NewClient(infraresearch.Options{
-		SearchURL:    cfg.SearchURL,
-		SearchFormat: cfg.SearchFormat,
-		Timeout:      time.Duration(cfg.ResearchTimeoutSeconds) * time.Second,
+		SearchURL:        cfg.SearchURL,
+		SearchFormat:     cfg.SearchFormat,
+		Timeout:          time.Duration(cfg.ResearchTimeoutSeconds) * time.Second,
+		AllowLocalSearch: cfg.AllowLocalSearch,
 	})
 	// The delivery target is wired after the assistant exists; until then a
 	// finished run has only its report and the event stream, which is the
@@ -462,10 +463,26 @@ func main() {
 	// honest option, and it happens before the server accepts a single request
 	// — otherwise a report created on this start could be closed as interrupted
 	// while it is still running. The same rule the automations recovery above
-	// follows.
-	if recovered, err := researchService.RecoverInterrupted(context.Background()); err != nil {
-		slog.Error("research: closing interrupted work failed", "error", err)
-	} else if recovered.Reports > 0 || recovered.Calls > 0 {
+	// follows, and the same consequence: if the state cannot be proven, LifeOS
+	// does not start — old reports must not stay "running" for the whole life of
+	// the process just because one write failed.
+	var recovered appresearch.Recovery
+	var recoverErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		attemptCtx, attemptCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		recovered, recoverErr = researchService.RecoverInterrupted(attemptCtx)
+		attemptCancel()
+		if recoverErr == nil {
+			break
+		}
+		slog.Warn("research: closing interrupted work failed, retrying", "attempt", attempt, "error", recoverErr)
+		time.Sleep(250 * time.Millisecond)
+	}
+	if recoverErr != nil {
+		slog.Error("research: could not close interrupted work; refusing to start on an unproven run state", "error", recoverErr)
+		os.Exit(1)
+	}
+	if recovered.Reports > 0 || recovered.Calls > 0 {
 		slog.Info("research: closed work interrupted by the previous shutdown",
 			"reports", recovered.Reports, "calls", recovered.Calls)
 	}

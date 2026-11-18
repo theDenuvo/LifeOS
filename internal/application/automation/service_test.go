@@ -334,17 +334,24 @@ func (r *fakeRepo) RecoverRunning(_ context.Context, at time.Time) ([]*domainaut
 	return recovered, nil
 }
 
-func (r *fakeRepo) RecordSkipped(_ context.Context, automationID int64, trigger, reason string, at time.Time) (int64, error) {
+func (r *fakeRepo) RecordSkipped(ctx context.Context, automationID int64, trigger, reason string, at time.Time) (int64, error) {
 	// The gate is waited on before the lock, so a frozen write does not
-	// block the whole store.
+	// block the whole store. The write latency itself is modelled the same
+	// way a real database has it — outside the lock and cancelled with the
+	// write's own context — or every other write queues behind the sleep and
+	// the shutdown measurement times the fake, not the drain.
 	if r.skipGate != nil {
 		<-r.skipGate
 	}
+	if r.skipDelay > 0 {
+		select {
+		case <-time.After(r.skipDelay):
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.skipDelay > 0 {
-		time.Sleep(r.skipDelay)
-	}
 	id := r.next()
 	r.runs[id] = &domainautomation.Run{
 		ID: id, AutomationID: automationID, Trigger: trigger,

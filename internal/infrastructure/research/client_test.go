@@ -534,6 +534,129 @@ func TestPrivateAddressesAreRecognised(t *testing.T) {
 	}
 }
 
+// DNS rebinding against a connected source: the name answers as a public host
+// when the endpoint is checked and as a local one when the connection is made.
+// The check pins the addresses it saw, so a name that answers differently does
+// not get connected to — for the HTTP API and for MCP, which answers over HTTP
+// too. A rebindable name must not be a door into the machine LifeOS runs on.
+func TestSourceDNSRebindingToLocalIsRefused(t *testing.T) {
+	landed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("the rebound local answer must never be connected to")
+	}))
+	defer landed.Close()
+	landedPort := strings.TrimPrefix(landed.URL, "http://127.0.0.1:")
+	rebind := func() Resolver {
+		return &seqResolver{answers: map[string][][]net.IPAddr{
+			"api.example.com": {
+				{{IP: net.ParseIP("93.184.216.34")}},
+				{{IP: net.ParseIP("127.0.0.1")}},
+			},
+		}}
+	}
+
+	httpAPI := &domainresearch.Connection{
+		ID: 1, Name: "API", Kind: domainresearch.KindHTTPAPI, Mode: domainresearch.ModeRead,
+		Endpoint: "http://api.example.com:" + landedPort, Enabled: true,
+	}
+	client := NewClient(Options{Timeout: 2 * time.Second, Resolver: rebind()})
+	if _, err := client.Call(context.Background(), httpAPI, appresearch.CallRequest{Operation: "/status", Method: "GET"}); err == nil {
+		t.Fatal("a source name that rebinds to a local address must be refused")
+	} else if !strings.Contains(err.Error(), "изменился после проверки") {
+		t.Fatalf("the refusal must name the changed address, got %v", err)
+	}
+
+	mcp := *httpAPI
+	mcp.Kind = domainresearch.KindMCP
+	mcp.Endpoint = "http://api.example.com:" + landedPort + "/mcp"
+	client = NewClient(Options{Timeout: 2 * time.Second, Resolver: rebind()})
+	if _, err := client.Call(context.Background(), &mcp, appresearch.CallRequest{Operation: "tools/list"}); err == nil {
+		t.Fatal("an MCP server name that rebinds to a local address must be refused")
+	} else if !strings.Contains(err.Error(), "изменился после проверки") {
+		t.Fatalf("the refusal must name the changed address, got %v", err)
+	}
+
+	// The built-in search endpoint is configuration, not a connected source:
+	// without the explicit switch it is public traffic and rebinds no more
+	// than a page does.
+	client = NewClient(Options{Timeout: 2 * time.Second, Resolver: rebind()})
+	if _, err := client.Search(context.Background(), nil, "go", 5); err == nil {
+		t.Fatal("a built-in search endpoint that rebinds to a local address must be refused")
+	}
+}
+
+// The built-in search endpoint lives on the local network only when the user
+// says so. Without the switch it is refused; with it, the pinned address keeps
+// it reachable and the pin keeps it honest — the name cannot wander to another
+// machine on the network afterwards.
+func TestLocalSearchIsExplicitAndPinned(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"results":[{"title":"Go","url":"https://go.dev/doc","content":"ok"}]}`)
+	}))
+	defer server.Close()
+	searchURL := server.URL + "/search?q={query}"
+
+	client := NewClient(Options{Timeout: 2 * time.Second, SearchURL: searchURL, SearchFormat: "searxng"})
+	if _, err := client.Search(context.Background(), nil, "go", 5); err == nil {
+		t.Fatal("a local built-in search endpoint must need explicit permission")
+	} else if !strings.Contains(err.Error(), "внутреннюю сеть") {
+		t.Fatalf("the refusal must name the reason, got %v", err)
+	}
+
+	client = NewClient(Options{Timeout: 2 * time.Second, SearchURL: searchURL, SearchFormat: "searxng", AllowLocalSearch: true})
+	results, err := client.Search(context.Background(), nil, "go", 5)
+	if err != nil {
+		t.Fatalf("an allowed local search endpoint must work: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("results = %+v", results)
+	}
+
+	// The pin holds the address: a name that hops to another machine on the
+	// network after the check is not the endpoint the user named.
+	hopping := &seqResolver{answers: map[string][][]net.IPAddr{
+		"search.local.test": {
+			{{IP: net.ParseIP("127.0.0.1")}},
+			{{IP: net.ParseIP("10.0.0.5")}},
+		},
+	}}
+	port := strings.TrimPrefix(server.URL, "http://127.0.0.1:")
+	client = NewClient(Options{
+		Timeout: 2 * time.Second, Resolver: hopping, AllowLocalSearch: true,
+		SearchURL: "http://search.local.test:" + port + "/search?q={query}", SearchFormat: "searxng",
+	})
+	if _, err := client.Search(context.Background(), nil, "go", 5); err == nil {
+		t.Fatal("a local search endpoint that hops to another machine must be refused")
+	} else if !strings.Contains(err.Error(), "изменился после проверки") {
+		t.Fatalf("the refusal must name the changed address, got %v", err)
+	}
+}
+
+// A connected source the user pointed at their own machine stays reachable:
+// the pin exists to keep the connection on the checked address, not to push
+// the user's own source off the network.
+func TestPinnedLocalSourceKeepsWorking(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer server.Close()
+	port := strings.TrimPrefix(server.URL, "http://127.0.0.1:")
+	resolver := staticResolver{"nas.local.test": {{IP: net.ParseIP("127.0.0.1")}}}
+	client := NewClient(Options{Timeout: 2 * time.Second, Resolver: resolver})
+
+	connection := &domainresearch.Connection{
+		ID: 1, Name: "NAS", Kind: domainresearch.KindHTTPAPI, Mode: domainresearch.ModeRead,
+		Endpoint: "http://nas.local.test:" + port, Enabled: true,
+	}
+	result, err := client.Call(context.Background(), connection, appresearch.CallRequest{Operation: "/status", Method: "GET"})
+	if err != nil {
+		t.Fatalf("a local source the user named must stay reachable: %v", err)
+	}
+	if !strings.Contains(result.Body, "ok") {
+		t.Fatalf("body = %q", result.Body)
+	}
+}
+
 // Service addresses are refused in every policy, including the one that allows
 // the user's own network: they answer about the machine LifeOS runs on. Some
 // of them hide in ranges a private-source policy would otherwise accept.

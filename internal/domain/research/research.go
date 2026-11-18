@@ -785,7 +785,13 @@ const (
 // alignSequences reports whether one statement turns into the other by adding
 // or dropping words alone. Between two matching words only one side may have a
 // run of its own; a run on both sides means two different words stood in the
-// same place.
+// same place — the substituted slot.
+//
+// What counts as a match carries the whole weight here, so words match as one
+// value only when they are one word (see sameValueWord). A near-miss anchor
+// like "founded"~"founder" would let the alignment drop "said" and "company"
+// on both sides around it and read "…founded by sam altman said…" and
+// "…founded by elon musk said…" as one statement.
 func alignSequences(a, b []string) bool {
 	type state struct {
 		i, j int
@@ -840,31 +846,51 @@ func unmatchedWords(a, b []string) []string {
 	return missing
 }
 
+// wordEndings are the short endings one word may drop and still be the same
+// word: the inflections of Latin and Cyrillic. "er" is deliberately absent —
+// it makes new words ("found" / "founder"), not forms of one word.
+var wordEndings = []string{
+	"ing", "es", "ed", "s",
+	"ами", "ями", "ов", "ев", "ам", "ям", "ах", "ях", "ой", "ей", "ом", "ем",
+	"а", "я", "ы", "и", "е", "о", "у", "ю",
+}
+
+// stemOf drops at most one short ending, the only change a word form makes, so
+// "supports"/"supported" reduce to one word ("support") while "John"/"Johnson"
+// and "Anna"/"Annabelle" do not: a shared prefix is not a word form, and a
+// name that shares one with another name is still another name.
+func stemOf(word string) string {
+	runes := []rune(word)
+	for _, ending := range wordEndings {
+		suffix := []rune(ending)
+		if len(runes) <= len(suffix) {
+			continue
+		}
+		if string(runes[len(runes)-len(suffix):]) != ending {
+			continue
+		}
+		stem := runes[:len(runes)-len(suffix)]
+		if len(stem) < 3 {
+			return word
+		}
+		return string(stem)
+	}
+	return word
+}
+
 // sameValueWord reports whether two unmatched words are still one value: the
-// same word, two spellings of one number, or two forms of one word.
+// same word, two spellings of one number, or two forms of one word. Values
+// match exactly or as word forms — never on a shared prefix, because "founded"
+// and "founder" share one and say different things, and a substituted name
+// must not hide behind its neighbour's spelling.
 func sameValueWord(a, b string) bool {
 	if isNumericToken(a) || isNumericToken(b) {
 		return isNumericToken(a) && isNumericToken(b) && normalizeNumber(a) == normalizeNumber(b)
 	}
-	if SameWord(a, b) {
+	if a == b {
 		return true
 	}
-	short, long := []rune(a), []rune(b)
-	if len(short) > len(long) {
-		short, long = long, short
-	}
-	if len(short) < 3 {
-		return false
-	}
-	common := 0
-	for common < len(short) && short[common] == long[common] {
-		common++
-	}
-	// Inflection changes the ending and almost nothing else: «сэм»/«сэма»,
-	// "supports"/"supported". A longer difference is another word ("runs" and
-	// "runner" share a stem and mean different things), and a substituted value
-	// must be able to look like one.
-	return common >= 3 && len(short)-common <= 1 && len(long)-common <= 2
+	return stemOf(a) == stemOf(b)
 }
 
 // uniqueEntities returns the values each statement names that the other does
@@ -900,19 +926,14 @@ func missingEntities(a, b []string) []string {
 	return missing
 }
 
-// containsEntity reports whether the set names the value. Words are compared by
-// stem so inflected forms agree; numbers and other values containing a digit
-// must match exactly, because "2015" and "2016" are different years and not two
+// containsEntity reports whether the set names the value. Values match exactly
+// or in word forms of one word («сэм»/«сэма»), never by a shared prefix:
+// "John" is not "Johnson". Numbers and other values containing a digit must
+// match exactly, because "2015" and "2016" are different years and not two
 // spellings of one value.
 func containsEntity(set []string, value string) bool {
 	for _, item := range set {
-		if item == value {
-			return true
-		}
-		if isNumericToken(item) || isNumericToken(value) {
-			continue
-		}
-		if SameWord(item, value) {
+		if sameValueWord(item, value) {
 			return true
 		}
 	}

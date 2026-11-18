@@ -59,6 +59,10 @@ type Config struct {
 	SearchFormat string
 	// ResearchTimeoutSeconds bounds one page read or search request.
 	ResearchTimeoutSeconds int
+	// AllowLocalSearch lets the built-in search endpoint live on the local
+	// network. Off by default: a search endpoint whose name can rebind must
+	// not be a door into the machine LifeOS runs on.
+	AllowLocalSearch bool
 }
 
 func Load(configPath string) (*Config, error) {
@@ -95,6 +99,7 @@ func Load(configPath string) (*Config, error) {
 		SearchURL:                  getEnv("LIFEOS_SEARCH_URL", ""),
 		SearchFormat:               getEnv("LIFEOS_SEARCH_FORMAT", ""),
 		ResearchTimeoutSeconds:     getEnvInt("LIFEOS_RESEARCH_TIMEOUT_SECONDS", 20),
+		AllowLocalSearch:           getEnvBool("LIFEOS_ALLOW_LOCAL_SEARCH", false),
 	}
 
 	// Load .env file if it exists (non-fatal if missing)

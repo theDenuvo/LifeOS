@@ -371,6 +371,60 @@ func TestBuildFindingsOrdersFactsFirst(t *testing.T) {
 
 // A citation saved before the reading-status field existed must not claim the
 // page was unread: LifeOS does not know, and "неизвестно" is not "нет".
+// TestBuildFindingsSimilarNamesStayApart pins the difference between names and
+// word forms: "John" and "Johnson" share a prefix the way inflected forms do,
+// but they are two people, and a fact built from both would name someone who
+// exists in neither source.
+func TestBuildFindingsSimilarNamesStayApart(t *testing.T) {
+	cases := []struct{ first, second string }{
+		// lowercase: no capitalisation hint exists at all
+		{"The company was founded by john smith in 2020.",
+			"The company was founded by johnson smith in 2020."},
+		// capitalised: the entity comparison must not use the prefix either
+		{"The company was founded by John Smith in 2020.",
+			"The company was founded by Johnson Smith in 2020."},
+		{"Anna holds the majority stake in the company since 2019.",
+			"Annabelle holds the majority stake in the company since 2019."},
+		// a long statement where the shared words alone would clear the merge
+		// threshold and the substituted slot is two lowercase words
+		{"In a recent interview the founder sam altman said the company was founded in 2020 and keeps growing fast every year since then.",
+			"In a recent interview the founder elon musk said the company was founded in 2020 and keeps growing fast every year since then."},
+	}
+	for _, c := range cases {
+		findings := BuildFindings([]Candidate{
+			{Statement: c.first, Citation: Citation{URL: "https://alpha.example.com/a", Site: "alpha.example.com", Read: true}},
+			{Statement: c.second, Citation: Citation{URL: "https://beta.example.com/b", Site: "beta.example.com", Read: true}},
+		})
+		if len(findings) != 2 {
+			t.Fatalf("%q / %q merged into %d findings", c.first, c.second, len(findings))
+		}
+		for _, finding := range findings {
+			if finding.Certainty == CertaintyFact {
+				t.Fatalf("%q / %q became a fact: %q", c.first, c.second, finding.Statement)
+			}
+			if finding.Conflict == "" {
+				t.Fatalf("%q / %q disagree without naming the disagreement", c.first, c.second)
+			}
+		}
+	}
+}
+
+// TestBuildFindingsWordFormsStillAgree is the other side of the same rule:
+// inflected forms of one name are one name, and stricter comparison must not
+// split them into a disagreement.
+func TestBuildFindingsWordFormsStillAgree(t *testing.T) {
+	findings := BuildFindings([]Candidate{
+		{Statement: "Сэм Альтман основал компанию в 2015 году.", Citation: Citation{URL: "https://alpha.example.org/a", Site: "alpha.example.org", Read: true}},
+		{Statement: "Компанию основал Сэма Альтмана в 2015.", Citation: Citation{URL: "https://beta.example.net/b", Site: "beta.example.net", Read: true}},
+	})
+	if len(findings) != 1 {
+		t.Fatalf("word forms of one name split into %d findings: %+v", len(findings), findings)
+	}
+	if findings[0].Certainty != CertaintyFact {
+		t.Fatalf("corroborated word forms lost the fact: %q", findings[0].Certainty)
+	}
+}
+
 func TestLegacyCitationKeepsReadingStatusUnknown(t *testing.T) {
 	legacy := `{"url":"https://go.dev/doc/go1.24","title":"Go 1.24","site":"go.dev",` +
 		`"excerpt":"…","fetched_at":"2025-03-01T09:00:00Z","trust":"normal"}`

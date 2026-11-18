@@ -57,6 +57,11 @@ type Options struct {
 	// from a search result or from the model, not from the user. Service
 	// addresses are refused either way.
 	AllowPrivateHosts bool
+	// AllowLocalSearch lets the built-in search endpoint live on the local
+	// network. Without it the built-in search is ordinary public traffic: a
+	// search endpoint is configuration, not a user's connected source, and a
+	// rebindable name must not be a door into the machine LifeOS runs on.
+	AllowLocalSearch bool
 }
 
 // Client implements research.External.
@@ -71,6 +76,8 @@ type Client struct {
 	// allowPrivateHosts accepts non-public addresses; service addresses stay
 	// refused.
 	allowPrivateHosts bool
+	// allowLocalSearch accepts a built-in search endpoint on the local network.
+	allowLocalSearch bool
 }
 
 // NewClient builds the adapter.
@@ -122,6 +129,7 @@ func NewClient(options Options) *Client {
 		maxPageBytes:      maxPage,
 		timeout:           options.Timeout,
 		allowPrivateHosts: options.AllowPrivateHosts,
+		allowLocalSearch:  options.AllowLocalSearch,
 	}
 }
 
@@ -147,10 +155,30 @@ func (c *Client) Search(ctx context.Context, connection *domainresearch.Connecti
 	if err != nil {
 		return nil, err
 	}
-	// The search endpoint is the user's own choice and may live on the local
-	// network; that allowance is for its own host only, and every redirect is
-	// checked like any other address.
-	body, contentType, err := c.getWith(ctx, c.guardedClient(policyUserSource, hostOf(target)), target)
+	// The search endpoint is checked and its addresses are pinned like any
+	// connected source's. A connected source is the user's own choice and may
+	// live on the local network; the built-in search endpoint is configuration,
+	// so it is ordinary public traffic unless the user explicitly allowed a
+	// local one (AllowLocalSearch).
+	policy := policyPublicPage
+	if connection != nil || c.allowLocalSearch {
+		policy = policyUserSource
+	}
+	guard := publicHostGuard{
+		policy:     policy,
+		originHost: hostOf(target),
+		allowLocal: c.allowPrivateHosts,
+		resolver:   c.resolver,
+	}
+	parsedSearchURL, err := url.Parse(target)
+	if err != nil {
+		return nil, err
+	}
+	ctx, err = guard.pinEndpoint(ctx, parsedSearchURL)
+	if err != nil {
+		return nil, err
+	}
+	body, contentType, err := c.getWith(ctx, c.guardedClient(policy, hostOf(target)), target)
 	if err != nil {
 		return nil, err
 	}
@@ -228,7 +256,10 @@ func (c *Client) Call(ctx context.Context, connection *domainresearch.Connection
 			allowLocal: c.allowPrivateHosts,
 			resolver:   c.resolver,
 		}
-		if err := guard.checkURL(ctx, endpoint); err != nil {
+		// The check that lets the endpoint in also pins its addresses: the
+		// connection may not land on anything the check did not see.
+		ctx, err = guard.pinEndpoint(ctx, endpoint)
+		if err != nil {
 			return appresearch.CallResult{}, err
 		}
 	}

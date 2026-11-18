@@ -108,11 +108,21 @@ func (g publicHostGuard) dial(ctx context.Context, network, address string) (net
 // when any of them is off limits: one bad answer is enough to make the name
 // untrustworthy.
 func (g publicHostGuard) resolveChecked(ctx context.Context, host string) ([]net.IP, error) {
-	local := g.allowLocal || (g.policy == policyUserSource && strings.EqualFold(host, g.originHost))
-	if ip := net.ParseIP(host); ip != nil {
-		if err := g.checkIP(ip, host, local); err != nil {
+	ips, err := g.resolveAddresses(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	for _, ip := range ips {
+		if err := g.checkIP(ctx, ip, host); err != nil {
 			return nil, err
 		}
+	}
+	return ips, nil
+}
+
+// resolveAddresses resolves a host without judging the answers.
+func (g publicHostGuard) resolveAddresses(ctx context.Context, host string) ([]net.IP, error) {
+	if ip := net.ParseIP(host); ip != nil {
 		return []net.IP{ip}, nil
 	}
 	resolver := g.resolver
@@ -128,25 +138,93 @@ func (g publicHostGuard) resolveChecked(ctx context.Context, host string) ([]net
 	}
 	ips := make([]net.IP, 0, len(addrs))
 	for _, addr := range addrs {
-		if err := g.checkIP(addr.IP, host, local); err != nil {
-			return nil, err
-		}
 		ips = append(ips, addr.IP)
 	}
 	return ips, nil
 }
 
-// checkIP applies the rules to one resolved address.
-func (g publicHostGuard) checkIP(ip net.IP, host string, local bool) error {
+// checkIP applies the rules to one resolved address. A local address is not
+// refused for its own sake: the user may point a source at their own machine.
+// But the name does not decide — the check does. A local address is let in
+// only when it was in the answer that the endpoint check accepted; a name that
+// answers differently a moment later (DNS rebinding) is refused at the door.
+func (g publicHostGuard) checkIP(ctx context.Context, ip net.IP, host string) error {
 	if isMetadataAddress(ip) {
 		// A service address is refused in every policy: it answers about the
 		// machine LifeOS runs on, and nothing legitimate is hosted there.
 		return fmt.Errorf("%w: %s — адрес служебного сервиса", errPrivateAddress, host)
 	}
-	if !local && !isPublicAddress(ip) {
-		return fmt.Errorf("%w: %s", errPrivateAddress, host)
+	if isPublicAddress(ip) || g.allowLocal {
+		return nil
 	}
-	return nil
+	if g.policy == policyUserSource && strings.EqualFold(host, g.originHost) {
+		if pinnedAddress(ctx, host, ip) {
+			return nil
+		}
+		// The name answered as something else than when it was checked: the
+		// classic rebinding, a public address on paper and a local one on the
+		// wire.
+		return fmt.Errorf("%w: %s — адрес изменился после проверки", errPrivateAddress, host)
+	}
+	return fmt.Errorf("%w: %s", errPrivateAddress, host)
+}
+
+// pinnedKey carries the addresses an endpoint resolved to when it was checked.
+type pinnedKey struct{}
+
+// pinEndpoint makes the check that lets an endpoint in and remembers the
+// addresses it resolved to. The connection may then only land on one of them:
+// whatever the name answers at connection time, a local address that was not
+// in the checked answer never gets connected to.
+func (g publicHostGuard) pinEndpoint(ctx context.Context, target *url.URL) (context.Context, error) {
+	if target == nil {
+		return nil, errPrivateAddress
+	}
+	if target.Scheme != "http" && target.Scheme != "https" {
+		return nil, fmt.Errorf("адрес страницы некорректен: %q", target.String())
+	}
+	host := strings.ToLower(target.Hostname())
+	if host == "" {
+		return nil, fmt.Errorf("адрес страницы некорректен: %q", target.String())
+	}
+	ips, err := g.resolveAddresses(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	ctx = withPinnedAddresses(ctx, host, ips)
+	for _, ip := range ips {
+		if err := g.checkIP(ctx, ip, host); err != nil {
+			return nil, err
+		}
+	}
+	return ctx, nil
+}
+
+// withPinnedAddresses records the checked answer for a host in the context the
+// connection is made on.
+func withPinnedAddresses(ctx context.Context, host string, ips []net.IP) context.Context {
+	pins := pinnedSet{host: make(map[string]bool, len(ips))}
+	if existing, ok := ctx.Value(pinnedKey{}).(pinnedSet); ok {
+		for name, addresses := range existing {
+			pins[name] = addresses
+		}
+	}
+	for _, ip := range ips {
+		pins[host][ip.String()] = true
+	}
+	return context.WithValue(ctx, pinnedKey{}, pins)
+}
+
+// pinnedSet maps a host to the addresses it had when it was checked.
+type pinnedSet map[string]map[string]bool
+
+// pinnedAddress reports whether the address was in the checked answer.
+func pinnedAddress(ctx context.Context, host string, ip net.IP) bool {
+	pins, ok := ctx.Value(pinnedKey{}).(pinnedSet)
+	if !ok {
+		return false
+	}
+	return pins[strings.ToLower(host)][ip.String()]
 }
 
 // isPublicAddress reports whether an address belongs to the public internet.

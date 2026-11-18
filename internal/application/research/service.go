@@ -153,7 +153,27 @@ func (s *Service) StartResearch(ctx context.Context, input ResearchInput) (*doma
 		}
 		s.deliver(jobCtx, input.ConversationID, final)
 	}()
-	return report, nil
+	// The caller gets a snapshot and the job gets the report itself: the run
+	// writes status, findings and summary while the response is being
+	// serialised, and one report cannot be in two hands at once.
+	return cloneReport(report), nil
+}
+
+// cloneReport copies a report deep enough that a snapshot does not share
+// mutable data with the run that owns the original.
+func cloneReport(report *domainresearch.Report) *domainresearch.Report {
+	if report == nil {
+		return nil
+	}
+	clone := *report
+	clone.Queries = append([]string(nil), report.Queries...)
+	clone.Findings = make([]domainresearch.Finding, len(report.Findings))
+	for i, finding := range report.Findings {
+		clone.Findings[i] = finding
+		clone.Findings[i].Domains = append([]string(nil), finding.Domains...)
+		clone.Findings[i].Citations = append([]domainresearch.Citation(nil), finding.Citations...)
+	}
+	return &clone
 }
 
 // deliver posts the result where the question was asked: the answer of a

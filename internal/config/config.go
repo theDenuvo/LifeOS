@@ -136,6 +136,7 @@ func Load(configPath string) (*Config, error) {
 	cfg.SearchURL = getEnv("LIFEOS_SEARCH_URL", cfg.SearchURL)
 	cfg.SearchFormat = getEnv("LIFEOS_SEARCH_FORMAT", cfg.SearchFormat)
 	cfg.ResearchTimeoutSeconds = getEnvInt("LIFEOS_RESEARCH_TIMEOUT_SECONDS", cfg.ResearchTimeoutSeconds)
+	cfg.AllowLocalSearch = getEnvBool("LIFEOS_ALLOW_LOCAL_SEARCH", cfg.AllowLocalSearch)
 
 	// Validate timezone using embedded IANA database
 	loc, err := time.LoadLocation(cfg.Timezone)

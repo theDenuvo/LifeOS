@@ -385,6 +385,16 @@ func TestBuildFindingsSimilarNamesStayApart(t *testing.T) {
 			"The company was founded by Johnson Smith in 2020."},
 		{"Anna holds the majority stake in the company since 2019.",
 			"Annabelle holds the majority stake in the company since 2019."},
+		// a dropped vowel is not a word form: Anna and Ann are two people,
+		// and the case endings of one language do not apply to another
+		{"The startup was founded by Anna Smith in 2020.",
+			"The startup was founded by Ann Smith in 2020."},
+		{"The startup was founded by anna smith in 2020.",
+			"The startup was founded by ann smith in 2020."},
+		{"Maya holds the majority stake in the company since 2019.",
+			"May holds the majority stake in the company since 2019."},
+		{"maya holds the majority stake in the company since 2019.",
+			"may holds the majority stake in the company since 2019."},
 		// a long statement where the shared words alone would clear the merge
 		// threshold and the substituted slot is two lowercase words
 		{"In a recent interview the founder sam altman said the company was founded in 2020 and keeps growing fast every year since then.",

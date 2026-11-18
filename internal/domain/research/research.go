@@ -846,22 +846,36 @@ func unmatchedWords(a, b []string) []string {
 	return missing
 }
 
-// wordEndings are the short endings one word may drop and still be the same
-// word: the inflections of Latin and Cyrillic. "er" is deliberately absent —
-// it makes new words ("found" / "founder"), not forms of one word.
-var wordEndings = []string{
+// The short endings one word may drop and still be the same word. The
+// inflections of Latin and Cyrillic never mix: a Russian case ending on an
+// English word is not a word form — "Anna" is not "Ann" with a dropped vowel,
+// and "Maya" is not "May" — so each script only drops its own endings, and
+// Latin drops no bare vowel at all. "er" is deliberately absent from both — it
+// makes new words ("found" / "founder"), not forms of one word.
+var latinWordEndings = []string{
 	"ing", "es", "ed", "s",
+}
+
+var cyrillicWordEndings = []string{
 	"ами", "ями", "ов", "ев", "ам", "ям", "ах", "ях", "ой", "ей", "ом", "ем",
 	"а", "я", "ы", "и", "е", "о", "у", "ю",
 }
 
 // stemOf drops at most one short ending, the only change a word form makes, so
-// "supports"/"supported" reduce to one word ("support") while "John"/"Johnson"
-// and "Anna"/"Annabelle" do not: a shared prefix is not a word form, and a
-// name that shares one with another name is still another name.
+// "supports"/"supported" reduce to one word ("support") and «сэм»/«сэма» do
+// too, while "John"/"Johnson", "Anna"/"Ann" and "Maya"/"May" do not: a shared
+// prefix is not a word form, a dropped vowel of another language is not
+// either, and a name that differs from another name is still another name.
 func stemOf(word string) string {
 	runes := []rune(word)
-	for _, ending := range wordEndings {
+	endings := latinWordEndings
+	for _, r := range runes {
+		if unicode.Is(unicode.Cyrillic, r) {
+			endings = cyrillicWordEndings
+			break
+		}
+	}
+	for _, ending := range endings {
 		suffix := []rune(ending)
 		if len(runes) <= len(suffix) {
 			continue

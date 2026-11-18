@@ -126,6 +126,49 @@ LIFEOS_LOG_LEVEL=warn
 	}
 }
 
+// TestLoadDotEnvAllowLocalSearch pins the setting reaching the research
+// client from the ordinary configuration file: the value is read after .env is
+// loaded, like every other setting, or a self-hosted search endpoint would
+// only work from the process environment.
+func TestLoadDotEnvAllowLocalSearch(t *testing.T) {
+	// loadDotEnv sets process environment; isolate the setting under test.
+	t.Setenv("LIFEOS_ALLOW_LOCAL_SEARCH", "")
+	os.Unsetenv("LIFEOS_ALLOW_LOCAL_SEARCH")
+	defer os.Unsetenv("LIFEOS_ALLOW_LOCAL_SEARCH")
+	tmpDir := t.TempDir()
+	envFile := filepath.Join(tmpDir, ".env")
+
+	content := `LIFEOS_ALLOW_LOCAL_SEARCH=true
+`
+	if err := os.WriteFile(envFile, []byte(content), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	cfg, err := Load(envFile)
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+	if !cfg.AllowLocalSearch {
+		t.Fatal("AllowLocalSearch must be read from .env")
+	}
+
+	// And the default stays off: a local search endpoint is opt-in. The
+	// earlier load set the process environment; the default is what a clean
+	// process sees.
+	os.Unsetenv("LIFEOS_ALLOW_LOCAL_SEARCH")
+	offFile := filepath.Join(tmpDir, "off.env")
+	if err := os.WriteFile(offFile, []byte("LIFEOS_TIMEZONE=UTC\n"), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+	cfg, err = Load(offFile)
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+	if cfg.AllowLocalSearch {
+		t.Fatal("AllowLocalSearch must default to off")
+	}
+}
+
 func TestLoadDotEnvEnvOverride(t *testing.T) {
 	tmpDir := t.TempDir()
 	envFile := filepath.Join(tmpDir, ".env")

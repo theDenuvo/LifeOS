@@ -36,6 +36,9 @@ type memoryRepository struct {
 	watches     map[int64]*domainresearch.Watch
 	calls       []*appresearch.CallRecord
 	next        int64
+	// failCalls makes the journal unavailable, which must stop a changing
+	// call before it reaches the outside world.
+	failCalls bool
 }
 
 func newMemoryRepository() *memoryRepository {
@@ -287,13 +290,65 @@ func (r *memoryRepository) DeleteWatch(_ context.Context, id int64) error {
 	return nil
 }
 
-func (r *memoryRepository) RecordCall(_ context.Context, record *appresearch.CallRecord) error {
+func (r *memoryRepository) RecordCall(_ context.Context, record *appresearch.CallRecord) (int64, error) {
+	if r.failCalls {
+		return 0, errors.New("журнал недоступен")
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	record.ID = r.id()
 	clone := *record
 	r.calls = append(r.calls, &clone)
-	return nil
+	return record.ID, nil
+}
+
+func (r *memoryRepository) FinishCall(_ context.Context, id int64, outcome, detail string, durationMS int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, record := range r.calls {
+		if record.ID != id {
+			continue
+		}
+		if record.Outcome != appresearch.CallStarted {
+			return appresearch.ErrNotFound
+		}
+		record.Outcome = outcome
+		record.Detail = detail
+		record.DurationMS = durationMS
+		return nil
+	}
+	return appresearch.ErrNotFound
+}
+
+func (r *memoryRepository) RecoverRunningReports(_ context.Context, reason string, now time.Time) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var touched int64
+	for _, report := range r.reports {
+		if report.Status != domainresearch.ReportRunning {
+			continue
+		}
+		report.Status = domainresearch.ReportFailed
+		report.Error = reason
+		report.FinishedAt = &now
+		touched++
+	}
+	return touched, nil
+}
+
+func (r *memoryRepository) RecoverStartedCalls(_ context.Context, detail string, _ time.Time) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var touched int64
+	for _, record := range r.calls {
+		if record.Outcome != appresearch.CallStarted {
+			continue
+		}
+		record.Outcome = appresearch.CallUnknown
+		record.Detail = detail
+		touched++
+	}
+	return touched, nil
 }
 
 func (r *memoryRepository) ListCalls(_ context.Context, connectionID int64, limit int) ([]*appresearch.CallRecord, int, error) {
@@ -332,13 +387,21 @@ func (t memoryTransaction) Research() appresearch.Repository { return t.repo }
 
 // fakeWeb answers with canned pages and records what was asked.
 type fakeWeb struct {
-	mu       sync.Mutex
-	results  map[string][]appresearch.SearchResult
-	pages    map[string]appresearch.Page
-	failing  map[string]bool
-	searches []string
-	calls    []appresearch.CallRequest
-	callBody string
+	mu        sync.Mutex
+	results   map[string][]appresearch.SearchResult
+	pages     map[string]appresearch.Page
+	failing   map[string]bool
+	searches  []string
+	calls     []appresearch.CallRequest
+	durations []string
+	callBody  string
+	// callErr is what Call returns, for the refusals the adapter decides on.
+	callErr error
+	// cancelOnSearch cancels the run while the evidence is being gathered,
+	// which is what a closed HTTP connection does.
+	cancelOnSearch context.CancelFunc
+	// searchErr fails every search.
+	searchErr error
 }
 
 func newFakeWeb() *fakeWeb {
@@ -350,10 +413,27 @@ func newFakeWeb() *fakeWeb {
 	}
 }
 
-func (w *fakeWeb) Search(_ context.Context, _ *domainresearch.Connection, query string, limit int) ([]appresearch.SearchResult, error) {
+func (w *fakeWeb) Search(_ context.Context, connection *domainresearch.Connection, query string, limit int) ([]appresearch.SearchResult, error) {
+	w.mu.Lock()
+	cancel := w.cancelOnSearch
+	err := w.searchErr
+	connectionID := int64(0)
+	if connection != nil {
+		connectionID = connection.ID
+	}
+	w.searches = append(w.searches, query)
+	if connectionID > 0 {
+		w.durations = append(w.durations, "search")
+	}
+	w.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if err != nil {
+		return nil, err
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.searches = append(w.searches, query)
 	results := w.results[query]
 	if limit > 0 && len(results) > limit {
 		results = results[:limit]
@@ -378,6 +458,9 @@ func (w *fakeWeb) Call(_ context.Context, _ *domainresearch.Connection, request 
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.calls = append(w.calls, request)
+	if w.callErr != nil {
+		return appresearch.CallResult{}, w.callErr
+	}
 	return appresearch.CallResult{Status: 200, ContentType: "application/json", Body: w.callBody}, nil
 }
 
@@ -508,10 +591,10 @@ func TestResearchQuotesOneSentencePerClaim(t *testing.T) {
 	web := newFakeWeb()
 	service, _, _ := newService(repo, web, nil)
 	web.results["capital of Australia"] = []appresearch.SearchResult{
-		{Title: "Canberra", URL: "https://a.example.com/canberra"},
+		{Title: "Canberra", URL: "https://a.example.org/canberra"},
 	}
-	web.pages["https://a.example.com/canberra"] = page("https://a.example.com/canberra", "Canberra",
-		"About the capital\n\n" +
+	web.pages["https://a.example.org/canberra"] = page("https://a.example.org/canberra", "Canberra",
+		"About the capital\n\n"+
 			"Canberra is the capital city of Australia. "+
 			"The city occupies the northern part of the Australian Capital Territory and borders New South Wales. "+
 			"Greater Canberra has a population of about half a million people.")
@@ -545,12 +628,12 @@ func TestResearchMatchesDifferentlyWordedSentences(t *testing.T) {
 	web := newFakeWeb()
 	service, _, _ := newService(repo, web, nil)
 	web.results["capital of Australia"] = []appresearch.SearchResult{
-		{Title: "Canberra", URL: "https://a.example.com/canberra"},
-		{Title: "Australia", URL: "https://b.example.com/australia"},
+		{Title: "Canberra", URL: "https://a.example.org/canberra"},
+		{Title: "Australia", URL: "https://b.example.net/australia"},
 	}
-	web.pages["https://a.example.com/canberra"] = page("https://a.example.com/canberra", "Canberra",
+	web.pages["https://a.example.org/canberra"] = page("https://a.example.org/canberra", "Canberra",
 		"Canberra is the capital city of Australia. The city occupies the northern part of the territory.")
-	web.pages["https://b.example.com/australia"] = page("https://b.example.com/australia", "Australia",
+	web.pages["https://b.example.net/australia"] = page("https://b.example.net/australia", "Australia",
 		"The capital city of Australia is Canberra. It lies in the south-east of the country.")
 
 	report, err := service.Research(context.Background(), appresearch.ResearchInput{
@@ -638,6 +721,52 @@ func TestResearchFallsBackToSearchSnippetsWhenAPageDoesNotOpen(t *testing.T) {
 	if !strings.Contains(report.Summary, "Не удалось открыть источников: 1") {
 		t.Fatalf("the summary must name the unread source: %q", report.Summary)
 	}
+	// A finding nobody read is not "one source": it is a lead, and saying
+	// "Один источник" over an unopened page would imply someone read it.
+	if strings.Contains(report.Summary, "Один источник, требует проверки") {
+		t.Fatalf("an unread finding must not be presented as a read source: %q", report.Summary)
+	}
+	if !strings.Contains(report.Summary, "Только поисковая выдержка, страница не открылась") {
+		t.Fatalf("the summary must separate snippet-only findings: %q", report.Summary)
+	}
+	if !strings.Contains(report.Summary, "(выдержка)") {
+		t.Fatalf("the citation line must mark a snippet as such: %q", report.Summary)
+	}
+}
+
+// A source with low trust is still a source: reading status and trust are
+// different things, and a read page must not be reported as unread.
+func TestLowTrustSourceThatWasReadIsNotCountedAsUnread(t *testing.T) {
+	repo := newMemoryRepository()
+	web := newFakeWeb()
+	service, _, _ := newService(repo, web, nil)
+	connection, err := service.CreateConnection(context.Background(), &domainresearch.Connection{
+		Name: "Форум", Kind: domainresearch.KindWebSearch, Mode: domainresearch.ModeRead,
+		Endpoint: "https://forum.example.org/search?q={query}", Format: domainresearch.FormatSearxng,
+		Trust: domainresearch.TrustLow, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	web.results["вопрос"] = []appresearch.SearchResult{{Title: "Ответ", URL: "https://forum.example.org/t/1"}}
+	web.pages["https://forum.example.org/t/1"] = page("https://forum.example.org/t/1", "Ответ",
+		"Это подробный ответ на вопрос, который объясняет контекст и приводит примеры из практики.")
+
+	report, err := service.Research(context.Background(), appresearch.ResearchInput{
+		Question: "Вопрос", Queries: []string{"вопрос"}, ConnectionID: connection.ID,
+	})
+	if err != nil {
+		t.Fatalf("research: %v", err)
+	}
+	if strings.Contains(report.Summary, "Не удалось открыть") {
+		t.Fatalf("a read page is not unread: %q", report.Summary)
+	}
+	if len(report.Findings) == 0 || !report.Findings[0].Citations[0].Read {
+		t.Fatalf("the citation must be marked as read: %+v", report.Findings)
+	}
+	if report.Findings[0].Citations[0].Trust != domainresearch.TrustLow {
+		t.Fatalf("trust is unchanged: %+v", report.Findings[0].Citations[0])
+	}
 }
 
 func TestResearchWithoutSearchProviderFailsLoudly(t *testing.T) {
@@ -676,8 +805,8 @@ func TestResearchSaveFailureIsReportedNotHidden(t *testing.T) {
 	knowledge := &memoryKnowledge{failing: true}
 	service, _, _ := newService(repo, web, knowledge)
 
-	web.results["kotlin coroutines"] = []appresearch.SearchResult{{Title: "A", URL: "https://a.example.com/1"}}
-	web.pages["https://a.example.com/1"] = page("https://a.example.com/1", "A",
+	web.results["kotlin coroutines"] = []appresearch.SearchResult{{Title: "A", URL: "https://a.example.org/1"}}
+	web.pages["https://a.example.org/1"] = page("https://a.example.org/1", "A",
 		"The page explains how Kotlin coroutines suspend a function and resume it later on a dispatcher.")
 
 	report, err := service.Research(context.Background(), appresearch.ResearchInput{
@@ -896,8 +1025,8 @@ func TestCheckDueOnlyChecksWatchesWhoseMomentCame(t *testing.T) {
 	web := newFakeWeb()
 	service, clock, _ := newService(repo, web, nil)
 
-	web.results["q"] = []appresearch.SearchResult{{Title: "A", URL: "https://a.example.com/1"}}
-	web.pages["https://a.example.com/1"] = page("https://a.example.com/1", "A",
+	web.results["q"] = []appresearch.SearchResult{{Title: "A", URL: "https://a.example.org/1"}}
+	web.pages["https://a.example.org/1"] = page("https://a.example.org/1", "A",
 		"A sufficiently long page body that mentions the query q so the passage is selected for evidence.")
 
 	watch, err := service.CreateWatch(context.Background(), appresearch.WatchInput{
@@ -994,8 +1123,8 @@ func TestReportListingIsNewestFirst(t *testing.T) {
 	repo := newMemoryRepository()
 	web := newFakeWeb()
 	service, clock, _ := newService(repo, web, nil)
-	web.results["a"] = []appresearch.SearchResult{{Title: "A", URL: "https://a.example.com/1"}}
-	web.pages["https://a.example.com/1"] = page("https://a.example.com/1", "A",
+	web.results["a"] = []appresearch.SearchResult{{Title: "A", URL: "https://a.example.org/1"}}
+	web.pages["https://a.example.org/1"] = page("https://a.example.org/1", "A",
 		"A long enough body that talks about a and the surrounding context of the question in detail.")
 
 	for _, question := range []string{"Первый", "Второй"} {
@@ -1106,8 +1235,8 @@ func TestConcurrentReportUpdateIsRejected(t *testing.T) {
 	repo := newMemoryRepository()
 	web := newFakeWeb()
 	service, _, _ := newService(repo, web, nil)
-	web.results["q"] = []appresearch.SearchResult{{Title: "A", URL: "https://a.example.com/1"}}
-	web.pages["https://a.example.com/1"] = page("https://a.example.com/1", "A",
+	web.results["q"] = []appresearch.SearchResult{{Title: "A", URL: "https://a.example.org/1"}}
+	web.pages["https://a.example.org/1"] = page("https://a.example.org/1", "A",
 		"A long enough body that talks about q and the context of the question in a readable sentence.")
 	report, err := service.Research(context.Background(), appresearch.ResearchInput{Question: "Q", Queries: []string{"q"}})
 	if err != nil {
@@ -1125,8 +1254,8 @@ func TestSummaryStatesThatOneSourceIsNotAFact(t *testing.T) {
 	repo := newMemoryRepository()
 	web := newFakeWeb()
 	service, _, _ := newService(repo, web, nil)
-	web.results["вопрос"] = []appresearch.SearchResult{{Title: "A", URL: "https://a.example.com/1"}}
-	web.pages["https://a.example.com/1"] = page("https://a.example.com/1", "A",
+	web.results["вопрос"] = []appresearch.SearchResult{{Title: "A", URL: "https://a.example.org/1"}}
+	web.pages["https://a.example.org/1"] = page("https://a.example.org/1", "A",
 		"Это достаточно длинный текст страницы, который отвечает на вопрос и объясняет контекст подробно.")
 	report, err := service.Research(context.Background(), appresearch.ResearchInput{
 		Question: "Вопрос", Queries: []string{"вопрос"},
@@ -1141,4 +1270,251 @@ func TestSummaryStatesThatOneSourceIsNotAFact(t *testing.T) {
 		t.Fatalf("the summary must state the rule: %q", report.Summary)
 	}
 	_ = fmt.Sprint()
+}
+
+// ─── разрешения, журнал и восстановление ───────────────────────────────────
+
+// A source in read mode must refuse a changing call before it reaches the
+// network, and the refusal itself belongs in the journal.
+func TestReadOnlyRefusalFromTheAdapterIsJournalledAsARefusal(t *testing.T) {
+	repo := newMemoryRepository()
+	web := newFakeWeb()
+	web.callErr = fmt.Errorf("%w: инструмент не помечен как «только чтение»", appresearch.ErrSourceReadOnly)
+	service, _, _ := newService(repo, web, nil)
+
+	source, err := service.CreateConnection(context.Background(), &domainresearch.Connection{
+		Name: "MCP", Kind: domainresearch.KindMCP, Mode: domainresearch.ModeRead,
+		Endpoint: "https://mcp.example.com/mcp", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := service.CallSource(context.Background(), source.ID, appresearch.CallRequest{Operation: "delete_everything"}); err == nil {
+		t.Fatal("the call must be refused")
+	}
+	records, _, err := service.ListCalls(context.Background(), source.ID, 10)
+	if err != nil {
+		t.Fatalf("list calls: %v", err)
+	}
+	if len(records) != 1 || records[0].Outcome != appresearch.CallRefused {
+		t.Fatalf("a refusal decided by the source is still a refusal: %+v", records)
+	}
+}
+
+// A search through a connected source is an action like any other: it appears
+// in the journal and it updates the source's last use.
+func TestSearchThroughAConnectedSourceIsJournalled(t *testing.T) {
+	repo := newMemoryRepository()
+	web := newFakeWeb()
+	service, clock, _ := newService(repo, web, nil)
+	source, err := service.CreateConnection(context.Background(), &domainresearch.Connection{
+		Name: "SearxNG", Kind: domainresearch.KindWebSearch, Mode: domainresearch.ModeRead,
+		Endpoint: "https://search.example.com/search?q={query}", Format: domainresearch.FormatSearxng,
+		Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	web.results["go"] = []appresearch.SearchResult{{Title: "Go", URL: "https://go.dev/doc"}}
+	if _, err := service.Search(context.Background(), "go", 5, source.ID); err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	records, _, err := service.ListCalls(context.Background(), source.ID, 20)
+	if err != nil {
+		t.Fatalf("list calls: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("the search must be journalled, got %+v", records)
+	}
+	if records[0].Outcome != appresearch.CallOK || records[0].Operation != "search" {
+		t.Fatalf("journal entry = %+v", records[0])
+	}
+	if records[0].Method != "GET" {
+		t.Fatalf("the journal must record the method, got %q", records[0].Method)
+	}
+	stored, err := service.GetConnection(context.Background(), source.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if stored.LastUsedAt == nil {
+		t.Fatal("a used source must record when it was used")
+	}
+	_ = clock
+}
+
+// A changing call is recorded before it leaves: if the journal cannot be
+// written, LifeOS must not change something outside and keep no record of it.
+func TestChangingCallIsRefusedWhenTheJournalIsUnavailable(t *testing.T) {
+	repo := newMemoryRepository()
+	repo.failCalls = true
+	web := newFakeWeb()
+	service, _, _ := newService(repo, web, nil)
+	source, err := service.CreateConnection(context.Background(), &domainresearch.Connection{
+		Name: "API", Kind: domainresearch.KindHTTPAPI, Mode: domainresearch.ModeWrite,
+		Endpoint: "https://api.example.com", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	_, err = service.CallSource(context.Background(), source.ID, appresearch.CallRequest{
+		Method: "POST", Operation: "/issues", Body: `{"title":"x"}`,
+	})
+	if !errors.Is(err, appresearch.ErrJournalUnavailable) {
+		t.Fatalf("the call must be refused without a journal, got %v", err)
+	}
+	if len(web.calls) != 0 {
+		t.Fatalf("nothing may reach the service: %+v", web.calls)
+	}
+}
+
+// The journal of a changing call starts as "started" and is closed with the
+// outcome, so a crash leaves "unknown" instead of nothing.
+func TestChangingCallIsJournalledBeforeAndAfter(t *testing.T) {
+	repo := newMemoryRepository()
+	web := newFakeWeb()
+	service, _, _ := newService(repo, web, nil)
+	source, err := service.CreateConnection(context.Background(), &domainresearch.Connection{
+		Name: "API", Kind: domainresearch.KindHTTPAPI, Mode: domainresearch.ModeWrite,
+		Endpoint: "https://api.example.com", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := service.CallSource(context.Background(), source.ID, appresearch.CallRequest{
+		Method: "DELETE", Operation: "/issues/1",
+	}); err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	records, _, err := service.ListCalls(context.Background(), source.ID, 10)
+	if err != nil {
+		t.Fatalf("list calls: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("one call is one journal entry, got %+v", records)
+	}
+	if records[0].Outcome != appresearch.CallOK || records[0].Method != "DELETE" {
+		t.Fatalf("journal entry = %+v", records[0])
+	}
+}
+
+// A restart closes what the previous process left open, and says so.
+func TestRecoverInterruptedClosesRunningWork(t *testing.T) {
+	repo := newMemoryRepository()
+	web := newFakeWeb()
+	service, clock, _ := newService(repo, web, nil)
+
+	report, err := service.Research(context.Background(), appresearch.ResearchInput{Question: "старый вопрос"})
+	if err != nil {
+		t.Fatalf("research: %v", err)
+	}
+	// Pretend the process died while the report was running.
+	repo.mu.Lock()
+	repo.reports[report.ID].Status = domainresearch.ReportRunning
+	repo.reports[report.ID].FinishedAt = nil
+	repo.mu.Unlock()
+	source, err := service.CreateConnection(context.Background(), &domainresearch.Connection{
+		Name: "API", Kind: domainresearch.KindHTTPAPI, Mode: domainresearch.ModeWrite,
+		Endpoint: "https://api.example.com", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	repo.mu.Lock()
+	repo.calls = append(repo.calls, &appresearch.CallRecord{
+		ID: 99, ConnectionID: source.ID, Name: source.Name, Kind: source.Kind,
+		Mode: source.Mode, Method: "POST", Operation: "/issues",
+		Outcome: appresearch.CallStarted, CreatedAt: clock.Now(),
+	})
+	repo.mu.Unlock()
+
+	recovered, err := service.RecoverInterrupted(context.Background())
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if recovered.Reports != 1 || recovered.Calls != 1 {
+		t.Fatalf("recovery = %+v", recovered)
+	}
+	stored, err := service.GetReport(context.Background(), report.ID)
+	if err != nil {
+		t.Fatalf("get report: %v", err)
+	}
+	if stored.Status != domainresearch.ReportFailed {
+		t.Fatalf("a report interrupted by a restart is failed, got %s", stored.Status)
+	}
+	if !strings.Contains(stored.Error, "перезапущен") {
+		t.Fatalf("the reason must say what happened: %q", stored.Error)
+	}
+	records, _, err := service.ListCalls(context.Background(), source.ID, 10)
+	if err != nil {
+		t.Fatalf("list calls: %v", err)
+	}
+	if records[0].Outcome != appresearch.CallUnknown {
+		t.Fatalf("an unclosed changing call is unknown, got %q", records[0].Outcome)
+	}
+}
+
+// A run whose request goes away still records its outcome: a closed tab must
+// not leave a report running for ever.
+func TestCancelledRunStillRecordsItsOutcome(t *testing.T) {
+	repo := newMemoryRepository()
+	web := newFakeWeb()
+	service, _, _ := newService(repo, web, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	web.cancelOnSearch = cancel
+	web.searchErr = context.Canceled
+
+	report, err := service.Research(ctx, appresearch.ResearchInput{Question: "вопрос"})
+	if err == nil {
+		t.Fatal("a cancelled run reports the failure")
+	}
+	if report == nil {
+		t.Fatal("the report must be returned with its failure")
+	}
+	stored, getErr := service.GetReport(context.Background(), report.ID)
+	if getErr != nil {
+		t.Fatalf("get report: %v", getErr)
+	}
+	if stored.Status != domainresearch.ReportFailed {
+		t.Fatalf("the report must not stay running, got %s", stored.Status)
+	}
+}
+
+// StartResearch answers while the work is still going, and the report is
+// finished in the background.
+func TestStartResearchKeepsRunningInTheBackground(t *testing.T) {
+	repo := newMemoryRepository()
+	web := newFakeWeb()
+	service, _, broker := newService(repo, web, nil)
+	web.results["golang language"] = []appresearch.SearchResult{{Title: "Go", URL: "https://go.dev/doc"}}
+	web.pages["https://go.dev/doc"] = page("https://go.dev/doc", "Go",
+		"Go is a statically typed, compiled programming language designed at Google for building reliable software.")
+
+	started, err := service.StartResearch(context.Background(), appresearch.ResearchInput{
+		Question: "Что такое язык Go?", Queries: []string{"golang language"},
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if started.Status != domainresearch.ReportRunning {
+		t.Fatalf("the start must answer while running, got %s", started.Status)
+	}
+	waitCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := service.Wait(waitCtx); err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	finished, err := service.GetReport(context.Background(), started.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if finished.Status != domainresearch.ReportCompleted {
+		t.Fatalf("the background run must finish the report, got %s (%s)", finished.Status, finished.Error)
+	}
+	if len(finished.Findings) == 0 {
+		t.Fatalf("the report has no findings: %+v", finished)
+	}
+	announced := strings.Join(broker.announced(), ",")
+	if !strings.Contains(announced, "research.started") || !strings.Contains(announced, "research.completed") {
+		t.Fatalf("events = %q", announced)
+	}
 }

@@ -542,19 +542,71 @@ func (r *researchRepository) DeleteWatch(ctx context.Context, id int64) error {
 
 // ─── Audit journal ──────────────────────────────────────────────────────────
 
-// RecordCall appends one interaction with an external source.
-func (r *researchRepository) RecordCall(ctx context.Context, record *appresearch.CallRecord) error {
-	_, err := r.tx.ExecContext(ctx, `
-		INSERT INTO research_calls (connection_id, name, kind, mode, operation, outcome, detail, duration_ms, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+// RecordCall appends one interaction with an external source and returns its
+// id, so a changing call can be closed when its answer arrives.
+func (r *researchRepository) RecordCall(ctx context.Context, record *appresearch.CallRecord) (int64, error) {
+	result, err := r.tx.ExecContext(ctx, `
+		INSERT INTO research_calls (connection_id, name, kind, mode, method, operation, outcome, detail, duration_ms, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.ConnectionID, record.Name, string(record.Kind), string(record.Mode),
-		record.Operation, record.Outcome, record.Detail, record.DurationMS,
+		record.Method, record.Operation, record.Outcome, record.Detail, record.DurationMS,
 		unixSeconds(record.CreatedAt),
 	)
 	if err != nil {
-		return fmt.Errorf("record research call: %w", err)
+		return 0, fmt.Errorf("record research call: %w", err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("record research call: %w", err)
+	}
+	return id, nil
+}
+
+// FinishCall closes a write-ahead journal entry with what actually happened.
+func (r *researchRepository) FinishCall(ctx context.Context, id int64, outcome, detail string, durationMS int64) error {
+	updated, err := r.tx.ExecContext(ctx, `
+		UPDATE research_calls SET outcome = ?, detail = ?, duration_ms = ?
+		WHERE id = ? AND outcome = ?`,
+		outcome, detail, durationMS, id, appresearch.CallStarted,
+	)
+	if err != nil {
+		return fmt.Errorf("finish research call: %w", err)
+	}
+	if affected, err := updated.RowsAffected(); err == nil && affected == 0 {
+		return appresearch.ErrNotFound
 	}
 	return nil
+}
+
+// RecoverRunningReports marks reports a previous process left running as
+// failed. A report that never finished must say so, not stay "в работе" for
+// ever.
+func (r *researchRepository) RecoverRunningReports(ctx context.Context, reason string, now time.Time) (int64, error) {
+	updated, err := r.tx.ExecContext(ctx, `
+		UPDATE research_reports
+		SET status = ?, error = ?, summary = ?, finished_at = ?, version = version + 1
+		WHERE status = ?`,
+		string(domainresearch.ReportFailed), reason, "## Прервано\n\n"+reason,
+		unixSeconds(now), string(domainresearch.ReportRunning),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("recover running reports: %w", err)
+	}
+	return updated.RowsAffected()
+}
+
+// RecoverStartedCalls marks write intents without an outcome as unknown: the
+// external service may well have accepted the change.
+func (r *researchRepository) RecoverStartedCalls(ctx context.Context, detail string, now time.Time) (int64, error) {
+	updated, err := r.tx.ExecContext(ctx, `
+		UPDATE research_calls SET outcome = ?, detail = ?
+		WHERE outcome = ?`,
+		appresearch.CallUnknown, detail, appresearch.CallStarted,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("recover started research calls: %w", err)
+	}
+	return updated.RowsAffected()
 }
 
 // ListCalls returns the journal of one source, newest first. A zero id lists
@@ -575,7 +627,7 @@ func (r *researchRepository) ListCalls(ctx context.Context, connectionID int64, 
 	}
 	args = append(args, limit)
 	rows, err := r.tx.QueryContext(ctx, `
-		SELECT id, connection_id, name, kind, mode, operation, outcome, detail, duration_ms, created_at
+		SELECT id, connection_id, name, kind, mode, method, operation, outcome, detail, duration_ms, created_at
 		FROM research_calls WHERE `+where+`
 		ORDER BY created_at DESC, id DESC LIMIT ?`, args...)
 	if err != nil {
@@ -591,7 +643,7 @@ func (r *researchRepository) ListCalls(ctx context.Context, connectionID int64, 
 			createdAt int64
 		)
 		if err := rows.Scan(&record.ID, &record.ConnectionID, &record.Name, &kind, &mode,
-			&record.Operation, &record.Outcome, &record.Detail, &record.DurationMS, &createdAt); err != nil {
+			&record.Method, &record.Operation, &record.Outcome, &record.Detail, &record.DurationMS, &createdAt); err != nil {
 			return nil, 0, err
 		}
 		record.Kind = domainresearch.SourceKind(kind)

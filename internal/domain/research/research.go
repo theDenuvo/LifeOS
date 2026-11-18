@@ -13,6 +13,7 @@ package research
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"regexp"
 	"sort"
@@ -20,6 +21,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"golang.org/x/net/publicsuffix"
 )
 
 // Certainty separates what sources support from what LifeOS merely suspects.
@@ -262,6 +265,11 @@ type Citation struct {
 	Excerpt   string    `json:"excerpt,omitempty"`
 	FetchedAt time.Time `json:"fetched_at"`
 	Trust     Trust     `json:"trust"`
+	// Read tells whether LifeOS actually opened the page. A citation that was
+	// not read is a search snippet: a lead, not a source. Reading status and
+	// trust are separate properties — a low-trust source can still be read, and
+	// an unread page is unread no matter how respectable its site is.
+	Read bool `json:"read"`
 	// ConnectionID is the source the page came through; zero means the
 	// built-in web provider.
 	ConnectionID int64 `json:"connection_id,omitempty"`
@@ -540,28 +548,152 @@ type Candidate struct {
 	Citation  Citation
 }
 
-// Agreement thresholds. They are deliberately conservative: two pages are
+// Comparison thresholds. They are deliberately conservative: two pages are
 // treated as saying the same thing only when their statements share most of
-// their significant words, and a disagreement only counts when they clearly
-// talk about the same thing.
+// their significant words *and* attach the same values to them.
 const (
-	agreeThreshold     = 0.45
-	sameSiteThreshold  = 0.8
-	conflictThreshold  = 0.5
-	minSharedForNegate = 3
+	agreeThreshold       = 0.45
+	sameSiteThreshold    = 0.8
+	conflictThreshold    = 0.5
+	minSharedForAgree    = 2
+	minSharedForConflict = 2
+	// maxSubstitutionNoise is how many extra content words may differ while the
+	// statements are still read as one claim with a swapped value ("founded by
+	// X" against "founded by Y"). With more differences they are simply two
+	// different claims, and calling them a disagreement would be noise.
+	maxSubstitutionNoise = 3
 )
+
+// claim is one statement prepared for comparison: its significant words and
+// the values it names. Both matter, because two statements can be worded
+// almost identically and still say opposite things.
+type claim struct {
+	statement string
+	tokens    []string
+	entities  []string
+}
+
+func newClaim(statement string) claim {
+	return claim{
+		statement: strings.TrimSpace(statement),
+		tokens:    Tokens(statement),
+		entities:  Entities(statement),
+	}
+}
+
+// sameClaim reports whether two statements say the same thing. They must agree
+// on their significant words (up to the given overlap threshold), must not
+// contradict each other by negation, and must not name different values:
+// "OpenAI was founded by Sam Altman" and "OpenAI was founded by Elon Musk"
+// share most of their words, and merging them would invent a fact that
+// neither source states.
+func (c claim) sameClaim(other claim, threshold float64) bool {
+	if len(c.tokens) == 0 || len(other.tokens) == 0 {
+		return false
+	}
+	shared := sharedTokens(c.tokens, other.tokens)
+	if len(shared) < minSharedForAgree {
+		return false
+	}
+	if overlap(c.tokens, other.tokens) < threshold {
+		return false
+	}
+	if negationDiffers(c.statement, other.statement, shared) {
+		return false
+	}
+	mine, theirs := c.uniqueEntities(other)
+	if len(mine) > 0 && len(theirs) > 0 {
+		return false
+	}
+	return true
+}
+
+// contradicts reports whether two statements about the same subject disagree.
+// A negation of a shared term, or a different value in the same place, is a
+// disagreement: it is never merged and never counted as a fact.
+func (c claim) contradicts(other claim) bool {
+	shared := sharedTokens(c.tokens, other.tokens)
+	if len(shared) < minSharedForConflict {
+		return false
+	}
+	if overlap(c.tokens, other.tokens) < conflictThreshold {
+		return false
+	}
+	if negationDiffers(c.statement, other.statement, shared) {
+		return true
+	}
+	mine, theirs := c.uniqueEntities(other)
+	if len(mine) == 0 || len(theirs) == 0 {
+		// One statement simply names more than the other.
+		return false
+	}
+	return len(c.uniqueWords(other)) <= maxSubstitutionNoise &&
+		len(other.uniqueWords(c)) <= maxSubstitutionNoise
+}
+
+// uniqueEntities returns the values each statement names that the other does
+// not, so a caller can tell a substitution from an extra detail.
+func (c claim) uniqueEntities(other claim) (mine, theirs []string) {
+	return missingEntities(c.entities, other.entities), missingEntities(other.entities, c.entities)
+}
+
+// uniqueWords returns the non-entity words of c that other does not contain.
+func (c claim) uniqueWords(other claim) []string {
+	index := make(map[string]struct{}, len(other.tokens))
+	for _, token := range other.tokens {
+		index[token] = struct{}{}
+	}
+	result := make([]string, 0, len(c.tokens))
+	for _, token := range c.tokens {
+		if isNumericToken(token) || matchesAny(token, index) {
+			continue
+		}
+		result = append(result, token)
+	}
+	return result
+}
+
+// missingEntities returns the values of a that b does not name.
+func missingEntities(a, b []string) []string {
+	missing := make([]string, 0, len(a))
+	for _, item := range a {
+		if !containsEntity(b, item) {
+			missing = append(missing, item)
+		}
+	}
+	return missing
+}
+
+// containsEntity reports whether the set names the value. Words are compared by
+// stem so inflected forms agree; numbers and other values containing a digit
+// must match exactly, because "2015" and "2016" are different years and not two
+// spellings of one value.
+func containsEntity(set []string, value string) bool {
+	for _, item := range set {
+		if item == value {
+			return true
+		}
+		if isNumericToken(item) || isNumericToken(value) {
+			continue
+		}
+		if SameWord(item, value) {
+			return true
+		}
+	}
+	return false
+}
 
 // BuildFindings merges the candidates into findings, decides which statements
 // independent sources corroborate, and names the disagreements.
 //
 // One statement per page survives: the extraction already picked the passage
 // that answers the question, so merging keeps the reading list short. Two
-// candidates collapse into one finding when their statements agree; the
+// candidates collapse into one finding only when they say the same thing; the
 // finding keeps every citation, so the count of sources stays truthful.
 func BuildFindings(candidates []Candidate) []Finding {
 	type group struct {
 		finding Finding
-		tokens  []string
+		claim   claim
 		sites   map[string]bool
 	}
 	groups := make([]*group, 0, len(candidates))
@@ -570,7 +702,7 @@ func BuildFindings(candidates []Candidate) []Finding {
 		if statement == "" {
 			continue
 		}
-		tokens := Tokens(statement)
+		view := newClaim(statement)
 		site := siteOf(candidate.Citation)
 		merged := false
 		for _, existing := range groups {
@@ -582,12 +714,7 @@ func BuildFindings(candidates []Candidate) []Finding {
 			if existing.sites[site] {
 				threshold = sameSiteThreshold
 			}
-			if overlap(tokens, existing.tokens) < threshold {
-				continue
-			}
-			// Statements that disagree stay apart even when they talk about
-			// the same subject: merging them would hide the disagreement.
-			if conflictBetween(tokens, statement, existing.tokens, existing.finding.Statement) {
+			if !view.sameClaim(existing.claim, threshold) {
 				continue
 			}
 			existing.finding.Citations = append(existing.finding.Citations, candidate.Citation)
@@ -603,17 +730,23 @@ func BuildFindings(candidates []Candidate) []Finding {
 				Statement: statement,
 				Citations: []Citation{candidate.Citation},
 			},
-			tokens: tokens,
-			sites:  map[string]bool{site: true},
+			claim: view,
+			sites: map[string]bool{site: true},
 		})
 	}
 
 	findings := make([]Finding, 0, len(groups))
 	for _, item := range groups {
-		// Two sources on the same site are not an independent confirmation.
+		// Two pages under one publisher are not independent confirmations:
+		// independence is counted per registrable site, not per hostname.
 		sites := map[string]struct{}{}
+		readSites := map[string]struct{}{}
 		for _, citation := range item.finding.Citations {
-			sites[siteOf(citation)] = struct{}{}
+			domain := RegistrableSite(siteOf(citation))
+			sites[domain] = struct{}{}
+			if citation.Read {
+				readSites[domain] = struct{}{}
+			}
 		}
 		domains := make([]string, 0, len(sites))
 		for site := range sites {
@@ -630,7 +763,7 @@ func BuildFindings(candidates []Candidate) []Finding {
 			if other == item {
 				continue
 			}
-			if conflictBetween(item.tokens, item.finding.Statement, other.tokens, other.finding.Statement) {
+			if item.claim.contradicts(other.claim) {
 				conflict = describeConflict(item.finding, other.finding)
 				break
 			}
@@ -642,7 +775,9 @@ func BuildFindings(candidates []Candidate) []Finding {
 			// Disagreeing evidence is never a fact, however many pages agree
 			// with one of the versions.
 			item.finding.Certainty = CertaintyAssumption
-		case item.finding.Corroboration >= 2:
+		case item.finding.Corroboration >= 2 && len(readSites) >= 1:
+			// A search snippet is a lead, not a source: two snippets that agree
+			// are still two leads, so a fact needs at least one opened page.
 			item.finding.Certainty = CertaintyFact
 		default:
 			item.finding.Certainty = CertaintyAssumption
@@ -664,7 +799,7 @@ func BuildFindings(candidates []Candidate) []Finding {
 }
 
 // confidence scores a finding in [0.05, 0.95]: independent sources raise it,
-// a named disagreement and a doubtful source lower it.
+// an unread source, a named disagreement and a doubtful source lower it.
 func confidence(finding Finding) float64 {
 	value := 0.4
 	if finding.Corroboration >= 2 {
@@ -672,11 +807,18 @@ func confidence(finding Finding) float64 {
 		value += 0.05 * float64(finding.Corroboration-2)
 	}
 	weight := 0.0
+	read := 0
 	for _, citation := range finding.Citations {
 		weight += citation.Trust.Weight()
+		if citation.Read {
+			read++
+		}
 	}
 	if len(finding.Citations) > 0 {
 		value += (weight/float64(len(finding.Citations)) - 0.8) * 0.15
+	}
+	if read == 0 && len(finding.Citations) > 0 {
+		value -= 0.1
 	}
 	if finding.Conflict != "" {
 		value -= 0.15
@@ -688,22 +830,6 @@ func confidence(finding Finding) float64 {
 		return 0.95
 	}
 	return value
-}
-
-// conflictBetween reports whether two statements about the same subject
-// disagree: one negates a shared term, or they attach different numbers to it.
-func conflictBetween(aTokens []string, a string, bTokens []string, b string) bool {
-	shared := sharedTokens(aTokens, bTokens)
-	if len(shared) < minSharedForNegate {
-		return false
-	}
-	if overlap(aTokens, bTokens) < conflictThreshold {
-		return false
-	}
-	if negationDiffers(a, b, shared) {
-		return true
-	}
-	return numbersDiffer(a, b)
 }
 
 // negationDiffers reports whether one statement negates a shared term and the
@@ -765,39 +891,6 @@ func negatedTerms(text string, shared []string) map[string]bool {
 	return found
 }
 
-var numberPattern = regexp.MustCompile(`\d+(?:[.,]\d+)?`)
-
-// numbersDiffer reports whether both statements carry different numbers. The
-// comparison is by value, so "3,5" and "3.50" agree.
-func numbersDiffer(a, b string) bool {
-	left := numbersIn(a)
-	right := numbersIn(b)
-	if len(left) == 0 || len(right) == 0 {
-		return false
-	}
-	if len(left) != len(right) {
-		return false
-	}
-	for i := range left {
-		if left[i] != right[i] {
-			return true
-		}
-	}
-	return false
-}
-
-func numbersIn(text string) []string {
-	raw := numberPattern.FindAllString(text, -1)
-	if len(raw) == 0 {
-		return nil
-	}
-	values := make([]string, 0, len(raw))
-	for _, item := range raw {
-		values = append(values, strings.ReplaceAll(item, ",", "."))
-	}
-	return values
-}
-
 // describeConflict names the disagreement in user language.
 func describeConflict(finding, other Finding) string {
 	site := "другой источник"
@@ -835,6 +928,125 @@ func rawWords(text string) []string {
 	return strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	})
+}
+
+// entityWord matches a word or a number in the original text, keeping its case:
+// the case is what tells a name from a common noun.
+var entityWord = regexp.MustCompile(`[\p{L}\p{N}][\p{L}\p{N}'’._\-]*`)
+
+// Entities returns the values a statement names: capitalised words (people,
+// organisations, products, places), acronyms and numbers. They are what a
+// substitution changes, so two statements that name different people, dates or
+// amounts are not the same claim however similar the rest of the wording is.
+//
+// A statement that merely starts with a capital letter contributes nothing on
+// that account: sentence-initial function words are dropped, and every other
+// capitalised word is kept, because a missing name is worse than an extra one.
+func Entities(text string) []string {
+	matches := entityWord.FindAllString(text, -1)
+	seen := map[string]bool{}
+	entities := make([]string, 0, len(matches))
+	for _, word := range matches {
+		value, ok := entityOf(word)
+		if !ok || seen[value] {
+			continue
+		}
+		seen[value] = true
+		entities = append(entities, value)
+	}
+	sort.Strings(entities)
+	return entities
+}
+
+// entityOf normalizes one word into an entity value, or reports that the word
+// is not one.
+func entityOf(word string) (string, bool) {
+	trimmed := strings.Trim(word, ".,;:!?()[]{}«»\"'’_-—")
+	if trimmed == "" {
+		return "", false
+	}
+	if isNumericToken(trimmed) {
+		return normalizeNumber(trimmed), true
+	}
+	first, _ := utf8.DecodeRuneInString(trimmed)
+	if !unicode.IsUpper(first) {
+		return "", false
+	}
+	lower := strings.ToLower(trimmed)
+	if len([]rune(trimmed)) < 2 || functionWords[lower] {
+		return "", false
+	}
+	return lower, true
+}
+
+// isNumericToken reports whether a token carries a number. Numbers are compared
+// by value and never by stem: "2015" and "20150" are not the same year.
+func isNumericToken(token string) bool {
+	for _, r := range token {
+		if unicode.IsDigit(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeNumber compares numbers by value: "100,000" and "100000" are one
+// amount, "3,50" and "3.5" are one amount, and "2.0" is two. Thousands
+// separators are dropped first, so a comma cannot turn an amount into a decimal
+// fraction; a trailing fraction of zeros then goes, so two spellings of the
+// same value match.
+func normalizeNumber(value string) string {
+	cleaned := strings.ReplaceAll(strings.TrimSpace(value), " ", "")
+	for _, separator := range []string{",", "."} {
+		parts := strings.Split(cleaned, separator)
+		if len(parts) > 1 && allThousandsGroups(parts[1:]) {
+			cleaned = strings.Join(parts, "")
+		}
+	}
+	cleaned = strings.ReplaceAll(cleaned, ",", ".")
+	if strings.Contains(cleaned, ".") {
+		cleaned = strings.TrimRight(cleaned, "0")
+		cleaned = strings.TrimRight(cleaned, ".")
+	}
+	return strings.ToLower(cleaned)
+}
+
+// allThousandsGroups reports whether every group is exactly three digits, which
+// is what makes a separator a thousands separator rather than a decimal point.
+func allThousandsGroups(groups []string) bool {
+	for _, group := range groups {
+		if len(group) != 3 {
+			return false
+		}
+		for _, r := range group {
+			if !unicode.IsDigit(r) {
+				return false
+			}
+		}
+	}
+	return len(groups) > 0
+}
+
+// functionWords are the capitalised words that say nothing about the subject:
+// articles, pronouns and sentence openers. They appear at the start of a
+// sentence by the rules of the language, not because they name something.
+var functionWords = map[string]bool{
+	"a": true, "an": true, "the": true, "this": true, "that": true,
+	"these": true, "those": true, "it": true, "its": true, "they": true,
+	"their": true, "there": true, "then": true, "than": true, "and": true,
+	"but": true, "or": true, "if": true, "in": true, "on": true, "at": true,
+	"by": true, "for": true, "from": true, "with": true, "as": true,
+	"of": true, "to": true, "when": true, "while": true, "however": true,
+	"according": true, "both": true, "each": true, "such": true, "some": true,
+	"most": true, "many": true, "more": true, "also": true, "here": true,
+	"и": true, "в": true, "во": true, "на": true, "с": true, "со": true,
+	"по": true, "для": true, "но": true, "а": true, "о": true, "об": true,
+	"это": true, "этот": true, "эта": true, "эти": true, "то": true,
+	"он": true, "она": true, "они": true, "оно": true, "его": true,
+	"её": true, "их": true, "как": true, "так": true, "также": true,
+	"если": true, "или": true, "при": true, "над": true, "под": true,
+	"про": true, "что": true, "чтобы": true, "когда": true, "однако": true,
+	"согласно": true, "кроме": true, "более": true, "менее": true,
 }
 
 var stopwords = map[string]bool{
@@ -954,14 +1166,39 @@ func normalizeHost(host string) string {
 	return host
 }
 
+// RegistrableSite reduces a host to the site that owns it: the registrable
+// domain, so blog.example.com and docs.example.com count as one site. Two pages
+// under one publisher are not an independent confirmation, and counting
+// hostnames would let a single publisher corroborate itself.
+func RegistrableSite(host string) string {
+	host = normalizeHost(host)
+	if host == "" {
+		return ""
+	}
+	if net.ParseIP(host) != nil {
+		// An address has no registrable domain; it is its own site.
+		return host
+	}
+	if domain, err := publicsuffix.EffectiveTLDPlusOne(host); err == nil {
+		return domain
+	}
+	return host
+}
+
 // CanonicalURL normalizes a result URL so the same page found by two queries
 // is only fetched once: the fragment goes, the trailing slash goes, tracking
 // parameters go.
+//
+// Only the scheme and the host are lowercased. Paths and query values are
+// case-sensitive on many sites, and lowercasing them would turn a working
+// address into a broken one.
 func CanonicalURL(rawURL string) string {
-	parsed, err := url.Parse(strings.ToLower(strings.TrimSpace(rawURL)))
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil || parsed.Host == "" {
 		return ""
 	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	parsed.Host = strings.ToLower(parsed.Host)
 	parsed.Fragment = ""
 	query := parsed.Query()
 	for key := range query {

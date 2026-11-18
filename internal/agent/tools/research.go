@@ -403,6 +403,7 @@ func RegisterResearchTools(registry *Registry, service *researchService) {
 				"method":    enumProp("GET", "POST", "PUT", "PATCH", "DELETE"),
 				"body":      stringProp("Тело запроса или аргументы инструмента MCP в виде JSON"),
 				"query":     stringProp("Строка запроса для поискового источника или аргумент скрипта"),
+				"write":     booleanProp("Заявка на изменение вовне: нужна для инструмента MCP, который меняет данные. Источник только на чтение всё равно откажет"),
 			}, "source_id")),
 		Execute: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			var args struct {
@@ -411,12 +412,16 @@ func RegisterResearchTools(registry *Registry, service *researchService) {
 				Method    string `json:"method"`
 				Body      string `json:"body"`
 				Query     string `json:"query"`
+				Write     bool   `json:"write"`
 			}
 			if err := decodeArgs(raw, &args); err != nil {
 				return nil, err
 			}
 			method := strings.ToUpper(strings.TrimSpace(args.Method))
-			write := method != "" && method != "GET" && method != "HEAD"
+			// The HTTP method says what it can; an MCP tool has no method, so the
+			// model must say that it means to change something, and the source
+			// mode decides whether it may.
+			write := args.Write || (method != "" && method != "GET" && method != "HEAD")
 			result, err := service.CallSource(ctx, args.SourceID, appresearch.CallRequest{
 				Operation: args.Operation,
 				Method:    method,
@@ -439,6 +444,7 @@ func RegisterResearchTools(registry *Registry, service *researchService) {
 				SourceID  int64  `json:"source_id"`
 				Operation string `json:"operation"`
 				Method    string `json:"method"`
+				Write     bool   `json:"write"`
 			}
 			if err := decodeArgs(raw, &args); err != nil {
 				return "", err
@@ -447,18 +453,25 @@ func RegisterResearchTools(registry *Registry, service *researchService) {
 			if method == "" {
 				method = "GET"
 			}
-			return fmt.Sprintf("Выполнить %s %s на внешнем источнике #%d.", method,
+			if args.Write {
+				return fmt.Sprintf("Изменить что-то вовне: %s %s на источнике #%d.", method,
+					strings.TrimSpace(args.Operation), args.SourceID), nil
+			}
+			return fmt.Sprintf("Прочитать %s %s на внешнем источнике #%d.", method,
 				strings.TrimSpace(args.Operation), args.SourceID), nil
 		},
 	})
 
 	registry.Register(Tool{
 		Spec: assistantSpec("test_external_source",
-			"Проверить подключённый источник: открыть список инструментов MCP или выполнить безопасный запрос. Ничего не меняет.",
+			"Проверить подключённый источник: открыть список инструментов MCP или выполнить один запрос. У источника-скрипта это запуск команды, поэтому проверка выполняется только после подтверждения пользователя.",
 			objectSchema(map[string]any{
 				"source_id": integerProp("ID источника"),
 			}, "source_id")),
-		ReadOnly: true,
+		// A check is not reading: for a script source it runs the user's
+		// command, and a command's effects are unknown to LifeOS. The call goes
+		// through confirmation like any other action with consequences.
+		ReadOnly: false,
 		Execute: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			var args struct {
 				SourceID int64 `json:"source_id"`

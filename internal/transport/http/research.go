@@ -20,6 +20,7 @@ type researchCitationBody struct {
 	Site    string `json:"site,omitempty"`
 	Excerpt string `json:"excerpt,omitempty"`
 	Trust   string `json:"trust"`
+	Read    bool   `json:"read"`
 }
 
 type researchFindingBody struct {
@@ -75,7 +76,7 @@ func newResearchReportBody(report *domainresearch.Report) researchReportBody {
 		for _, citation := range finding.Citations {
 			item.Citations = append(item.Citations, researchCitationBody{
 				URL: citation.URL, Title: citation.Title, Site: citation.Site,
-				Excerpt: citation.Excerpt, Trust: string(citation.Trust),
+				Excerpt: citation.Excerpt, Trust: string(citation.Trust), Read: citation.Read,
 			})
 		}
 		body.Findings = append(body.Findings, item)
@@ -123,6 +124,7 @@ type researchCallBody struct {
 	Name         string `json:"name"`
 	Kind         string `json:"kind"`
 	Mode         string `json:"mode"`
+	Method       string `json:"method"`
 	Operation    string `json:"operation"`
 	Outcome      string `json:"outcome"`
 	Detail       string `json:"detail,omitempty"`
@@ -133,9 +135,9 @@ type researchCallBody struct {
 func newResearchCallBody(record *appresearch.CallRecord) researchCallBody {
 	return researchCallBody{
 		ID: record.ID, ConnectionID: record.ConnectionID, Name: record.Name,
-		Kind: string(record.Kind), Mode: string(record.Mode), Operation: record.Operation,
-		Outcome: record.Outcome, Detail: record.Detail, DurationMS: record.DurationMS,
-		CreatedAt: formatTime(record.CreatedAt),
+		Kind: string(record.Kind), Mode: string(record.Mode), Method: record.Method,
+		Operation: record.Operation, Outcome: record.Outcome, Detail: record.Detail,
+		DurationMS: record.DurationMS, CreatedAt: formatTime(record.CreatedAt),
 	}
 }
 
@@ -239,7 +241,10 @@ func (h *Handler) runResearch(w http.ResponseWriter, r *http.Request) {
 	if body.SaveKnowledge != nil {
 		save = *body.SaveKnowledge
 	}
-	report, err := h.services.Research.Research(r.Context(), appresearch.ResearchInput{
+	// Reading pages takes longer than an HTTP write timeout, so the run is
+	// accepted and continues on its own: closing the connection must not abort
+	// the research, and the interface follows the result through events.
+	report, err := h.services.Research.StartResearch(r.Context(), appresearch.ResearchInput{
 		Question:       body.Question,
 		Queries:        body.Queries,
 		MaxPages:       body.MaxPages,
@@ -247,18 +252,11 @@ func (h *Handler) runResearch(w http.ResponseWriter, r *http.Request) {
 		KnowledgeTitle: body.KnowledgeTitle,
 		ConnectionID:   body.SourceID,
 	})
-	if report != nil && err != nil {
-		// The run is recorded with its failure, so the resource exists: the
-		// client gets 201 with status "failed" and the reason inside. Answering
-		// 5xx here would replace the explanation with a generic error title.
-		h.writeJSON(w, http.StatusCreated, newResearchReportBody(report))
-		return
-	}
 	if err != nil {
 		h.writeResearchError(w, r, err)
 		return
 	}
-	h.writeJSON(w, http.StatusCreated, newResearchReportBody(report))
+	h.writeJSON(w, http.StatusAccepted, newResearchReportBody(report))
 }
 
 // getResearchReport handles GET /api/v1/research/reports/{id}.
@@ -659,6 +657,10 @@ func (h *Handler) writeResearchError(w http.ResponseWriter, r *http.Request, err
 		h.writeProblem(w, r, http.StatusForbidden, "script-needs-user", "Script Needs User", err.Error())
 	case errors.Is(err, appresearch.ErrNoProvider):
 		h.writeProblem(w, r, http.StatusServiceUnavailable, "search-unavailable", "Search Unavailable", err.Error())
+	case errors.Is(err, appresearch.ErrJournalUnavailable):
+		// A changing call is refused when its journal entry cannot be written:
+		// an unrecorded change outside LifeOS is worse than no change.
+		h.writeProblem(w, r, http.StatusServiceUnavailable, "journal-unavailable", "Journal Unavailable", err.Error())
 	case errors.Is(err, appresearch.ErrEmptyQuestion):
 		h.writeProblem(w, r, http.StatusBadRequest, "validation-failed", "Validation Failed", err.Error())
 	default:

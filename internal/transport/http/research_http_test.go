@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	appresearch "github.com/theDenuvo/LifeOS/internal/application/research"
 	domainresearch "github.com/theDenuvo/LifeOS/internal/domain/research"
@@ -71,6 +72,56 @@ func (w *httpTestWeb) recordedCalls() []appresearch.CallRequest {
 	return append([]appresearch.CallRequest(nil), w.calls...)
 }
 
+// A citation that came from a search snippet rather than a read page keeps
+// saying so over HTTP: the JSON carries `read: false` and the field is present,
+// because a client that cannot tell the difference would present a lead as a
+// source.
+func TestResearchCitationKeepsReadingStatus(t *testing.T) {
+	report := newResearchReportBody(&domainresearch.Report{
+		ID: 7, Question: "Что нового в Go 1.24?", Status: domainresearch.ReportCompleted,
+		Findings: []domainresearch.Finding{{
+			Statement: "Go 1.24 adds generic type aliases.", Certainty: domainresearch.CertaintyAssumption,
+			Confidence: 0.4, Corroboration: 1, Domains: []string{"go.dev"},
+			Citations: []domainresearch.Citation{
+				{URL: "https://go.dev/doc/go1.24", Site: "go.dev", Trust: domainresearch.TrustNormal, Read: true},
+				{URL: "https://example.org/go124", Site: "example.org", Trust: domainresearch.TrustLow, Read: false},
+			},
+		}},
+	})
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	for _, want := range []string{`"read":true`, `"read":false`} {
+		if !strings.Contains(string(encoded), want) {
+			t.Fatalf("%s missing from %s", want, encoded)
+		}
+	}
+}
+
+// waitForReport follows a background run to its end: the POST answers while
+// the research is still going, and the report is read back afterwards.
+func waitForReport(t *testing.T, handler *Handler, id int64) researchReportBody {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		recorder := researchRequest(t, handler, http.MethodGet, fmt.Sprintf("/api/v1/research/reports/%d", id), "")
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("get report: status %d body %s", recorder.Code, recorder.Body.String())
+		}
+		var report researchReportBody
+		if err := json.Unmarshal(recorder.Body.Bytes(), &report); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if report.Status != "running" {
+			return report
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("the report %d never finished", id)
+	return researchReportBody{}
+}
+
 func researchRequest(t *testing.T, handler *Handler, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
@@ -91,13 +142,18 @@ func TestResearchRunOverHTTP(t *testing.T) {
 		"queries": ["go 1.24 generic type aliases"],
 		"save_knowledge": false
 	}`)
-	if w.Code != http.StatusCreated {
+	if w.Code != http.StatusAccepted {
 		t.Fatalf("run research: status %d body %s", w.Code, w.Body.String())
 	}
 	var report researchReportBody
 	if err := json.Unmarshal(w.Body.Bytes(), &report); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
+	if report.Status != "running" {
+		t.Fatalf("the accepted run is still running, got %q", report.Status)
+	}
+	// The run continues without the request; its result is read back.
+	report = waitForReport(t, handler, report.ID)
 	if report.Status != "completed" {
 		t.Fatalf("status = %q", report.Status)
 	}
@@ -109,6 +165,13 @@ func TestResearchRunOverHTTP(t *testing.T) {
 	}
 	if len(report.Findings[0].Citations) != 2 || report.Findings[0].Citations[0].Site == "" {
 		t.Fatalf("citations = %+v", report.Findings[0].Citations)
+	}
+	// Reading status reaches the client: the UI says "страница не прочитана"
+	// from this flag, not from the trust level.
+	for _, citation := range report.Findings[0].Citations {
+		if !citation.Read {
+			t.Fatalf("a citation built from a read page must say so: %+v", citation)
+		}
 	}
 	if !strings.Contains(report.Summary, "Подтверждено несколькими источниками") {
 		t.Fatalf("summary = %q", report.Summary)

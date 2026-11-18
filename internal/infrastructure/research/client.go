@@ -44,6 +44,11 @@ type Options struct {
 	Timeout      time.Duration
 	MaxPageBytes int64
 	Client       *http.Client
+	// AllowPrivateHosts lets page reading reach loopback and private addresses.
+	// It exists for tests and for a single-user install that deliberately reads
+	// its own network; the default refuses them, because a page address comes
+	// from a search result or from the model, not from the user.
+	AllowPrivateHosts bool
 }
 
 // Client implements research.External.
@@ -53,6 +58,9 @@ type Client struct {
 	searchFormat domainresearch.SearchFormat
 	userAgent    string
 	maxPageBytes int64
+	timeout      time.Duration
+	// allowPrivateHosts disables the public-address check for page reading.
+	allowPrivateHosts bool
 }
 
 // NewClient builds the adapter.
@@ -92,7 +100,15 @@ func NewClient(options Options) *Client {
 	if maxPage <= 0 {
 		maxPage = defaultMaxPageBytes
 	}
-	return &Client{http: client, searchURL: searchURL, searchFormat: format, userAgent: userAgent, maxPageBytes: maxPage}
+	return &Client{
+		http:              client,
+		searchURL:         searchURL,
+		searchFormat:      format,
+		userAgent:         userAgent,
+		maxPageBytes:      maxPage,
+		timeout:           options.Timeout,
+		allowPrivateHosts: options.AllowPrivateHosts,
+	}
 }
 
 // Search queries a search endpoint: the connection's own when one is given,
@@ -117,7 +133,9 @@ func (c *Client) Search(ctx context.Context, connection *domainresearch.Connecti
 	if err != nil {
 		return nil, err
 	}
-	body, contentType, err := c.get(ctx, target)
+	// The search endpoint is the user's own choice and may live on the local
+	// network; its redirects are still checked like any other page.
+	body, contentType, err := c.getWith(ctx, c.guardedClient(hostOf(target)), target)
 	if err != nil {
 		return nil, err
 	}
@@ -136,6 +154,10 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) (appresearch.Page, er
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
 		return appresearch.Page{}, fmt.Errorf("адрес страницы некорректен: %q", rawURL)
 	}
+	client := c.guardedClient("")
+	if err := (publicHostGuard{}).checkURL(ctx, parsed); err != nil && !c.allowPrivateHosts {
+		return appresearch.Page{}, err
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return appresearch.Page{}, err
@@ -143,7 +165,7 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) (appresearch.Page, er
 	request.Header.Set("User-Agent", c.userAgent)
 	request.Header.Set("Accept", "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5")
 	request.Header.Set("Accept-Language", "ru,en;q=0.8")
-	response, err := c.http.Do(request)
+	response, err := client.Do(request)
 	if err != nil {
 		return appresearch.Page{}, fmt.Errorf("не удалось открыть %s: %w", target, err)
 	}
@@ -175,6 +197,13 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) (appresearch.Page, er
 func (c *Client) Call(ctx context.Context, connection *domainresearch.Connection, request appresearch.CallRequest) (appresearch.CallResult, error) {
 	if connection == nil {
 		return appresearch.CallResult{}, appresearch.ErrInvalidCall
+	}
+	if connection.Kind != domainresearch.KindScript {
+		// A source is the user's own choice of address, but the service
+		// metadata range is never a service anyone connects on purpose.
+		if err := (publicHostGuard{}).checkSourceEndpoint(ctx, connection.Endpoint); err != nil {
+			return appresearch.CallResult{}, err
+		}
 	}
 	switch connection.Kind {
 	case domainresearch.KindHTTPAPI:
@@ -286,6 +315,13 @@ func buildSearchURL(endpoint, query string) (string, error) {
 
 // get performs a GET and returns the body.
 func (c *Client) get(ctx context.Context, target string) ([]byte, string, error) {
+	return c.getWith(ctx, c.http, target)
+}
+
+// getWith performs a GET with a specific client, which is how page reads and
+// searches carry the public-address check while the rest of the traffic keeps
+// its own client.
+func (c *Client) getWith(ctx context.Context, client *http.Client, target string) ([]byte, string, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return nil, "", err
@@ -293,7 +329,7 @@ func (c *Client) get(ctx context.Context, target string) ([]byte, string, error)
 	request.Header.Set("User-Agent", c.userAgent)
 	request.Header.Set("Accept", "text/html,application/json;q=0.9,*/*;q=0.5")
 	request.Header.Set("Accept-Language", "ru,en;q=0.8")
-	response, err := c.http.Do(request)
+	response, err := client.Do(request)
 	if err != nil {
 		return nil, "", fmt.Errorf("поиск недоступен: %w", err)
 	}
@@ -306,6 +342,15 @@ func (c *Client) get(ctx context.Context, target string) ([]byte, string, error)
 		return nil, "", fmt.Errorf("ответ поиска не прочитан: %w", err)
 	}
 	return body, response.Header.Get("Content-Type"), nil
+}
+
+// hostOf returns the host of an address, for the guard's allowlist.
+func hostOf(rawURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(parsed.Hostname())
 }
 
 func contentOrHTML(contentType string) string {

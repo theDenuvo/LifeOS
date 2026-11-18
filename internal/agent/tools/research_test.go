@@ -32,7 +32,7 @@ func TestResearchToolsAreRegistered(t *testing.T) {
 
 func TestResearchReadOnlyBoundary(t *testing.T) {
 	registry := newResearchRegistry()
-	readOnly := []string{"web_search", "read_web_page", "list_research", "get_research", "list_external_sources", "test_external_source", "list_watches"}
+	readOnly := []string{"web_search", "read_web_page", "list_research", "get_research", "list_external_sources", "list_watches"}
 	for _, name := range readOnly {
 		if !registry.IsReadOnly(name) {
 			t.Fatalf("%q must be read-only: it only reads", name)
@@ -48,8 +48,10 @@ func TestResearchReadOnlyBoundary(t *testing.T) {
 			t.Fatalf("%q is reversible and must apply without a confirmation", name)
 		}
 	}
-	// Removing a source and an outbound call are decisions for the user.
-	for _, name := range []string{"remove_external_source", "call_external_source", "add_external_source", "delete_watch"} {
+	// Removing a source, an outbound call and a source check are decisions for
+	// the user: checking a script source runs the user's command, and the
+	// command's effects are not something LifeOS can promise.
+	for _, name := range []string{"remove_external_source", "call_external_source", "add_external_source", "delete_watch", "test_external_source"} {
 		if registry.IsDirect(name) {
 			t.Fatalf("%q must wait for confirmation", name)
 		}

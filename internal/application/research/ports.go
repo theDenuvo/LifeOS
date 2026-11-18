@@ -31,6 +31,9 @@ var (
 	ErrInvalidCall       = errors.New("запрос к внешнему источнику некорректен")
 	ErrScriptNeedsUser   = errors.New("источник-скрипт создаёт только пользователь")
 	ErrKnowledgeNotSaved = errors.New("результат не сохранён в базу знаний")
+	// ErrJournalUnavailable refuses a changing call whose audit entry cannot be
+	// written: an unrecorded change outside LifeOS is worse than no change.
+	ErrJournalUnavailable = errors.New("журнал внешних обращений недоступен")
 )
 
 // Clock supplies timestamps to all mutations.
@@ -130,18 +133,27 @@ type CallRecord struct {
 	Name         string
 	Kind         domainresearch.SourceKind
 	Mode         domainresearch.AccessMode
-	Operation    string
-	Outcome      string // ok | refused | failed
-	Detail       string
-	DurationMS   int64
-	CreatedAt    time.Time
+	// Method is the HTTP method of an API call, and empty where the source has
+	// no HTTP method of its own (a tool name, a command). Without it the
+	// journal cannot tell a read from a deletion.
+	Method     string
+	Operation  string
+	Outcome    string
+	Detail     string
+	DurationMS int64
+	CreatedAt  time.Time
 }
 
 // Outcomes of an audited call.
+//
+// started — a changing call was sent and its result is not known yet;
+// unknown — LifeOS was restarted while such a call was in flight.
 const (
+	CallStarted = "started"
 	CallOK      = "ok"
 	CallRefused = "refused"
 	CallFailed  = "failed"
+	CallUnknown = "unknown"
 )
 
 // Repository is the persistence boundary of reports, sources and watches.
@@ -169,8 +181,19 @@ type Repository interface {
 	UpdateWatch(ctx context.Context, id int64, expectedVersion int, watch *domainresearch.Watch) (*domainresearch.Watch, error)
 	DeleteWatch(ctx context.Context, id int64) error
 
-	RecordCall(ctx context.Context, record *CallRecord) error
+	// RecordCall stores one journal entry and returns its id, so a changing
+	// call can be closed once its answer arrives.
+	RecordCall(ctx context.Context, record *CallRecord) (int64, error)
+	// FinishCall closes a write-ahead entry with what actually happened.
+	FinishCall(ctx context.Context, id int64, outcome, detail string, durationMS int64) error
 	ListCalls(ctx context.Context, connectionID int64, limit int) ([]*CallRecord, int, error)
+
+	// RecoverRunningReports marks reports a previous process left running as
+	// failed, and returns how many were touched.
+	RecoverRunningReports(ctx context.Context, reason string, now time.Time) (int64, error)
+	// RecoverStartedCalls marks journalled write intents without an outcome as
+	// unknown, and returns how many were touched.
+	RecoverStartedCalls(ctx context.Context, detail string, now time.Time) (int64, error)
 }
 
 // Transaction exposes one transactional research repository.

@@ -56,18 +56,26 @@ func (c *Client) callScript(ctx context.Context, connection *domainresearch.Conn
 	commandCtx, cancel := context.WithTimeout(ctx, scriptTimeout)
 	defer cancel()
 	command := exec.CommandContext(commandCtx, args[0], args[1:]...)
-	var stdout, stderr bytes.Buffer
-	command.Stdout = &stdout
-	command.Stderr = &stderr
+	// Both streams are bounded while they are produced. Buffering first and
+	// trimming afterwards would let a runaway command fill memory with
+	// gigabytes before the limit is applied; here the command itself is
+	// stopped once it goes over.
+	stdout := newBoundedBuffer(scriptOutputLimit, cancel)
+	stderr := newBoundedBuffer(scriptOutputLimit, cancel)
+	command.Stdout = stdout
+	command.Stderr = stderr
 	started := time.Now()
 	runErr := command.Run()
 	duration := time.Since(started)
 	output := stdout.String()
-	if len(output) > scriptOutputLimit {
-		output = output[:scriptOutputLimit] + "\n… (вывод сокращён)"
+	if stdout.Overflowed() {
+		output += "\n… (вывод сокращён)"
 	}
 	if runErr != nil {
 		reason := strings.TrimSpace(stderr.String())
+		if stdout.Overflowed() {
+			reason = fmt.Sprintf("вывод команды превысил допустимый размер (%d КиБ)", scriptOutputLimit>>10)
+		}
 		if reason == "" {
 			reason = runErr.Error()
 		}
@@ -81,6 +89,43 @@ func (c *Client) callScript(ctx context.Context, connection *domainresearch.Conn
 		Duration:    duration,
 	}, nil
 }
+
+// boundedBuffer collects output up to a limit and stops the command when it
+// goes over. Discarding the excess would not be enough: the process would keep
+// producing it, so the limit cancels the command as well.
+type boundedBuffer struct {
+	buffer   bytes.Buffer
+	limit    int
+	overflow bool
+	stop     func()
+}
+
+func newBoundedBuffer(limit int, stop func()) *boundedBuffer {
+	return &boundedBuffer{limit: limit, stop: stop}
+}
+
+func (b *boundedBuffer) Write(payload []byte) (int, error) {
+	if b.overflow {
+		return len(payload), nil
+	}
+	room := b.limit - b.buffer.Len()
+	if room <= 0 || len(payload) > room {
+		if room > 0 {
+			b.buffer.Write(payload[:room])
+		}
+		b.overflow = true
+		if b.stop != nil {
+			b.stop()
+		}
+		return len(payload), nil
+	}
+	return b.buffer.Write(payload)
+}
+
+func (b *boundedBuffer) String() string { return b.buffer.String() }
+
+// Overflowed reports whether the command produced more than the limit.
+func (b *boundedBuffer) Overflowed() bool { return b.overflow }
 
 // splitCommand splits a command line into arguments, honouring single and
 // double quotes and backslash escapes. It is deliberately not a shell: no

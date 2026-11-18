@@ -318,9 +318,9 @@ func TestResearchRepositoryJournalsCalls(t *testing.T) {
 
 	if err := uow.Do(ctx, func(ctx context.Context, tx appresearch.Transaction) error {
 		for _, outcome := range []string{appresearch.CallOK, appresearch.CallRefused, appresearch.CallFailed} {
-			if err := tx.Research().RecordCall(ctx, &appresearch.CallRecord{
+			if _, err := tx.Research().RecordCall(ctx, &appresearch.CallRecord{
 				ConnectionID: 7, Name: "API", Kind: domainresearch.KindHTTPAPI,
-				Mode: domainresearch.ModeRead, Operation: "/items", Outcome: outcome,
+				Mode: domainresearch.ModeRead, Method: "GET", Operation: "/items", Outcome: outcome,
 				Detail: "detail", CreatedAt: now,
 			}); err != nil {
 				return err
@@ -360,5 +360,114 @@ func TestMemorySourceWebKindIsAccepted(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO memory_sources (entry_id, kind, source_id, label, excerpt, observed_at, created_at)
 		VALUES (?, 'web', 0, 'Веб: example.org', 'fragment', ?, ?)`, entryID, now, now); err != nil {
 		t.Fatalf("the web provenance kind must be accepted: %v", err)
+	}
+}
+
+// The journal of a changing call starts as an intent and is closed with the
+// outcome; the method is recorded so a read can be told from a deletion.
+func TestResearchRepositoryClosesAWriteAheadCall(t *testing.T) {
+	uow, _ := setupResearchDB(t)
+	ctx := context.Background()
+	now := time.Date(2026, 4, 1, 9, 0, 0, 0, time.UTC)
+
+	var id int64
+	if err := uow.Do(ctx, func(ctx context.Context, tx appresearch.Transaction) error {
+		var err error
+		id, err = tx.Research().RecordCall(ctx, &appresearch.CallRecord{
+			ConnectionID: 3, Name: "API", Kind: domainresearch.KindHTTPAPI, Mode: domainresearch.ModeWrite,
+			Method: "DELETE", Operation: "/items/1", Outcome: appresearch.CallStarted,
+			Detail: "отправляется", CreatedAt: now,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	if id == 0 {
+		t.Fatal("the intent must be stored and identified")
+	}
+	if err := uow.Do(ctx, func(ctx context.Context, tx appresearch.Transaction) error {
+		return tx.Research().FinishCall(ctx, id, appresearch.CallOK, "204 No Content", 42)
+	}); err != nil {
+		t.Fatalf("finish: %v", err)
+	}
+	if err := uow.Do(ctx, func(ctx context.Context, tx appresearch.Transaction) error {
+		// A second close must not overwrite the outcome.
+		return tx.Research().FinishCall(ctx, id, appresearch.CallFailed, "поздно", 1)
+	}); !errors.Is(err, appresearch.ErrNotFound) {
+		t.Fatalf("a closed entry must not be closed again, got %v", err)
+	}
+
+	var records []*appresearch.CallRecord
+	if err := uow.Do(ctx, func(ctx context.Context, tx appresearch.Transaction) error {
+		var err error
+		records, _, err = tx.Research().ListCalls(ctx, 3, 10)
+		return err
+	}); err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("one call is one entry, got %+v", records)
+	}
+	if records[0].Outcome != appresearch.CallOK || records[0].Method != "DELETE" || records[0].DurationMS != 42 {
+		t.Fatalf("entry = %+v", records[0])
+	}
+}
+
+// A restart closes what the previous process left open: a running report is
+// failed with a reason, and an unclosed changing call becomes unknown.
+func TestResearchRepositoryRecoversInterruptedWork(t *testing.T) {
+	uow, db := setupResearchDB(t)
+	ctx := context.Background()
+	now := time.Date(2026, 4, 1, 9, 0, 0, 0, time.UTC)
+
+	var reportID int64
+	if err := uow.Do(ctx, func(ctx context.Context, tx appresearch.Transaction) error {
+		var err error
+		reportID, err = tx.Research().InsertReport(ctx, &domainresearch.Report{
+			Question: "Что осталось в работе?", Queries: []string{"вопрос"},
+			Status: domainresearch.ReportRunning, StartedAt: now,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("insert report: %v", err)
+	}
+	if err := uow.Do(ctx, func(ctx context.Context, tx appresearch.Transaction) error {
+		_, err := tx.Research().RecordCall(ctx, &appresearch.CallRecord{
+			ConnectionID: 4, Name: "API", Kind: domainresearch.KindHTTPAPI, Mode: domainresearch.ModeWrite,
+			Method: "POST", Operation: "/items", Outcome: appresearch.CallStarted, CreatedAt: now,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("record call: %v", err)
+	}
+
+	var reports, calls int64
+	if err := uow.Do(ctx, func(ctx context.Context, tx appresearch.Transaction) error {
+		var err error
+		if reports, err = tx.Research().RecoverRunningReports(ctx, "прервано перезапуском", now); err != nil {
+			return err
+		}
+		calls, err = tx.Research().RecoverStartedCalls(ctx, "результат неизвестен", now)
+		return err
+	}); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if reports != 1 || calls != 1 {
+		t.Fatalf("recovered %d reports and %d calls", reports, calls)
+	}
+
+	var status, reportError string
+	if err := db.QueryRow(`SELECT status, error FROM research_reports WHERE id = ?`, reportID).Scan(&status, &reportError); err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	if status != string(domainresearch.ReportFailed) || reportError != "прервано перезапуском" {
+		t.Fatalf("report = %s / %q", status, reportError)
+	}
+	var outcome string
+	if err := db.QueryRow(`SELECT outcome FROM research_calls WHERE connection_id = 4`).Scan(&outcome); err != nil {
+		t.Fatalf("read call: %v", err)
+	}
+	if outcome != appresearch.CallUnknown {
+		t.Fatalf("call outcome = %q", outcome)
 	}
 }

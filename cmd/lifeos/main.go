@@ -466,6 +466,18 @@ func main() {
 	// up often enough to notice.
 	go appresearch.NewRunner(researchService, 15*time.Minute).Run(ctx)
 
+	// A research run started before the last restart has no owner: the report
+	// is marked failed with the reason, and a changing external call whose
+	// answer never arrived is marked unknown. Saying that LifeOS does not know
+	// is the only honest option, and it must happen before the interface shows
+	// stale "в работе" rows.
+	if recovered, err := researchService.RecoverInterrupted(context.Background()); err != nil {
+		slog.Error("research: closing interrupted work failed", "error", err)
+	} else if recovered.Reports > 0 || recovered.Calls > 0 {
+		slog.Info("research: closed work interrupted by the previous shutdown",
+			"reports", recovered.Reports, "calls", recovered.Calls)
+	}
+
 	// Goal progress is recorded synchronously when a completion commits. It
 	// does not depend on a live event subscriber, and the result is on disk
 	// before the completing request returns. The reconciler is the second line:
@@ -513,6 +525,20 @@ func main() {
 	case <-automationRunnerDone:
 	case <-time.After(35 * time.Second):
 		slog.Warn("Automation runner did not finish in time; continuing shutdown")
+	}
+
+	// Background research runs on its own context: it is given a moment to
+	// finish and record what it found, and is then stopped. Reports left over
+	// are closed by RecoverInterrupted on the next start, so a shutdown can
+	// never leave a report "в работе" for ever.
+	graceCtx, cancelGrace := context.WithTimeout(context.Background(), 8*time.Second)
+	waitErr := researchService.Wait(graceCtx)
+	cancelGrace()
+	if waitErr != nil {
+		researchService.Close()
+		lastCtx, cancelLast := context.WithTimeout(context.Background(), 3*time.Second)
+		_ = researchService.Wait(lastCtx)
+		cancelLast()
 	}
 }
 

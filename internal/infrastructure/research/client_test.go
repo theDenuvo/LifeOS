@@ -3,7 +3,9 @@ package research
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,10 +17,13 @@ import (
 	domainresearch "github.com/theDenuvo/LifeOS/internal/domain/research"
 )
 
+// newTestClient builds a client for tests: the fixtures live on loopback, which
+// production page reading refuses on purpose.
 func newTestClient(options Options) *Client {
 	if options.Timeout <= 0 {
 		options.Timeout = 5 * time.Second
 	}
+	options.AllowPrivateHosts = true
 	return NewClient(options)
 }
 
@@ -250,7 +255,7 @@ func TestMCPListsToolsAndCallsOneOverEventStream(t *testing.T) {
 			w.WriteHeader(http.StatusAccepted)
 		case "tools/list":
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"search_repos"}]}}`)
+			fmt.Fprint(w, `{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"search_repos","annotations":{"readOnlyHint":true}}]}}`)
 		case "tools/call":
 			w.Header().Set("Content-Type", "text/event-stream")
 			fmt.Fprint(w, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}\n\n")
@@ -351,14 +356,45 @@ func TestScriptSourceReceivesTheQueryAsOneArgument(t *testing.T) {
 	}
 }
 
-// TestScriptHelper is the helper process the script test runs. It only acts
+// TestScriptHelper is the helper process the script tests run. It only acts
 // when the parent marked it.
 func TestScriptHelper(t *testing.T) {
-	if os.Getenv("LIFEOS_SCRIPT_HELPER") != "1" {
-		return
+	switch os.Getenv("LIFEOS_SCRIPT_HELPER") {
+	case "1":
+		fmt.Printf("helper:%s", os.Args[len(os.Args)-1])
+		os.Exit(0)
+	case "flood":
+		// Write until the parent stops us: the point is that it does.
+		chunk := []byte(strings.Repeat("шум ", 4096))
+		for {
+			if _, err := os.Stdout.Write(chunk); err != nil {
+				os.Exit(3)
+			}
+		}
 	}
-	fmt.Printf("helper:%s", os.Args[len(os.Args)-1])
-	os.Exit(0)
+}
+
+// A command that keeps writing must be stopped by the limit while it runs, not
+// buffered until it finishes: a cap applied after the fact still lets a runaway
+// process fill memory.
+func TestScriptOutputIsBoundedWhileItIsProduced(t *testing.T) {
+	t.Setenv("LIFEOS_SCRIPT_HELPER", "flood")
+	client := newTestClient(Options{})
+	connection := &domainresearch.Connection{
+		ID: 1, Name: "Скрипт", Kind: domainresearch.KindScript, Mode: domainresearch.ModeRead,
+		Endpoint: fmt.Sprintf("%q -test.run=TestScriptHelper", os.Args[0]),
+		Enabled:  true,
+	}
+	result, err := client.Call(context.Background(), connection, appresearch.CallRequest{Query: "x"})
+	if err == nil {
+		t.Fatalf("a runaway command must be reported, got %d bytes", len(result.Body))
+	}
+	if !strings.Contains(err.Error(), "превысил допустимый размер") {
+		t.Fatalf("the error must name the reason, got %v", err)
+	}
+	if len(result.Body) > scriptOutputLimit+64 {
+		t.Fatalf("the body must stay within the limit, got %d bytes", len(result.Body))
+	}
 }
 
 func TestScriptFailureIncludesStderr(t *testing.T) {
@@ -379,4 +415,196 @@ func TestScriptFailureIncludesStderr(t *testing.T) {
 // decodeRequestBody reads a JSON body.
 func decodeRequestBody(r *http.Request, target any) error {
 	return json.NewDecoder(r.Body).Decode(target)
+}
+
+// ─── page reading stays on the public internet ──────────────────────────────
+
+// A page address comes from a search result or from the model, so it must not
+// reach the machine LifeOS runs on: a local admin panel, an open database port
+// or a cloud metadata endpoint would all answer happily.
+func TestFetchRefusesLocalAddresses(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><body><article><p>`+strings.Repeat("Внутренний сервис отвечает подробным текстом. ", 8)+`</p></article></body></html>`)
+	}))
+	defer server.Close()
+
+	client := NewClient(Options{Timeout: 2 * time.Second})
+	cases := []string{
+		server.URL,
+		strings.Replace(server.URL, "127.0.0.1", "localhost", 1),
+		"http://127.0.0.1:8791/api/v1/tasks",
+		"http://169.254.169.254/latest/meta-data/",
+		"http://10.0.0.5/admin",
+		"http://192.168.1.1/",
+		"http://[::1]:8080/",
+	}
+	for _, target := range cases {
+		if _, err := client.Fetch(context.Background(), target); err == nil {
+			t.Fatalf("page reading must refuse %s", target)
+		} else if !strings.Contains(err.Error(), "внутреннюю сеть") && !strings.Contains(err.Error(), "не разрешён") {
+			t.Fatalf("the refusal must say why, got %v for %s", err, target)
+		}
+	}
+}
+
+// A public page that redirects somewhere local is the same hole with a step in
+// between: the redirect target is checked too.
+func TestFetchRefusesRedirectToLocalAddress(t *testing.T) {
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "внутренние данные")
+	}))
+	defer local.Close()
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, local.URL, http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	// The redirector itself is allowed, as a search endpoint the user
+	// configured would be; only the hop it points at is refused.
+	client := NewClient(Options{Timeout: 2 * time.Second})
+	_, err := client.Fetch(context.Background(), redirector.URL)
+	if err == nil {
+		t.Fatal("a redirect into the local network must be refused")
+	}
+	if !strings.Contains(err.Error(), "внутреннюю сеть") {
+		t.Fatalf("the refusal must name the reason, got %v", err)
+	}
+}
+
+// The address that was checked is the address that gets dialled: resolving the
+// name twice would let a second DNS answer point somewhere local.
+func TestGuardDialsTheCheckedAddress(t *testing.T) {
+	guard := publicHostGuard{}
+	if _, err := guard.resolvePublic(context.Background(), "127.0.0.1"); err == nil {
+		t.Fatal("loopback must not resolve as a public host")
+	}
+	ips, err := guard.resolvePublic(context.Background(), "example.com")
+	if err != nil || len(ips) == 0 {
+		t.Fatalf("a public host resolves: %v %v", ips, err)
+	}
+	for _, ip := range ips {
+		if !isPublicAddress(ip) {
+			t.Fatalf("a public host resolved to a refused address: %v", ip)
+		}
+	}
+}
+
+func TestPrivateAddressesAreRecognised(t *testing.T) {
+	private := []string{
+		"127.0.0.1", "::1", "10.1.2.3", "172.16.0.1", "192.168.0.1",
+		"169.254.169.254", "100.64.0.1", "0.0.0.0", "fd00::1", "::ffff:127.0.0.1",
+	}
+	for _, address := range private {
+		if isPublicAddress(net.ParseIP(address)) {
+			t.Fatalf("%s must not be treated as public", address)
+		}
+	}
+	public := []string{"93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946"}
+	for _, address := range public {
+		if !isPublicAddress(net.ParseIP(address)) {
+			t.Fatalf("%s is a public address", address)
+		}
+	}
+}
+
+// An MCP operation is a tool name, not an HTTP method: a source in read mode
+// must not reach a tool the server does not mark as read-only, and a tool the
+// server says nothing about is treated as changing.
+func TestMCPReadModeRefusesChangingTools(t *testing.T) {
+	var called []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var message struct {
+			Method string `json:"method"`
+			Params struct {
+				Name string `json:"name"`
+			} `json:"params"`
+		}
+		_ = decodeRequestBody(r, &message)
+		called = append(called, message.Method+" "+message.Params.Name)
+		switch message.Method {
+		case "initialize":
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Mcp-Session-Id", "session-1")
+			fmt.Fprint(w, `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05"}}`)
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/list":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"jsonrpc":"2.0","id":2,"result":{"tools":[
+				{"name":"delete_repo","annotations":{"readOnlyHint":false}},
+				{"name":"unannotated_tool"},
+				{"name":"read_repo","annotations":{"readOnlyHint":true}}
+			]}}`)
+		case "tools/call":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"jsonrpc":"2.0","id":2,"result":{"content":[]}}`)
+		default:
+			w.WriteHeader(http.StatusAccepted)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestClient(Options{})
+	read := &domainresearch.Connection{
+		ID: 1, Name: "MCP", Kind: domainresearch.KindMCP, Mode: domainresearch.ModeRead,
+		Endpoint: server.URL + "/mcp", Enabled: true,
+	}
+	for _, tool := range []string{"delete_repo", "unannotated_tool"} {
+		_, err := client.Call(context.Background(), read, appresearch.CallRequest{Operation: tool})
+		if !errors.Is(err, appresearch.ErrSourceReadOnly) {
+			t.Fatalf("%s must be refused in read mode, got %v", tool, err)
+		}
+	}
+	// A tool the server does not list at all is a bad request, not a
+	// permission problem — and it is refused just the same.
+	if _, err := client.Call(context.Background(), read, appresearch.CallRequest{Operation: "unknown_tool"}); !errors.Is(err, appresearch.ErrInvalidCall) {
+		t.Fatalf("an unknown tool must be refused, got %v", err)
+	}
+	for _, entry := range called {
+		if strings.HasPrefix(entry, "tools/call") {
+			t.Fatalf("a refused tool must never be called: %v", called)
+		}
+	}
+	// The tool the server marks as read-only still works without a write intent.
+	if _, err := client.Call(context.Background(), read, appresearch.CallRequest{Operation: "read_repo"}); err != nil {
+		t.Fatalf("a read-only tool must work in read mode: %v", err)
+	}
+	// A stated write intent reaches a changing tool on a writable source.
+	write := *read
+	write.Mode = domainresearch.ModeWrite
+	if _, err := client.Call(context.Background(), &write, appresearch.CallRequest{Operation: "delete_repo", Write: true}); err != nil {
+		t.Fatalf("a changing tool with a write intent must run: %v", err)
+	}
+	if !strings.Contains(strings.Join(called, ","), "tools/call delete_repo") {
+		t.Fatalf("the changing tool was never called: %v", called)
+	}
+}
+
+// A connected source may point at the user's own network, but the service
+// metadata range is never a service someone connects on purpose: it is the
+// classic escalation target from an address a source is allowed to use.
+func TestSourceEndpointRefusesMetadataRange(t *testing.T) {
+	client := newTestClient(Options{})
+	connection := &domainresearch.Connection{
+		ID: 1, Name: "Метаданные", Kind: domainresearch.KindHTTPAPI, Mode: domainresearch.ModeRead,
+		Endpoint: "http://169.254.169.254/latest/meta-data/", Enabled: true,
+	}
+	if _, err := client.Call(context.Background(), connection, appresearch.CallRequest{Method: "GET"}); err == nil {
+		t.Fatal("the metadata address must be refused")
+	}
+	connection.Endpoint = "http://[fd00:ec2::254]/latest/meta-data/"
+	if _, err := client.Call(context.Background(), connection, appresearch.CallRequest{Method: "GET"}); err == nil {
+		t.Fatal("the IPv6 metadata address must be refused")
+	}
+	// A local service is a legitimate source: the address was typed by the user.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer server.Close()
+	connection.Endpoint = server.URL
+	if _, err := client.Call(context.Background(), connection, appresearch.CallRequest{Method: "GET"}); err != nil {
+		t.Fatalf("a local source must still work: %v", err)
+	}
 }

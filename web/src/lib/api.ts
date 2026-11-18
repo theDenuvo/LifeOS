@@ -1328,7 +1328,9 @@ export type ResearchAccessMode = 'read' | 'write' | 'sync';
 export type ResearchTrust = 'high' | 'normal' | 'low';
 export type ResearchSearchFormat = 'searxng' | 'duckduckgo';
 export type ResearchCadence = 'daily' | 'weekly' | 'manual';
-export type ResearchCallOutcome = 'ok' | 'refused' | 'failed';
+// started — a changing call is on its way, unknown — LifeOS was restarted
+// while it was in flight and the result was never confirmed.
+export type ResearchCallOutcome = 'started' | 'ok' | 'refused' | 'failed' | 'unknown';
 
 export interface ResearchCitation {
 	url: string;
@@ -1336,6 +1338,9 @@ export interface ResearchCitation {
 	site?: string;
 	excerpt?: string;
 	trust: ResearchTrust;
+	// read is false when only a search snippet was available: the page exists
+	// as a lead, not as a source LifeOS opened.
+	read: boolean;
 }
 
 export interface ResearchFinding {
@@ -1421,6 +1426,7 @@ export interface ResearchCall {
 	name: string;
 	kind: ResearchSourceKind;
 	mode: ResearchAccessMode;
+	method: string;
 	operation: string;
 	outcome: ResearchCallOutcome;
 	detail?: string;

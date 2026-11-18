@@ -52,6 +52,23 @@ func (c *Client) callMCP(ctx context.Context, connection *domainresearch.Connect
 	case "", "tools/list":
 		result, callErr = c.mcpRequest(ctx, endpoint, sessionID, "tools/list", map[string]any{})
 	default:
+		// An MCP operation is a tool name, not an HTTP method: whether it
+		// changes anything is known only from the server's own annotations.
+		// Without a stated intent to write, only a tool the server itself
+		// marks as read-only may run, and a tool it does not mark at all is
+		// treated as changing.
+		if !request.Write {
+			readOnly, known, err := c.mcpToolIsReadOnly(ctx, endpoint, sessionID, operation)
+			if err != nil {
+				return appresearch.CallResult{}, err
+			}
+			if !known {
+				return appresearch.CallResult{}, fmt.Errorf("%w: MCP-сервер не знает инструмент %q", appresearch.ErrInvalidCall, operation)
+			}
+			if !readOnly {
+				return appresearch.CallResult{}, fmt.Errorf("%w: инструмент %q не помечен сервером как «только чтение»", appresearch.ErrSourceReadOnly, operation)
+			}
+		}
 		arguments := map[string]any{}
 		if body := strings.TrimSpace(request.Body); body != "" {
 			if err := json.Unmarshal([]byte(body), &arguments); err != nil {
@@ -77,6 +94,38 @@ func (c *Client) callMCP(ctx context.Context, connection *domainresearch.Connect
 		Body:        string(result),
 		Duration:    time.Since(started),
 	}, nil
+}
+
+// mcpToolIsReadOnly asks the server what a tool does. The hint is the server's
+// own statement, which is the only description of the tool's effect that exists
+// before calling it.
+func (c *Client) mcpToolIsReadOnly(ctx context.Context, endpoint, sessionID, tool string) (readOnly, known bool, err error) {
+	raw, err := c.mcpRequest(ctx, endpoint, sessionID, "tools/list", map[string]any{})
+	if err != nil {
+		return false, false, err
+	}
+	var listing struct {
+		Tools []struct {
+			Name        string `json:"name"`
+			Annotations *struct {
+				ReadOnlyHint *bool `json:"readOnlyHint"`
+			} `json:"annotations"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(raw, &listing); err != nil {
+		return false, false, fmt.Errorf("список инструментов MCP не разобран: %w", err)
+	}
+	for _, item := range listing.Tools {
+		if item.Name != tool {
+			continue
+		}
+		if item.Annotations == nil || item.Annotations.ReadOnlyHint == nil {
+			// An annotation that says nothing is not a promise of safety.
+			return false, true, nil
+		}
+		return *item.Annotations.ReadOnlyHint, true, nil
+	}
+	return false, false, nil
 }
 
 // mcpInitialize opens a Streamable HTTP session and returns its id.

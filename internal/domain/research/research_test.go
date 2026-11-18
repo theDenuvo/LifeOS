@@ -14,6 +14,7 @@ func citation(url, title string) Citation {
 		Excerpt:   title,
 		FetchedAt: time.Date(2025, 3, 1, 9, 0, 0, 0, time.UTC),
 		Trust:     TrustNormal,
+		Read:      true,
 	}
 }
 
@@ -65,8 +66,8 @@ func TestBuildFindingsSameSiteIsNotIndependent(t *testing.T) {
 // sentence, so the report must not lose a sentence by merging it into another.
 func TestBuildFindingsKeepsDifferentClaimsOfOnePageApart(t *testing.T) {
 	findings := BuildFindings([]Candidate{
-		{Statement: "Canberra is the capital city of Australia.", Citation: citation("https://a.example.com/canberra", "Canberra")},
-		{Statement: "The city occupies the northern part of the Australian Capital Territory.", Citation: citation("https://a.example.com/canberra", "Canberra")},
+		{Statement: "Canberra is the capital city of Australia.", Citation: citation("https://a.example.org/canberra", "Canberra")},
+		{Statement: "The city occupies the northern part of the Australian Capital Territory.", Citation: citation("https://a.example.org/canberra", "Canberra")},
 	})
 	if len(findings) != 2 {
 		t.Fatalf("different claims stay separate, got %d: %+v", len(findings), findings)
@@ -81,10 +82,153 @@ func TestBuildFindingsKeepsDifferentClaimsOfOnePageApart(t *testing.T) {
 	}
 }
 
+// Two sources that name different founders are not confirming each other: the
+// shared words are the subject and the verb, and the values are the whole
+// point. Merging them would report a fact that no source states.
+func TestBuildFindingsSubstitutedValueIsNotAFact(t *testing.T) {
+	cases := []struct {
+		name string
+		a    string
+		b    string
+	}{
+		{
+			name: "person",
+			a:    "OpenAI was founded by Sam Altman.",
+			b:    "OpenAI was founded by Elon Musk.",
+		},
+		{
+			name: "organisation",
+			a:    "The project is maintained by the Cloudflare Workers team.",
+			b:    "The project is maintained by the Deno Land team.",
+		},
+		{
+			name: "year",
+			a:    "The language was released in 2015 with a small standard library.",
+			b:    "The language was released in 2016 with a small standard library.",
+		},
+		{
+			name: "amount",
+			a:    "Бесплатный тариф включает 100 запросов в минуту для одного ключа.",
+			b:    "Бесплатный тариф включает 300 запросов в минуту для одного ключа.",
+		},
+		{
+			name: "negation",
+			a:    "The free plan includes access to the analytics dashboard.",
+			b:    "The free plan does not include access to the analytics dashboard.",
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			findings := BuildFindings([]Candidate{
+				{Statement: testCase.a, Citation: citation("https://a.example.org/x", "A")},
+				{Statement: testCase.b, Citation: citation("https://b.example.net/x", "B")},
+			})
+			if len(findings) != 2 {
+				t.Fatalf("statements with different values must stay apart, got %d: %+v", len(findings), findings)
+			}
+			for _, finding := range findings {
+				if finding.Certainty == CertaintyFact {
+					t.Fatalf("contradicting statements are never a fact: %+v", finding)
+				}
+				if finding.Conflict == "" {
+					t.Fatalf("the disagreement must be named for %q", finding.Statement)
+				}
+				if len(finding.Citations) != 1 {
+					t.Fatalf("each statement keeps its own source, got %+v", finding.Citations)
+				}
+			}
+		})
+	}
+}
+
+// A statement that names more than the other is still the same claim: "the
+// release" and "the release in Go 1.24" do not disagree.
+func TestBuildFindingsExtraDetailStillAgrees(t *testing.T) {
+	findings := BuildFindings([]Candidate{
+		{Statement: "The release adds generic type aliases to the language.", Citation: citation("https://a.example.org/1", "A")},
+		{Statement: "In Go 1.24 the release adds generic type aliases to the language.", Citation: citation("https://b.example.net/1", "B")},
+	})
+	if len(findings) != 1 {
+		t.Fatalf("one claim with extra detail must merge, got %d: %+v", len(findings), findings)
+	}
+	if findings[0].Certainty != CertaintyFact {
+		t.Fatalf("two independent sites are a fact, got %s", findings[0].Certainty)
+	}
+}
+
+// A search snippet is a lead. Two unread snippets that agree are still two
+// leads, so the finding stays an assumption until a page is actually read.
+func TestBuildFindingsTwoSnippetsAreNotAFact(t *testing.T) {
+	snippet := func(url string) Citation {
+		item := citation(url, "snippet")
+		item.Read = false
+		item.Trust = TrustLow
+		return item
+	}
+	findings := BuildFindings([]Candidate{
+		{Statement: "Canberra is the capital city of Australia.", Citation: snippet("https://a.example.org/canberra")},
+		{Statement: "Canberra is the capital city of Australia.", Citation: snippet("https://b.example.net/canberra")},
+	})
+	if len(findings) != 1 {
+		t.Fatalf("the statements agree, got %d findings", len(findings))
+	}
+	if findings[0].Certainty == CertaintyFact {
+		t.Fatalf("two unread snippets are not a fact: %+v", findings[0])
+	}
+	if findings[0].Corroboration != 2 {
+		t.Fatalf("both sites still support the claim, got %d", findings[0].Corroboration)
+	}
+	// One read page is enough to make the claim a fact.
+	findings = BuildFindings([]Candidate{
+		{Statement: "Canberra is the capital city of Australia.", Citation: citation("https://a.example.org/canberra", "A")},
+		{Statement: "Canberra is the capital city of Australia.", Citation: snippet("https://b.example.net/canberra")},
+	})
+	if findings[0].Certainty != CertaintyFact {
+		t.Fatalf("a read page plus an independent snippet is a fact, got %s", findings[0].Certainty)
+	}
+}
+
+// Two subdomains of one publisher are one site: a blog and a documentation
+// site do not corroborate each other.
+func TestBuildFindingsSubdomainsAreOneSite(t *testing.T) {
+	findings := BuildFindings([]Candidate{
+		{Statement: "The command supports a dry run flag that prints the plan first.", Citation: citation("https://blog.example.org/dry-run", "blog")},
+		{Statement: "A dry run flag prints the plan first, the command supports it.", Citation: citation("https://docs.example.org/dry-run", "docs")},
+	})
+	if len(findings) != 1 {
+		t.Fatalf("the statements agree, got %d findings", len(findings))
+	}
+	if findings[0].Corroboration != 1 {
+		t.Fatalf("one publisher is one site, got %d", findings[0].Corroboration)
+	}
+	if findings[0].Certainty == CertaintyFact {
+		t.Fatalf("a publisher cannot confirm itself: %+v", findings[0])
+	}
+	if findings[0].Domains[0] != "example.org" {
+		t.Fatalf("domains are reported per registrable site, got %v", findings[0].Domains)
+	}
+}
+
+func TestEntitiesFindValuesNotCapitalisation(t *testing.T) {
+	entities := Entities("The report from OpenAI says Go 1.24 shipped 240 kilobytes.")
+	joined := strings.Join(entities, ",")
+	for _, wanted := range []string{"openai", "go", "1.24", "240"} {
+		if !strings.Contains(joined, wanted) {
+			t.Fatalf("entity %q is missing from %v", wanted, entities)
+		}
+	}
+	if strings.Contains(joined, "the") || strings.Contains(joined, "report") {
+		t.Fatalf("sentence openers and common nouns are not values: %v", entities)
+	}
+	if got := Entities("В отчёте сказано, что Kestrel 2.0 вышел в 2024 году."); !containsEntity(got, "2") {
+		t.Fatalf("a version is a value: %v", got)
+	}
+}
+
 func TestBuildFindingsNegationIsAConflict(t *testing.T) {
 	findings := BuildFindings([]Candidate{
-		{Statement: "Планировщик поддерживает повторяющиеся задачи с гибким интервалом.", Citation: citation("https://a.example.com/1", "A")},
-		{Statement: "Планировщик не поддерживает повторяющиеся задачи с гибким интервалом.", Citation: citation("https://b.example.com/1", "B")},
+		{Statement: "Планировщик поддерживает повторяющиеся задачи с гибким интервалом.", Citation: citation("https://a.example.org/1", "A")},
+		{Statement: "Планировщик не поддерживает повторяющиеся задачи с гибким интервалом.", Citation: citation("https://b.example.net/1", "B")},
 	})
 	if len(findings) != 2 {
 		t.Fatalf("disagreeing statements stay separate, got %d", len(findings))
@@ -101,8 +245,8 @@ func TestBuildFindingsNegationIsAConflict(t *testing.T) {
 
 func TestBuildFindingsDifferentNumbersConflict(t *testing.T) {
 	findings := BuildFindings([]Candidate{
-		{Statement: "Бесплатный тариф включает 100 запросов в минуту для одного ключа.", Citation: citation("https://a.example.com/limits", "limits")},
-		{Statement: "Бесплатный тариф включает 300 запросов в минуту для одного ключа.", Citation: citation("https://b.example.com/limits", "limits")},
+		{Statement: "Бесплатный тариф включает 100 запросов в минуту для одного ключа.", Citation: citation("https://a.example.org/limits", "limits")},
+		{Statement: "Бесплатный тариф включает 300 запросов в минуту для одного ключа.", Citation: citation("https://b.example.net/limits", "limits")},
 	})
 	if len(findings) != 2 {
 		t.Fatalf("expected two findings, got %d", len(findings))
@@ -113,7 +257,7 @@ func TestBuildFindingsDifferentNumbersConflict(t *testing.T) {
 }
 
 func TestBuildFindingsIgnoresEmptyStatements(t *testing.T) {
-	findings := BuildFindings([]Candidate{{Statement: "   ", Citation: citation("https://a.example.com", "A")}})
+	findings := BuildFindings([]Candidate{{Statement: "   ", Citation: citation("https://a.example.org", "A")}})
 	if len(findings) != 0 {
 		t.Fatalf("empty statements must be dropped, got %+v", findings)
 	}
@@ -121,9 +265,9 @@ func TestBuildFindingsIgnoresEmptyStatements(t *testing.T) {
 
 func TestBuildFindingsOrdersFactsFirst(t *testing.T) {
 	findings := BuildFindings([]Candidate{
-		{Statement: "Perf matters for large deployments running on small machines.", Citation: citation("https://a.example.com/1", "A")},
-		{Statement: "The command supports a dry run flag that prints the plan first.", Citation: citation("https://b.example.com/1", "B")},
-		{Statement: "A dry run flag prints the plan first, the command supports it.", Citation: citation("https://c.example.com/1", "C")},
+		{Statement: "Perf matters for large deployments running on small machines.", Citation: citation("https://a.example.org/1", "A")},
+		{Statement: "The command supports a dry run flag that prints the plan first.", Citation: citation("https://b.example.net/1", "B")},
+		{Statement: "A dry run flag prints the plan first, the command supports it.", Citation: citation("https://c.example.io/1", "C")},
 	})
 	if findings[0].Certainty != CertaintyFact {
 		t.Fatalf("facts come first, got %s: %+v", findings[0].Certainty, findings)
@@ -152,6 +296,10 @@ func TestCanonicalURLStripsTrackingAndFragment(t *testing.T) {
 		"https://Example.com/doc/?utm_source=news&b=2#intro": "https://example.com/doc?b=2",
 		"https://example.com/doc":                            "https://example.com/doc",
 		"https://example.com/":                               "https://example.com/",
+		// Only the scheme and the host are case-insensitive: paths and query
+		// values must survive byte for byte, or the link stops working.
+		"https://Example.com/Users/Nikita?token=AbCd123": "https://example.com/Users/Nikita?token=AbCd123",
+		"HTTPS://Example.COM/Docs/Go1.24":                "https://example.com/Docs/Go1.24",
 	}
 	for input, want := range cases {
 		if got := CanonicalURL(input); got != want {
@@ -198,8 +346,8 @@ func TestWatchDiffDetectsNewAndUpdatedPages(t *testing.T) {
 
 func TestWatchDiffWithoutChanges(t *testing.T) {
 	now := time.Date(2025, 3, 1, 12, 0, 0, 0, time.UTC)
-	watch := &Watch{Seen: []Fingerprint{{URL: "https://a.example.com", Hash: "same", FirstSeen: now.Add(-time.Hour)}}}
-	diff, _ := watch.Diff([]Fingerprint{{URL: "https://a.example.com", Hash: "same", FirstSeen: now}})
+	watch := &Watch{Seen: []Fingerprint{{URL: "https://a.example.org", Hash: "same", FirstSeen: now.Add(-time.Hour)}}}
+	diff, _ := watch.Diff([]Fingerprint{{URL: "https://a.example.org", Hash: "same", FirstSeen: now}})
 	if diff.Changed() {
 		t.Fatalf("identical content is not a change: %+v", diff)
 	}

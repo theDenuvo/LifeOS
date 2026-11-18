@@ -10,9 +10,12 @@ package research
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	domainresearch "github.com/theDenuvo/LifeOS/internal/domain/research"
@@ -24,6 +27,9 @@ const (
 	maxLimit        = 100
 	defaultMaxPages = 4
 	maxPages        = 8
+	// researchRunTimeout bounds one background run from start to record, so a
+	// hanging host cannot keep a report running for ever.
+	researchRunTimeout = 10 * time.Minute
 	// resultsPerQuery keeps one query from filling the whole reading list.
 	resultsPerQuery  = 6
 	maxQueriesPerRun = maxQueries
@@ -38,6 +44,14 @@ type Service struct {
 	external  External
 	knowledge KnowledgeSink
 	broker    events.Publisher
+
+	// A research run outlives the request that started it: reading eight pages
+	// takes longer than an HTTP write timeout, and a closed connection must not
+	// leave a report stuck in "running". The ledger below waits for those runs
+	// on shutdown.
+	jobs    sync.WaitGroup
+	baseCtx context.Context
+	cancel  context.CancelFunc
 }
 
 // Option customises the service.
@@ -64,11 +78,32 @@ func NewService(uow UnitOfWork, clock Clock, opts ...Option) *Service {
 	if clock == nil {
 		clock = systemClock{}
 	}
-	s := &Service{uow: uow, clock: clock}
+	baseCtx, cancel := context.WithCancel(context.Background())
+	s := &Service{uow: uow, clock: clock, baseCtx: baseCtx, cancel: cancel}
 	for _, opt := range opts {
 		opt(s)
 	}
 	return s
+}
+
+// Close stops background research. Reports that were still running are left
+// for RecoverInterrupted on the next start, which marks them as interrupted
+// rather than pretending they finished.
+func (s *Service) Close() { s.cancel() }
+
+// Wait blocks until the background research started by StartResearch finishes.
+func (s *Service) Wait(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		s.jobs.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 type systemClock struct{}
@@ -77,10 +112,45 @@ func (systemClock) Now() time.Time { return time.Now().UTC().Truncate(time.Secon
 
 // ─── Research runs ──────────────────────────────────────────────────────────
 
-// Research investigates one question and stores the report. The evidence
-// gathering happens outside the database transaction: a slow page must not
-// hold the single writer of SQLite.
+// Research investigates one question and returns the finished report. It is
+// what the assistant tool uses: the model needs the answer in the same turn.
+//
+// The HTTP interface uses StartResearch instead, because reading eight pages
+// outlives an HTTP write timeout.
 func (s *Service) Research(ctx context.Context, input ResearchInput) (*domainresearch.Report, error) {
+	report, err := s.insertRunning(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	return s.execute(ctx, report, input)
+}
+
+// StartResearch records the question and runs the investigation in the
+// background, returning the report while it is still running. The caller
+// answers immediately and the result arrives through the event stream.
+func (s *Service) StartResearch(ctx context.Context, input ResearchInput) (*domainresearch.Report, error) {
+	report, err := s.insertRunning(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	s.jobs.Add(1)
+	go func() {
+		defer s.jobs.Done()
+		// The run belongs to the service, not to the request: closing the tab
+		// must not abort the research or strand the report.
+		jobCtx, cancel := context.WithTimeout(s.baseCtx, researchRunTimeout)
+		defer cancel()
+		if _, err := s.execute(jobCtx, report, input); err != nil {
+			slog.Warn("research: background run finished with an error", "report_id", report.ID, "error", err)
+		}
+	}()
+	return report, nil
+}
+
+// insertRunning validates the question and stores the report as running.
+// The evidence gathering happens outside the database transaction: a slow page
+// must not hold the single writer of SQLite.
+func (s *Service) insertRunning(ctx context.Context, input ResearchInput) (*domainresearch.Report, error) {
 	question := strings.TrimSpace(input.Question)
 	queries := normalizeQueries(question, input.Queries)
 	if len(queries) == 0 {
@@ -116,7 +186,15 @@ func (s *Service) Research(ctx context.Context, input ResearchInput) (*domainres
 		return nil, err
 	}
 	report.ID = id
+	s.publish("research.started", map[string]any{"id": id, "question": report.Question})
+	return report, nil
+}
 
+// execute gathers the evidence and finalises the report it was given.
+func (s *Service) execute(ctx context.Context, report *domainresearch.Report, input ResearchInput) (*domainresearch.Report, error) {
+	question := report.Question
+	queries := report.Queries
+	id := report.ID
 	collected, runErr := s.collect(ctx, queries, input.ConnectionID, input.MaxPages)
 	finished := s.clock.Now().UTC()
 	report.FinishedAt = &finished
@@ -136,7 +214,7 @@ func (s *Service) Research(ctx context.Context, input ResearchInput) (*domainres
 	// failure is recorded on the report instead of being hidden: the research
 	// still happened, and pretending it was stored would be worse.
 	if input.SaveKnowledge && len(report.Findings) > 0 && runErr == nil {
-		entryID, err := s.saveKnowledge(ctx, report, input.KnowledgeTitle)
+		entryID, err := s.saveKnowledge(context.WithoutCancel(ctx), report, input.KnowledgeTitle)
 		if err != nil {
 			slog.Error("research: saving the result to the knowledge base failed", "report_id", id, "error", err)
 			report.Error = ensureValidRunes("результат не сохранён в базу знаний: " + err.Error())
@@ -145,8 +223,12 @@ func (s *Service) Research(ctx context.Context, input ResearchInput) (*domainres
 		}
 	}
 
+	// Recording the outcome is not part of the cancelled work: a request that
+	// goes away must not leave the report running for ever.
+	recordCtx, cancelRecord := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancelRecord()
 	var saved *domainresearch.Report
-	if err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
+	if err := s.uow.Do(recordCtx, func(ctx context.Context, tx Transaction) error {
 		var err error
 		saved, err = tx.Research().UpdateReport(ctx, id, report.Version, report)
 		return err
@@ -165,6 +247,42 @@ func (s *Service) Research(ctx context.Context, input ResearchInput) (*domainres
 		"knowledge_id": report.KnowledgeEntryID,
 	})
 	return report, nil
+}
+
+// Recovery is what a previous process left unfinished.
+type Recovery struct {
+	Reports int64
+	Calls   int64
+}
+
+// RecoverInterrupted closes what a restart interrupted: a report that was still
+// running is marked failed with the reason, and a changing call whose answer
+// never arrived is marked unknown. Both are calls of the one honest option —
+// saying that LifeOS does not know.
+func (s *Service) RecoverInterrupted(ctx context.Context) (Recovery, error) {
+	now := s.clock.Now().UTC()
+	var out Recovery
+	err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
+		reports, err := tx.Research().RecoverRunningReports(ctx,
+			"выполнение прервано: LifeOS был перезапущен во время исследования", now)
+		if err != nil {
+			return err
+		}
+		calls, err := tx.Research().RecoverStartedCalls(ctx,
+			"результат неизвестен: LifeOS был перезапущен во время обращения", now)
+		if err != nil {
+			return err
+		}
+		out = Recovery{Reports: reports, Calls: calls}
+		return nil
+	})
+	if err != nil {
+		return Recovery{}, err
+	}
+	if out.Reports > 0 || out.Calls > 0 {
+		slog.Info("research: closed interrupted work", "reports", out.Reports, "calls", out.Calls)
+	}
+	return out, nil
 }
 
 // saveKnowledge writes the report as reusable knowledge with its provenance.
@@ -270,7 +388,7 @@ func (s *Service) collect(ctx context.Context, queries []string, connectionID in
 	order := make([]string, 0, resultsPerQuery*len(queries))
 	byURL := map[string]target{}
 	for _, query := range queries {
-		results, err := s.external.Search(ctx, connection, query, resultsPerQuery)
+		results, err := s.searchSource(ctx, connection, query, resultsPerQuery)
 		if err != nil {
 			if len(byURL) == 0 {
 				return collected{}, err
@@ -316,11 +434,14 @@ func (s *Service) collect(ctx context.Context, queries []string, connectionID in
 					candidates = append(candidates, domainresearch.Candidate{
 						Statement: claim,
 						Citation: domainresearch.Citation{
-							URL:          url,
-							Title:        item.result.Title,
-							Site:         domainresearch.Host(url),
-							Excerpt:      truncateRunes("Поисковая выдержка, страница не прочитана: "+claim, 500),
-							FetchedAt:    now,
+							URL:       url,
+							Title:     item.result.Title,
+							Site:      domainresearch.Host(url),
+							Excerpt:   truncateRunes("Поисковая выдержка, страница не прочитана: "+claim, 500),
+							FetchedAt: now,
+							// The page did not open: this is a lead, not a
+							// source, and it is marked as such.
+							Read:         false,
 							Trust:        domainresearch.TrustLow,
 							ConnectionID: connectionID,
 						},
@@ -354,6 +475,7 @@ func (s *Service) collect(ctx context.Context, queries []string, connectionID in
 					Site:         domainresearch.Host(page.URL),
 					Excerpt:      truncateRunes(claim, 500),
 					FetchedAt:    now,
+					Read:         true,
 					Trust:        trust,
 					ConnectionID: connectionID,
 				},
@@ -395,7 +517,28 @@ func (s *Service) Search(ctx context.Context, query string, limit int, connectio
 		}
 		connection = found
 	}
-	return s.external.Search(ctx, connection, strings.TrimSpace(query), limit)
+	return s.searchSource(ctx, connection, strings.TrimSpace(query), limit)
+}
+
+// searchSource performs one search and journals it when it went through a
+// connected source. The journal is the answer to "what did LifeOS do with this
+// service", and a search is exactly such an action.
+func (s *Service) searchSource(ctx context.Context, connection *domainresearch.Connection, query string, limit int) ([]SearchResult, error) {
+	if connection == nil {
+		return s.external.Search(ctx, nil, query, limit)
+	}
+	started := time.Now()
+	results, err := s.external.Search(ctx, connection, query, limit)
+	duration := time.Since(started).Milliseconds()
+	if err != nil {
+		s.auditCall(ctx, connection, http.MethodGet, "search", CallFailed,
+			fmt.Sprintf("%s → %v", query, err), duration)
+		return nil, err
+	}
+	s.auditCall(ctx, connection, http.MethodGet, "search", CallOK,
+		fmt.Sprintf("%s → результатов: %d", query, len(results)), duration)
+	s.touchConnection(ctx, connection)
+	return results, nil
 }
 
 // Fetch reads one page. It is how the assistant checks a source the user
@@ -632,29 +775,68 @@ func (s *Service) CallSource(ctx context.Context, id int64, request CallRequest)
 	default:
 		return nil, ErrInvalidCall
 	}
-	write := request.Write || (method != "GET" && method != "HEAD")
+	write := writeIntent(connection.Kind, method, request.Write)
 	if !connection.Enabled {
-		s.auditCall(ctx, connection, operation, CallRefused, "источник отключён")
+		s.auditCall(ctx, connection, method, operation, CallRefused, "источник отключён", 0)
 		return nil, fmt.Errorf("%w: %s", ErrSourceDisabled, connection.Name)
 	}
 	if write && !connection.Mode.AllowsWrite() {
-		s.auditCall(ctx, connection, operation, CallRefused, "источнику разрешено только чтение")
+		s.auditCall(ctx, connection, method, operation, CallRefused, "источнику разрешено только чтение", 0)
 		return nil, fmt.Errorf("%w: %s", ErrSourceReadOnly, connection.Name)
 	}
 	request.Operation = operation
 	request.Method = method
 	request.Write = write
 
+	// A changing call is journalled before it leaves: if the journal cannot be
+	// written, LifeOS must not change something outside and then have no record
+	// of it. The row starts as "started" and is finished once the answer is in,
+	// so a crash leaves an honest "unknown" behind instead of nothing.
+	var intentID int64
+	if write {
+		id, err := s.auditCall(ctx, connection, method, operation, CallStarted, "запрос отправляется", 0)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrJournalUnavailable, err)
+		}
+		intentID = id
+	}
+
 	started := time.Now()
 	result, err := s.external.Call(ctx, connection, request)
+	duration := time.Since(started)
 	if err != nil {
-		s.auditCall(ctx, connection, operation, CallFailed, err.Error())
+		outcome := CallFailed
+		detail := err.Error()
+		if errors.Is(err, ErrSourceReadOnly) {
+			// The adapter refused on the tool's own terms: that is a refusal,
+			// not a failure of the service.
+			outcome = CallRefused
+		}
+		s.finishCall(ctx, connection, intentID, method, operation, outcome, detail, duration)
 		return nil, err
 	}
-	result.Duration = time.Since(started)
-	s.auditCall(ctx, connection, operation, CallOK, callDetail(result))
+	result.Duration = duration
+	s.finishCall(ctx, connection, intentID, method, operation, CallOK, callDetail(result), duration)
 	s.touchConnection(ctx, connection)
 	return &result, nil
+}
+
+// writeIntent decides whether a call may change something outside LifeOS.
+//
+// For an HTTP source the method says it. For MCP the operation is a tool name,
+// so the caller must say so and the adapter checks the tool's own annotation;
+// for a script the source is read-only by policy and its effects are gated by
+// the confirmation the caller goes through.
+func writeIntent(kind domainresearch.SourceKind, method string, declared bool) bool {
+	if declared {
+		return true
+	}
+	switch kind {
+	case domainresearch.KindMCP, domainresearch.KindScript:
+		return false
+	default:
+		return method != http.MethodGet && method != http.MethodHead
+	}
 }
 
 func callDetail(result CallResult) string {
@@ -665,25 +847,53 @@ func callDetail(result CallResult) string {
 	return fmt.Sprintf("%d %s", result.Status, body)
 }
 
-// auditCall writes the journal entry. A failed audit write is logged, never
-// returned: the interaction already happened, and pretending otherwise would
-// hide it.
-func (s *Service) auditCall(ctx context.Context, connection *domainresearch.Connection, operation, outcome, detail string) {
+// auditCall writes one journal entry and returns its id. The error is returned
+// so a caller that is about to change something outside LifeOS can refuse to
+// proceed without a record; for completed reads a failed journal write is only
+// logged, because the interaction already happened.
+func (s *Service) auditCall(ctx context.Context, connection *domainresearch.Connection, method, operation, outcome, detail string, durationMS int64) (int64, error) {
 	record := &CallRecord{
 		ConnectionID: connection.ID,
 		Name:         connection.Name,
 		Kind:         connection.Kind,
 		Mode:         connection.Mode,
+		Method:       truncateRunes(strings.ToUpper(method), 10),
 		Operation:    truncateRunes(operation, 200),
 		Outcome:      outcome,
 		Detail:       truncateRunes(ensureValidRunes(detail), 500),
+		DurationMS:   durationMS,
 		CreatedAt:    s.clock.Now().UTC(),
 	}
+	var id int64
 	err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
-		return tx.Research().RecordCall(ctx, record)
+		var err error
+		id, err = tx.Research().RecordCall(ctx, record)
+		return err
 	})
 	if err != nil {
-		slog.Error("research: external call journal write failed", "source_id", connection.ID, "error", err)
+		slog.Error("research: external call journal write failed", "source_id", connection.ID, "outcome", outcome, "error", err)
+		return 0, err
+	}
+	return id, nil
+}
+
+// finishCall closes the journal entry of one call: the write-ahead row when
+// there is one, a new row otherwise.
+func (s *Service) finishCall(ctx context.Context, connection *domainresearch.Connection, intentID int64, method, operation, outcome, detail string, duration time.Duration) {
+	durationMS := duration.Milliseconds()
+	if intentID == 0 {
+		if _, err := s.auditCall(ctx, connection, method, operation, outcome, detail, durationMS); err != nil {
+			slog.Error("research: external call journal write failed", "source_id", connection.ID, "error", err)
+		}
+		return
+	}
+	err := s.uow.Do(ctx, func(ctx context.Context, tx Transaction) error {
+		return tx.Research().FinishCall(ctx, intentID, outcome, truncateRunes(ensureValidRunes(detail), 500), durationMS)
+	})
+	if err != nil {
+		// The row stays "started", and the next start reports it as unknown:
+		// the call did happen, and saying less than that would be a lie.
+		slog.Error("research: closing the journal entry of a changing call failed", "source_id", connection.ID, "error", err)
 	}
 }
 

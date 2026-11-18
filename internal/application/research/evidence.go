@@ -325,6 +325,7 @@ func buildSummary(question string, queries []string, findings []domainresearch.F
 
 	facts := make([]domainresearch.Finding, 0, len(findings))
 	assumptions := make([]domainresearch.Finding, 0, len(findings))
+	snippets := make([]domainresearch.Finding, 0, len(findings))
 	disputed := make([]domainresearch.Finding, 0, len(findings))
 	for _, finding := range findings {
 		switch {
@@ -332,6 +333,10 @@ func buildSummary(question string, queries []string, findings []domainresearch.F
 			disputed = append(disputed, finding)
 		case finding.Certainty == domainresearch.CertaintyFact:
 			facts = append(facts, finding)
+		case !anyRead(finding):
+			// No page behind this finding was opened: its sites are leads, not
+			// reading, so it does not belong under "one source" either.
+			snippets = append(snippets, finding)
 		default:
 			assumptions = append(assumptions, finding)
 		}
@@ -346,6 +351,12 @@ func buildSummary(question string, queries []string, findings []domainresearch.F
 	if len(assumptions) > 0 {
 		out.WriteString("\n### Один источник, требует проверки\n\n")
 		for _, finding := range assumptions {
+			fmt.Fprintf(&out, "- %s — %s\n", finding.Statement, citationsLine(finding))
+		}
+	}
+	if len(snippets) > 0 {
+		out.WriteString("\n### Только поисковая выдержка, страница не открылась\n\n")
+		for _, finding := range snippets {
 			fmt.Fprintf(&out, "- %s — %s\n", finding.Statement, citationsLine(finding))
 		}
 	}
@@ -367,12 +378,14 @@ func buildSummary(question string, queries []string, findings []domainresearch.F
 	return out.String()
 }
 
-// countUnreadSources is how many cited pages could not be read.
+// countUnreadSources is how many cited pages could not be read. Reading status
+// is its own property: a low-trust source the user connected is still read, and
+// a snippet from a respectable site is still only a snippet.
 func countUnreadSources(findings []domainresearch.Finding) int {
 	unread := map[string]bool{}
 	for _, finding := range findings {
 		for _, citation := range finding.Citations {
-			if citation.Trust == domainresearch.TrustLow {
+			if !citation.Read {
 				unread[citation.URL] = true
 			}
 		}
@@ -381,6 +394,18 @@ func countUnreadSources(findings []domainresearch.Finding) int {
 }
 
 // citationsLine renders the sources of one finding as markdown links.
+// anyRead reports whether at least one page behind a finding was opened. A
+// finding built only from search snippets is not a source's claim: it is a
+// lead that nobody has read yet.
+func anyRead(finding domainresearch.Finding) bool {
+	for _, citation := range finding.Citations {
+		if citation.Read {
+			return true
+		}
+	}
+	return false
+}
+
 func citationsLine(finding domainresearch.Finding) string {
 	parts := make([]string, 0, len(finding.Citations))
 	seen := map[string]bool{}
@@ -397,7 +422,11 @@ func citationsLine(finding domainresearch.Finding) string {
 		if strings.TrimSpace(title) == "" {
 			title = site
 		}
-		parts = append(parts, fmt.Sprintf("[%s](%s)", title, citation.URL))
+		if citation.Read {
+			parts = append(parts, fmt.Sprintf("[%s](%s)", title, citation.URL))
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("[%s](%s) (выдержка)", title, citation.URL))
 	}
 	return strings.Join(parts, ", ")
 }

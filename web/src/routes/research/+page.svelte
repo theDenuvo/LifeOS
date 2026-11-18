@@ -95,7 +95,9 @@
 	const outcomeLabels: Record<string, string> = {
 		ok: 'выполнено',
 		refused: 'отказано',
-		failed: 'ошибка'
+		failed: 'ошибка',
+		started: 'отправляется',
+		unknown: 'результат неизвестен'
 	};
 
 	let tab: Tab = 'reports';
@@ -612,7 +614,7 @@
 														<span class={`certainty ${certaintyClass(finding.certainty)}`}>
 															{certaintyLabels[finding.certainty] ?? finding.certainty}
 														</span>
-														{#if finding.corroboration > 1}
+														{#if finding.certainty === 'fact' && finding.corroboration > 1}
 															<span class="meta-item">
 																подтверждают источников: {finding.corroboration}
 															</span>
@@ -932,7 +934,9 @@
 										{#each sourceCalls as call (call.id)}
 											<li class="call">
 												<span class={`outcome ${call.outcome}`}>{outcomeLabels[call.outcome] ?? call.outcome}</span>
-												<span class="call-op mono">{call.operation || '—'}</span>
+												<span class="call-op mono">
+													{call.method ? `${call.method} ` : ''}{call.operation || '—'}
+												</span>
 												<span class="call-when">{formatDate(call.created_at)} {formatTime(call.created_at)}</span>
 												{#if call.detail}
 													<span class="call-detail">{call.detail}</span>
@@ -1577,9 +1581,15 @@
 		border-color: var(--success-surface);
 	}
 
-	.outcome.refused {
+	.outcome.refused,
+	.outcome.unknown {
 		color: var(--warning);
 		border-color: var(--warning-border);
+	}
+
+	.outcome.started {
+		color: var(--fg-muted);
+		border-style: dashed;
 	}
 
 	.outcome.failed {

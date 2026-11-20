@@ -1023,7 +1023,7 @@ func (s *Service) DeadlineRisks(ctx context.Context) ([]DeadlineRisk, error) {
 		if goal.TargetDate == nil || goal.TargetDate.IsZero() {
 			continue
 		}
-		daysLeft := int(time.Until(*goal.TargetDate).Hours() / 24)
+		daysLeft := int(goal.TargetDate.Sub(now).Hours() / 24)
 		if daysLeft < 0 || goal.TargetDate.Sub(now) > deadlineRiskWindow {
 			continue
 		}

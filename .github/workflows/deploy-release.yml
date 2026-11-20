@@ -76,15 +76,22 @@ jobs:
       - name: Build static Linux binary for Atom D525
         env:
           VERSION: ${{ github.ref_name }}
+        shell: bash
         run: |
           mkdir -p dist
           GOOS=linux GOARCH=amd64 GOAMD64=v1 CGO_ENABLED=0 \
-            go build -trimpath -ldflags="-s -w -X github.com/theDenuvo/LifeOS/cmd/lifeos.version=${VERSION}" \
+            go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
             -o dist/lifeos ./cmd/lifeos
           file dist/lifeos
           file dist/lifeos | grep -q "ELF 64-bit LSB.*x86-64"
+          VERSION_OUTPUT="$(./dist/lifeos -version)"
+          EXPECTED_VERSION="LifeOS ${VERSION}"
+          printf '%s\n' "${VERSION_OUTPUT}"
+          if [[ "${VERSION_OUTPUT}" != "${EXPECTED_VERSION}" ]]; then
+            echo "Version mismatch: expected '${EXPECTED_VERSION}', got '${VERSION_OUTPUT}'" >&2
+            exit 1
+          fi
           (cd dist && sha256sum lifeos > lifeos.sha256)
-          ./dist/lifeos -version
 
       - name: Publish deployment release
         uses: softprops/action-gh-release@v2

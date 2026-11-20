@@ -632,3 +632,62 @@ func TestOversizedSkillIsNeverSelected(t *testing.T) {
 		t.Fatalf("snapshot must not contain the oversized skill: %q", snapshot[:200])
 	}
 }
+
+// The analysis race: workingFinding derives the proposal from text A,
+// and a manual edit to B lands before the proposal is stored. The
+// stored fingerprint must describe A, so applying the proposal later
+// is refused with 409 instead of overwriting B.
+func TestWorkingFindingHashSurvivesManualEdit(t *testing.T) {
+	ctx := context.Background()
+	settings := map[string]json.RawMessage{}
+	repo := newFakeRepo()
+	service := newTestService(repo, settings)
+
+	view, err := service.Create(ctx, CreateInput{Content: sampleContent()}, domainskill.SourceUser)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := service.ChangeStatus(ctx, view.Skill.ID, view.Skill.Version, domainskill.StatusActive); err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+	if _, err := service.Rate(ctx, view.Skill.ID, domainskill.RatingBad, "пропустил шаг", nil); err != nil {
+		t.Fatalf("rate: %v", err)
+	}
+	if _, err := service.SetWorkingInstructions(ctx, "Текст A: проверяй условия."); err != nil {
+		t.Fatalf("set A: %v", err)
+	}
+	findings, err := service.Analyze(ctx, 0)
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	var working *Finding
+	for i := range findings {
+		if findings[i].Kind == domainskill.ProposalWorkingInstructions {
+			working = &findings[i]
+		}
+	}
+	if working == nil || working.BaseWorkingHash == nil {
+		t.Fatalf("working finding with hash: %+v", findings)
+	}
+	// The manual edit lands between analysis and storing the proposal.
+	if _, err := service.SetWorkingInstructions(ctx, "Ручная правка B."); err != nil {
+		t.Fatalf("set B: %v", err)
+	}
+	proposal, err := service.CreateProposal(ctx, ProposalInput{
+		Kind: working.Kind, Problem: working.Problem, Evidence: working.Evidence,
+		Proposed: working.Proposed, ExpectedEffect: working.ExpectedEffect,
+		TestScenarios: working.TestScenarios, BaseWorkingHash: working.BaseWorkingHash,
+	})
+	if err != nil {
+		t.Fatalf("proposal: %v", err)
+	}
+	if proposal.BaseWorkingHash == nil || *proposal.BaseWorkingHash != *working.BaseWorkingHash {
+		t.Fatalf("stored hash must be the analysis-time fingerprint: %+v", proposal)
+	}
+	if _, _, err := service.ApplyProposal(ctx, proposal.ID, proposal.Version); !errors.Is(err, ErrStaleBase) {
+		t.Fatalf("apply after manual edit must be refused: %v", err)
+	}
+	if text, err := service.GetWorkingInstructions(ctx); err != nil || text != "Ручная правка B." {
+		t.Fatalf("manual edit must survive: %q %v", text, err)
+	}
+}

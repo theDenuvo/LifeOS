@@ -69,7 +69,13 @@ type ProposalInput struct {
 	Proposed       domainskill.Content
 	ExpectedEffect string
 	TestScenarios  []string
-	ConversationID *int64
+	// BaseWorkingHash is the fingerprint of the working instructions
+	// text the proposal was built from (working-instructions proposals
+	// only). The analysis passes it through so the stored hash always
+	// describes the text the proposal text derives from, never a later
+	// manual edit. Nil means CreateProposal reads the current text.
+	BaseWorkingHash *string
+	ConversationID  *int64
 }
 
 // Repository is the persistence boundary of the skill aggregate, its
@@ -161,4 +167,9 @@ type Finding struct {
 	ExpectedEffect string
 	TestScenarios  []string
 	TestResult     string
+	// BaseWorkingHash is the fingerprint of the working instructions
+	// text this finding was derived from (working-instructions findings
+	// only). It travels with the finding so CreateProposal stores the
+	// hash of the very text the proposal builds on.
+	BaseWorkingHash *string
 }

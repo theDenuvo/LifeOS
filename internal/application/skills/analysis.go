@@ -26,7 +26,11 @@ func (s *Service) Analyze(ctx context.Context, skillID int64) ([]Finding, error)
 		}
 		findings = append(findings, skillFindings...)
 	}
-	findings = append(findings, s.workingFinding(ctx, skills)...)
+	working, err := s.workingFinding(ctx, skills)
+	if err != nil {
+		return nil, err
+	}
+	findings = append(findings, working...)
 	return findings, nil
 }
 
@@ -159,7 +163,7 @@ func (s *Service) analyzeSkill(ctx context.Context, skill *domainskill.Skill) ([
 	return findings, nil
 }
 
-func (s *Service) workingFinding(ctx context.Context, skills []*domainskill.Skill) []Finding {
+func (s *Service) workingFinding(ctx context.Context, skills []*domainskill.Skill) ([]Finding, error) {
 	badTotal := int64(0)
 	badNames := map[string]struct{}{}
 	for _, skill := range skills {
@@ -169,17 +173,22 @@ func (s *Service) workingFinding(ctx context.Context, skills []*domainskill.Skil
 		}
 	}
 	if badTotal == 0 {
-		return nil
+		return nil, nil
 	}
 	names := make([]string, 0, len(badNames))
 	for name := range badNames {
 		names = append(names, name)
 	}
-	existing := ""
+	var existing string
 	if s.working != nil {
-		if text, err := s.working.GetWorkingInstructions(ctx); err == nil {
-			existing = strings.TrimSpace(text)
+		// A read failure must not become an empty base: it would
+		// produce a proposal built on a text LifeOS never saw and
+		// disarm the stale-base check.
+		text, err := s.working.GetWorkingInstructions(ctx)
+		if err != nil {
+			return nil, err
 		}
+		existing = strings.TrimSpace(text)
 	}
 	proposedText := existing
 	addition := "Перед применением навыка сверяй его условия и ограничения из библиотеки; если условия не выполнены, навык не применяется."
@@ -188,19 +197,21 @@ func (s *Service) workingFinding(ctx context.Context, skills []*domainskill.Skil
 	} else if !strings.Contains(existing, "Перед применением навыка") {
 		proposedText = existing + "\n" + addition
 	} else {
-		return nil
+		return nil, nil
 	}
 	scenarios := []string{"примени навык из библиотеки", "проверь условия навыка перед работой"}
+	h := workingHash(existing)
 	return []Finding{{
-		SkillName:      "рабочие инструкции",
-		Kind:           domainskill.ProposalWorkingInstructions,
-		Problem:        fmt.Sprintf("ошибки навыков повторяются: плохих оценок %d (%s)", badTotal, strings.Join(names, ", ")),
-		Evidence:       []string{fmt.Sprintf("плохих оценок навыков: %d", badTotal)},
-		Proposed:       domainskill.Content{Instructions: proposedText},
-		ExpectedEffect: "навыки применяются только при выполненных условиях, без случайных подключений",
-		TestScenarios:  scenarios,
-		TestResult:     "рабочие инструкции: проверена допустимость текста; выбор навыков не меняется",
-	}}
+		BaseWorkingHash: &h,
+		SkillName:       "рабочие инструкции",
+		Kind:            domainskill.ProposalWorkingInstructions,
+		Problem:         fmt.Sprintf("ошибки навыков повторяются: плохих оценок %d (%s)", badTotal, strings.Join(names, ", ")),
+		Evidence:        []string{fmt.Sprintf("плохих оценок навыков: %d", badTotal)},
+		Proposed:        domainskill.Content{Instructions: proposedText},
+		ExpectedEffect:  "навыки применяются только при выполненных условиях, без случайных подключений",
+		TestScenarios:   scenarios,
+		TestResult:      "рабочие инструкции: проверена допустимость текста; выбор навыков не меняется",
+	}}, nil
 }
 
 // ProposeImprovements analyzes and stores one proposal per finding (at
@@ -220,7 +231,8 @@ func (s *Service) ProposeImprovements(ctx context.Context, skillID int64, conver
 			SkillID: finding.SkillID, Kind: finding.Kind, Problem: finding.Problem,
 			Evidence: finding.Evidence, Proposed: finding.Proposed,
 			ExpectedEffect: finding.ExpectedEffect, TestScenarios: finding.TestScenarios,
-			ConversationID: conversationID,
+			BaseWorkingHash: finding.BaseWorkingHash,
+			ConversationID:  conversationID,
 		})
 		if err != nil {
 			// A finding that no longer validates (for example, the skill

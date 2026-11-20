@@ -243,7 +243,7 @@
 		if (!confirm(`Вернуть навык к версии ${versionNo}? Текущая версия сохранится в истории.`)) return;
 		busyId = detail.id;
 		try {
-			detail = await rollbackSkill(detail.id, versionNo);
+			detail = await rollbackSkill(detail.id, versionNo, detail.version);
 			notice = `Возврат выполнен: текущая версия ${detail.current_version}.`;
 			await load();
 		} catch (err) {

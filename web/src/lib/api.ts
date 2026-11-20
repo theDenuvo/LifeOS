@@ -1709,8 +1709,12 @@ export function changeSkillStatus(id: number, status: SkillStatus): Promise<Skil
 	return request<Skill>(`/api/v1/skills/${id}/status`, { method: 'POST', body: JSON.stringify({ status }) });
 }
 
-export function rollbackSkill(id: number, versionNo: number): Promise<Skill> {
-	return request<Skill>(`/api/v1/skills/${id}/versions/${versionNo}/rollback`, { method: 'POST', body: JSON.stringify({}) });
+export function rollbackSkill(id: number, versionNo: number, version: number): Promise<Skill> {
+	return request<Skill>(`/api/v1/skills/${id}/versions/${versionNo}/rollback`, {
+		method: 'POST',
+		body: JSON.stringify({}),
+		headers: { 'If-Match': `"${version}"` }
+	});
 }
 
 export function rateSkill(id: number, rating: 'good' | 'bad', comment: string): Promise<unknown> {

@@ -116,7 +116,9 @@ func TestSkillLifecycleOverHTTP(t *testing.T) {
 		t.Fatalf("apply must create version 2: %+v", after)
 	}
 	// Rollback creates version 3 with the old text.
-	w = doSkillRequest(t, handler, http.MethodPost, fmt.Sprintf("/api/v1/skills/%d/versions/1/rollback", created.ID), `{}`, nil)
+	w = doSkillRequest(t, handler, http.MethodPost, fmt.Sprintf("/api/v1/skills/%d/versions/1/rollback", created.ID), `{}`, map[string]string{
+		"If-Match": fmt.Sprintf("%d", after.Version),
+	})
 	if w.Code != http.StatusOK {
 		t.Fatalf("rollback: status %d body %s", w.Code, w.Body.String())
 	}
@@ -126,6 +128,19 @@ func TestSkillLifecycleOverHTTP(t *testing.T) {
 	}
 	if rolled.CurrentVersion != 3 || rolled.Instructions != before.Instructions {
 		t.Fatalf("rollback: %+v", rolled)
+	}
+	// A rollback pinned to a stale version is refused: the user
+	// confirmed a state that no longer exists.
+	w = doSkillRequest(t, handler, http.MethodPost, fmt.Sprintf("/api/v1/skills/%d/versions/2/rollback", created.ID), `{}`, map[string]string{
+		"If-Match": fmt.Sprintf("%d", after.Version),
+	})
+	if w.Code != http.StatusConflict {
+		t.Fatalf("stale rollback: status %d body %s", w.Code, w.Body.String())
+	}
+	// Rollback without If-Match is refused.
+	w = doSkillRequest(t, handler, http.MethodPost, fmt.Sprintf("/api/v1/skills/%d/versions/1/rollback", created.ID), `{}`, nil)
+	if w.Code != http.StatusPreconditionRequired {
+		t.Fatalf("rollback without If-Match: status %d body %s", w.Code, w.Body.String())
 	}
 	// PATCH without If-Match is refused.
 	w = doSkillRequest(t, handler, http.MethodPatch, fmt.Sprintf("/api/v1/skills/%d", created.ID), `{"purpose":"Новое назначение навыка для проверки версии."}`, nil)

@@ -372,13 +372,20 @@ func (h *Handler) changeSkillStatus(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, http.StatusOK, newSkillBody(view, true))
 }
 
-// rollbackSkill handles POST /api/v1/skills/{id}/versions/{version}/rollback.
+// rollbackSkill handles POST /api/v1/skills/{id}/versions/{version}/rollback
+// under If-Match: the client sends the version it saw when it asked for
+// the confirmation, and a changed skill is refused instead of being
+// rolled back from an unseen state.
 func (h *Handler) rollbackSkill(w http.ResponseWriter, r *http.Request) {
 	if h.services.Skills == nil {
 		h.skillsUnavailable(w, r)
 		return
 	}
 	id, ok := h.skillID(w, r)
+	if !ok {
+		return
+	}
+	version, ok := h.expectedVersion(w, r)
 	if !ok {
 		return
 	}
@@ -391,12 +398,7 @@ func (h *Handler) rollbackSkill(w http.ResponseWriter, r *http.Request) {
 		ChangeNote string `json:"change_note"`
 	}
 	_ = decodeJSONBody(w, r, &body)
-	current, err := h.services.Skills.Get(r.Context(), id)
-	if err != nil {
-		h.writeSkillError(w, r, err)
-		return
-	}
-	view, err := h.services.Skills.Rollback(r.Context(), id, current.Skill.Version, versionNo, body.ChangeNote, domainskill.SourceUser)
+	view, err := h.services.Skills.Rollback(r.Context(), id, version, versionNo, body.ChangeNote, domainskill.SourceUser)
 	if err != nil {
 		h.writeSkillError(w, r, err)
 		return

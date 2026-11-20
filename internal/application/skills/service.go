@@ -423,7 +423,12 @@ func (s *Service) CreateProposal(ctx context.Context, input ProposalInput) (*dom
 		v := current.CurrentVersion
 		baseVersion = &v
 	} else if input.Kind == domainskill.ProposalWorkingInstructions {
-		if s.working != nil {
+		if input.BaseWorkingHash != nil {
+			// The analysis derived this proposal from a known text
+			// and hands us its fingerprint: store exactly that,
+			// never a re-read of the text as it stands now.
+			baseWorkingHash = input.BaseWorkingHash
+		} else if s.working != nil {
 			current, err := s.working.GetWorkingInstructions(ctx)
 			if err != nil {
 				return nil, err

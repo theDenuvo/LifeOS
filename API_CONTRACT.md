@@ -1303,7 +1303,7 @@ GET    /api/v1/skills/{id}
 PATCH  /api/v1/skills/{id}                    # content + change_note, обязательный If-Match
 DELETE /api/v1/skills/{id}                    # только draft/archived
 POST   /api/v1/skills/{id}/status             # {"status"} → полный навык с версиями
-POST   /api/v1/skills/{id}/rollback           # {"version_no"}
+POST   /api/v1/skills/{id}/versions/{version}/rollback  # If-Match обязателен: версия, которую видел при подтверждении; устаревшая → 409
 POST   /api/v1/skills/{id}/rate               # {"rating": "good"|"bad", "comment", "conversation_id"}
 GET    /api/v1/skills/{id}/proposals?status=&limit=20
 GET    /api/v1/skills/proposals?status=&limit=20

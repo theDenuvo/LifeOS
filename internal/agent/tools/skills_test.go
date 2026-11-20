@@ -134,9 +134,27 @@ func TestSkillToolsRollbackPreviewIdentifiesSkill(t *testing.T) {
 		t.Fatalf("update: %v", err)
 	}
 
-	preview, err := registry.Preview("rollback_skill", json.RawMessage(`{"skill_id": `+itoa(view.Skill.ID)+`, "version_no": 1}`))
+	// The pinned optimistic version is the one from before the update.
+	preview, err := registry.Preview("rollback_skill", json.RawMessage(`{"skill_id": `+itoa(view.Skill.ID)+`, "version_no": 1, "expected_version": `+itoa(int64(view.Skill.Version))+`}`))
+	if err == nil {
+		t.Fatalf("preview with a stale expected_version must fail")
+	}
+	fresh, err := service.Get(ctx, view.Skill.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	preview, err = registry.Preview("rollback_skill", json.RawMessage(`{"skill_id": `+itoa(view.Skill.ID)+`, "version_no": 1, "expected_version": `+itoa(int64(fresh.Skill.Version))+`}`))
 	if err != nil {
 		t.Fatalf("preview: %v", err)
+	}
+	// Execute with a stale pinned version is refused without touching
+	// the skill: only the version the user saw is rolled back from.
+	staleArgs := json.RawMessage(`{"skill_id": ` + itoa(view.Skill.ID) + `, "version_no": 1, "expected_version": ` + itoa(int64(view.Skill.Version)) + `}`)
+	if _, err := registry.Execute(ctx, "rollback_skill", staleArgs); err == nil {
+		t.Fatalf("stale rollback must be refused")
+	}
+	if untouched, err := service.Get(ctx, view.Skill.ID); err == nil && untouched.Skill.CurrentVersion != 2 {
+		t.Fatalf("stale rollback must not change the skill: %+v", untouched.Skill)
 	}
 	for _, want := range []string{"Подготовка к встрече", "id", "версия 2", "к версии 1"} {
 		if !strings.Contains(preview, want) {
@@ -146,7 +164,7 @@ func TestSkillToolsRollbackPreviewIdentifiesSkill(t *testing.T) {
 
 	// Unknown skill id fails the preview instead of asking confirmation
 	// for a change whose target is unknown.
-	if _, err := registry.Preview("rollback_skill", json.RawMessage(`{"skill_id": 999999, "version_no": 1}`)); err == nil {
+	if _, err := registry.Preview("rollback_skill", json.RawMessage(`{"skill_id": 999999, "version_no": 1, "expected_version": 1}`)); err == nil {
 		t.Fatalf("preview of unknown skill must fail")
 	}
 }

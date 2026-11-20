@@ -357,22 +357,24 @@ func RegisterSkillTools(registry *Registry, service *skillService) {
 	registry.Register(Tool{
 		Spec: assistantSpec("rollback_skill", "Вернуть навык к предыдущей версии: старая инструкция становится новой версией, история не переписывается. Вызывай только после явного согласия пользователя.",
 			objectSchema(map[string]any{
-				"skill_id":   integerProp("ID навыка"),
-				"version_no": integerProp("Номер версии, к которой вернуться"),
-			}, "skill_id", "version_no")),
+				"skill_id":         integerProp("ID навыка"),
+				"version_no":       integerProp("Номер версии, к которой вернуться"),
+				"expected_version": integerProp("optimistic_version из get_skill: версия, которую видел при подготовке отката"),
+			}, "skill_id", "version_no", "expected_version")),
 		Execute: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			var args struct {
-				SkillID   int64 `json:"skill_id"`
-				VersionNo int   `json:"version_no"`
+				SkillID         int64 `json:"skill_id"`
+				VersionNo       int   `json:"version_no"`
+				ExpectedVersion int   `json:"expected_version"`
 			}
 			if err := decodeArgs(raw, &args); err != nil {
 				return nil, err
 			}
-			view, err := service.Get(ctx, args.SkillID)
-			if err != nil {
-				return nil, skillToolError(err)
-			}
-			rolled, err := service.Rollback(ctx, args.SkillID, view.Skill.Version, args.VersionNo, "", domainskill.SourceAssistant)
+			// The confirmation pins the version the user saw. The
+			// pinned version is used as-is: re-reading the current one
+			// here would apply the rollback to a state the user never
+			// confirmed (Rollback refuses a stale version with 409).
+			rolled, err := service.Rollback(ctx, args.SkillID, args.ExpectedVersion, args.VersionNo, "", domainskill.SourceAssistant)
 			if err != nil {
 				return nil, skillToolError(err)
 			}
@@ -380,18 +382,24 @@ func RegisterSkillTools(registry *Registry, service *skillService) {
 		},
 		Preview: func(raw json.RawMessage) (string, error) {
 			var args struct {
-				SkillID   int64 `json:"skill_id"`
-				VersionNo int   `json:"version_no"`
+				SkillID         int64 `json:"skill_id"`
+				VersionNo       int   `json:"version_no"`
+				ExpectedVersion int   `json:"expected_version"`
 			}
 			if err := decodeArgs(raw, &args); err != nil {
 				return "", err
 			}
 			// The confirmation must name the skill being changed: with
 			// several skills a bare "вернуть к версии N" does not say
-			// which instruction is rewritten.
+			// which instruction is rewritten. The pinned version must
+			// still be the current one: a changed skill needs a new
+			// confirmation, not a rollback of an unseen state.
 			view, err := service.Get(context.Background(), args.SkillID)
 			if err != nil {
 				return "", skillToolError(err)
+			}
+			if args.ExpectedVersion != view.Skill.Version {
+				return "", fmt.Errorf("навык «%s» изменился (текущая версия %d): подготовьте откат заново", view.Skill.Name, view.Skill.CurrentVersion)
 			}
 			return fmt.Sprintf("Вернуть навык «%s» (id %d, текущая версия %d) к версии %d",
 				view.Skill.Name, view.Skill.ID, view.Skill.CurrentVersion, args.VersionNo), nil

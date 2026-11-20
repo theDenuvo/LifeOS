@@ -223,11 +223,16 @@ type Proposal struct {
 	TestScenarios  []string
 	TestResult     string
 	BaseVersion    *int
-	ConversationID *int64
-	ResultSkillID  *int64
-	CreatedAt      time.Time
-	ResolvedAt     *time.Time
-	Version        int
+	// BaseWorkingHash is the fingerprint of the working instructions
+	// text the proposal was prepared against (working-instructions
+	// proposals only). A nil value means the proposal predates the
+	// optimistic check and applies unconditionally.
+	BaseWorkingHash *string
+	ConversationID  *int64
+	ResultSkillID   *int64
+	CreatedAt       time.Time
+	ResolvedAt      *time.Time
+	Version         int
 }
 
 // Feedback is one user judgement of a skill.

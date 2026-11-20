@@ -692,6 +692,7 @@ Application (сначала пауза).
 частичный индекс `skill_id IS NULL`), `kind` (`skill`/`working_instructions`),
 `title`, `problem`, `evidence` (JSON-массив), `proposed_instructions`,
 `diff` (JSON-массив строк), `expected_effect`, `test_result`, `base_version`,
+`base_working_hash` (отпечаток SHA-256 исходного текста рабочих инструкций для предложений этого вида),
 `status` (`proposed`/`applied`/`rejected` — CHECK), `created_at`,
 `resolved_at`, `resolved_by`.
 

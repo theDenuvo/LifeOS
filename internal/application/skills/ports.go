@@ -6,6 +6,7 @@ package skills
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -100,8 +101,29 @@ type Repository interface {
 	ListUsages(ctx context.Context, skillID int64, limit int) ([]domainskill.Usage, error)
 }
 
-// Transaction exposes one transactional skill repository.
-type Transaction interface{ Skills() Repository }
+// WorkingInstructionsKey is the settings key of the assistant's working
+// instructions block. ApplyProposal reads and writes it inside the same
+// transaction as the proposal, so a stale base is refused instead of
+// silently overwritten.
+const WorkingInstructionsKey = "assistant.working_instructions"
+
+// SettingsRepository is the subset of the settings store a skill
+// transaction may touch. It is the same table settings.Service uses, but
+// on the transaction `tx` already owns: with SetMaxOpenConns(1) a nested
+// settings.Service.Put() would wait forever for the connection ApplyProposal
+// is holding. Working-instruction proposals must therefore go through this
+// interface, not through WorkingInstructionsStore, inside a transaction.
+type SettingsRepository interface {
+	Get(ctx context.Context, key string) (json.RawMessage, bool, error)
+	Put(ctx context.Context, key string, value json.RawMessage, at time.Time) error
+}
+
+// Transaction exposes one transactional skill repository and the settings
+// store on the same connection.
+type Transaction interface {
+	Skills() Repository
+	Settings() SettingsRepository
+}
 
 // UnitOfWork is the skill transaction boundary.
 type UnitOfWork interface {

@@ -27,6 +27,14 @@ type skillTransaction struct{ tx *sql.Tx }
 
 func (t skillTransaction) Skills() appskills.Repository { return &skillRepository{tx: t.tx} }
 
+// Settings exposes the settings store on the transaction ApplyProposal
+// already owns, so a working-instructions proposal and its resolution
+// commit together. Opening a second transaction here (via
+// settings.Service) would deadlock on SetMaxOpenConns(1).
+func (t skillTransaction) Settings() appskills.SettingsRepository {
+	return &settingsRepository{tx: t.tx}
+}
+
 type skillRepository struct{ tx *sql.Tx }
 
 const skillColumns = `id, name, purpose, when_to_use, instructions, limitations, examples,
@@ -316,26 +324,27 @@ func (r *skillRepository) GetVersion(ctx context.Context, skillID int64, version
 const skillProposalColumns = `id, skill_id, kind, status, problem, evidence_json,
 	proposed_name, proposed_purpose, proposed_when, proposed_instructions, proposed_limitations,
 	proposed_examples, proposed_tags_json, expected_effect, test_scenarios_json, test_result,
-	base_version, conversation_id, result_skill_id, created_at, resolved_at, version`
+	base_version, base_working_hash, conversation_id, result_skill_id, created_at, resolved_at, version`
 
 func scanSkillProposal(row rowScanner) (*domainskill.Proposal, error) {
 	var (
-		p              domainskill.Proposal
-		skillID        sql.NullInt64
-		kind, status   string
-		evidenceJSON   string
-		scenariosJSON  string
-		tagsJSON       string
-		baseVersion    sql.NullInt64
-		conversationID sql.NullInt64
-		resultSkillID  sql.NullInt64
-		createdAt      int64
-		resolvedAt     sql.NullInt64
+		p               domainskill.Proposal
+		skillID         sql.NullInt64
+		kind, status    string
+		evidenceJSON    string
+		scenariosJSON   string
+		tagsJSON        string
+		baseVersion     sql.NullInt64
+		baseWorkingHash sql.NullString
+		conversationID  sql.NullInt64
+		resultSkillID   sql.NullInt64
+		createdAt       int64
+		resolvedAt      sql.NullInt64
 	)
 	if err := row.Scan(&p.ID, &skillID, &kind, &status, &p.Problem, &evidenceJSON,
 		&p.Proposed.Name, &p.Proposed.Purpose, &p.Proposed.WhenToUse, &p.Proposed.Instructions,
 		&p.Proposed.Limitations, &p.Proposed.Examples, &tagsJSON, &p.ExpectedEffect,
-		&scenariosJSON, &p.TestResult, &baseVersion, &conversationID, &resultSkillID,
+		&scenariosJSON, &p.TestResult, &baseVersion, &baseWorkingHash, &conversationID, &resultSkillID,
 		&createdAt, &resolvedAt, &p.Version); err != nil {
 		return nil, err
 	}
@@ -347,6 +356,10 @@ func scanSkillProposal(row rowScanner) (*domainskill.Proposal, error) {
 	if skillID.Valid {
 		v := skillID.Int64
 		p.SkillID = &v
+	}
+	if baseWorkingHash.Valid {
+		v := baseWorkingHash.String
+		p.BaseWorkingHash = &v
 	}
 	if baseVersion.Valid {
 		v := int(baseVersion.Int64)
@@ -374,13 +387,13 @@ func (r *skillRepository) InsertProposal(ctx context.Context, proposal *domainsk
 		INSERT INTO skill_proposals (skill_id, kind, status, problem, evidence_json,
 			proposed_name, proposed_purpose, proposed_when, proposed_instructions, proposed_limitations,
 			proposed_examples, proposed_tags_json, expected_effect, test_scenarios_json, test_result,
-			base_version, conversation_id, result_skill_id, created_at, resolved_at, version)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			base_version, base_working_hash, conversation_id, result_skill_id, created_at, resolved_at, version)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		proposal.SkillID, string(proposal.Kind), string(proposal.Status), proposal.Problem,
 		encodeStrings(proposal.Evidence), proposal.Proposed.Name, proposal.Proposed.Purpose,
 		proposal.Proposed.WhenToUse, proposal.Proposed.Instructions, proposal.Proposed.Limitations,
 		proposal.Proposed.Examples, tagsJSON, proposal.ExpectedEffect, encodeStrings(proposal.TestScenarios),
-		proposal.TestResult, proposal.BaseVersion, proposal.ConversationID, proposal.ResultSkillID,
+		proposal.TestResult, proposal.BaseVersion, proposal.BaseWorkingHash, proposal.ConversationID, proposal.ResultSkillID,
 		unixSeconds(proposal.CreatedAt), unixNullableTime(proposal.ResolvedAt), proposal.Version)
 	if err != nil {
 		return 0, fmt.Errorf("insert skill proposal: %w", err)

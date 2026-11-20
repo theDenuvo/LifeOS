@@ -2,9 +2,12 @@ package sqlite
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
+	appSettings "github.com/theDenuvo/LifeOS/internal/application/settings"
 	appskills "github.com/theDenuvo/LifeOS/internal/application/skills"
 	domainskill "github.com/theDenuvo/LifeOS/internal/domain/skill"
 )
@@ -83,3 +86,97 @@ func TestSkillRepositoryRoundTrip(t *testing.T) {
 type appskillsClock struct{ at time.Time }
 
 func (c appskillsClock) Now() time.Time { return c.at }
+
+// A working-instructions proposal must apply on the real database:
+// reading and writing app_settings inside the skill transaction shares
+// its single connection (SetMaxOpenConns(1)). Going through
+// settings.Service here would hand the second transaction to a
+// connection that never returns and hang the HTTP request.
+func TestWorkingProposalAppliesOnRealDB(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+	uow := NewSkillUnitOfWork(db)
+	clock := appskillsClock{at: time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)}
+	settingsSvc := appSettings.NewService(NewSettingsUnitOfWork(db), clock)
+	service := appskills.NewService(uow, clock, appskills.WithWorkingInstructions(testWorkingStore{settings: settingsSvc}))
+
+	// Seed the working instructions block directly, as the settings
+	// store would hold it.
+	if err := uow.Do(context.Background(), func(_ context.Context, tx appskills.Transaction) error {
+		raw, err := json.Marshal("Исходные инструкции.")
+		if err != nil {
+			return err
+		}
+		return tx.Settings().Put(context.Background(), appskills.WorkingInstructionsKey, raw, clock.Now())
+	}); err != nil {
+		t.Fatalf("seed working: %v", err)
+	}
+	proposal, err := service.CreateProposal(context.Background(), appskills.ProposalInput{
+		Kind:           domainskill.ProposalWorkingInstructions,
+		Problem:        "пропуски проверок",
+		Evidence:       []string{"плохая оценка"},
+		Proposed:       domainskill.Content{Instructions: "Улучшенные инструкции: проверяй каждый шаг."},
+		ExpectedEffect: "проверки не пропускаются",
+	})
+	if err != nil {
+		t.Fatalf("proposal: %v", err)
+	}
+	if proposal.BaseWorkingHash == nil {
+		t.Fatalf("proposal must carry the base fingerprint")
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := service.ApplyProposal(context.Background(), proposal.ID, proposal.Version)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("apply: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("apply hung: working-instruction write still opens its own transaction")
+	}
+	text, err := service.GetWorkingInstructions(context.Background())
+	_ = text
+	if err != nil {
+		// No WorkingInstructionsStore wired here; read the row directly.
+		var stored string
+		if err := db.QueryRow(`SELECT value FROM app_settings WHERE key = ?`, appskills.WorkingInstructionsKey).Scan(&stored); err != nil {
+			t.Fatalf("read stored: %v", err)
+		}
+		var decoded string
+		if err := json.Unmarshal([]byte(stored), &decoded); err != nil {
+			t.Fatalf("decode stored: %v", err)
+		}
+		if decoded != "Улучшенные инструкции: проверяй каждый шаг." {
+			t.Fatalf("stored: %q", decoded)
+		}
+	} else if text != "Улучшенные инструкции: проверяй каждый шаг." {
+		t.Fatalf("stored text: %q", text)
+	}
+}
+
+type testWorkingStore struct {
+	settings *appSettings.Service
+}
+
+func (s testWorkingStore) GetWorkingInstructions(ctx context.Context) (string, error) {
+	raw, err := s.settings.Get(ctx, appskills.WorkingInstructionsKey)
+	if err != nil {
+		if errors.Is(err, appSettings.ErrNotFound) {
+			return "", nil
+		}
+		return "", err
+	}
+	var text string
+	return text, json.Unmarshal(raw, &text)
+}
+
+func (s testWorkingStore) SetWorkingInstructions(ctx context.Context, text string) error {
+	raw, err := json.Marshal(text)
+	if err != nil {
+		return err
+	}
+	return s.settings.Put(ctx, appskills.WorkingInstructionsKey, raw)
+}

@@ -380,12 +380,21 @@ func RegisterSkillTools(registry *Registry, service *skillService) {
 		},
 		Preview: func(raw json.RawMessage) (string, error) {
 			var args struct {
-				VersionNo int `json:"version_no"`
+				SkillID   int64 `json:"skill_id"`
+				VersionNo int   `json:"version_no"`
 			}
 			if err := decodeArgs(raw, &args); err != nil {
 				return "", err
 			}
-			return fmt.Sprintf("Вернуть навык к версии %d", args.VersionNo), nil
+			// The confirmation must name the skill being changed: with
+			// several skills a bare "вернуть к версии N" does not say
+			// which instruction is rewritten.
+			view, err := service.Get(context.Background(), args.SkillID)
+			if err != nil {
+				return "", skillToolError(err)
+			}
+			return fmt.Sprintf("Вернуть навык «%s» (id %d, текущая версия %d) к версии %d",
+				view.Skill.Name, view.Skill.ID, view.Skill.CurrentVersion, args.VersionNo), nil
 		},
 	})
 

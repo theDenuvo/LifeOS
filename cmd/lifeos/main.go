@@ -790,7 +790,7 @@ type workingInstructionsStore struct {
 	settings *settings.Service
 }
 
-const workingInstructionsKey = "assistant.working_instructions"
+const workingInstructionsKey = appskills.WorkingInstructionsKey
 
 func (w workingInstructionsStore) GetWorkingInstructions(ctx context.Context) (string, error) {
 	raw, err := w.settings.Get(ctx, workingInstructionsKey)

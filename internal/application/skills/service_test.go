@@ -2,8 +2,10 @@ package skills
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -242,21 +244,56 @@ func (r *fakeRepo) ListUsages(_ context.Context, skillID int64, limit int) ([]do
 	return out, nil
 }
 
-type fakeUoW struct{ repo *fakeRepo }
-
-func (u *fakeUoW) Do(_ context.Context, fn func(context.Context, Transaction) error) error {
-	return fn(context.Background(), fakeTx{repo: u.repo})
+type fakeUoW struct {
+	repo     *fakeRepo
+	settings map[string]json.RawMessage
 }
 
-type fakeTx struct{ repo *fakeRepo }
+func (u *fakeUoW) Do(_ context.Context, fn func(context.Context, Transaction) error) error {
+	return fn(context.Background(), fakeTx{repo: u.repo, settings: u.settings})
+}
 
-func (t fakeTx) Skills() Repository { return t.repo }
+type fakeTx struct {
+	repo     *fakeRepo
+	settings map[string]json.RawMessage
+}
 
-type memWorking struct{ text string }
+func (t fakeTx) Skills() Repository           { return t.repo }
+func (t fakeTx) Settings() SettingsRepository { return fakeSettings{values: t.settings} }
 
-func (m *memWorking) GetWorkingInstructions(context.Context) (string, error) { return m.text, nil }
+// fakeSettings puts working instructions on the same map the memWorking
+// store reads, so the transactional apply path and the plain read path
+// observe one value, exactly like the single app_settings table.
+type fakeSettings struct{ values map[string]json.RawMessage }
+
+func (f fakeSettings) Get(_ context.Context, key string) (json.RawMessage, bool, error) {
+	value, ok := f.values[key]
+	return value, ok, nil
+}
+
+func (f fakeSettings) Put(_ context.Context, key string, value json.RawMessage, _ time.Time) error {
+	f.values[key] = value
+	return nil
+}
+
+type memWorking struct {
+	values map[string]json.RawMessage
+}
+
+func (m *memWorking) GetWorkingInstructions(context.Context) (string, error) {
+	raw, ok := m.values[WorkingInstructionsKey]
+	if !ok {
+		return "", nil
+	}
+	var text string
+	return text, json.Unmarshal(raw, &text)
+}
 func (m *memWorking) SetWorkingInstructions(_ context.Context, text string) error {
-	m.text = text
+	encoded, err := json.Marshal(text)
+	if err != nil {
+		return err
+	}
+	m.values[WorkingInstructionsKey] = encoded
 	return nil
 }
 
@@ -280,7 +317,11 @@ func containsFold(haystack, needle string) bool {
 }
 
 func testService(repo *fakeRepo) *Service {
-	return NewService(&fakeUoW{repo: repo}, fakeClock{at: time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)}, WithWorkingInstructions(&memWorking{}))
+	return newTestService(repo, map[string]json.RawMessage{})
+}
+
+func newTestService(repo *fakeRepo, settings map[string]json.RawMessage) *Service {
+	return NewService(&fakeUoW{repo: repo, settings: settings}, fakeClock{at: time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)}, WithWorkingInstructions(&memWorking{values: settings}))
 }
 
 func sampleContent() domainskill.Content {
@@ -497,4 +538,97 @@ func TestForbiddenContentRejected(t *testing.T) {
 		t.Fatalf("forbidden: %v", err)
 	}
 	fmt.Println("ok")
+}
+
+// A working-instructions proposal applies against the text it was
+// prepared from; when the user changed that text in between, applying
+// the stale proposal is refused instead of overwriting the manual edit.
+func TestWorkingProposalApplyAndStaleBase(t *testing.T) {
+	ctx := context.Background()
+	settings := map[string]json.RawMessage{}
+	repo := newFakeRepo()
+	service := newTestService(repo, settings)
+
+	if _, err := service.SetWorkingInstructions(ctx, "Старые инструкции: проверяй условия."); err != nil {
+		t.Fatalf("set working: %v", err)
+	}
+	proposal, err := service.CreateProposal(ctx, ProposalInput{
+		Kind:           domainskill.ProposalWorkingInstructions,
+		Problem:        "часто пропускаются проверки",
+		Evidence:       []string{"плохая оценка"},
+		Proposed:       domainskill.Content{Instructions: "Новые инструкции: проверяй условия и фиксируй итог."},
+		ExpectedEffect: "проверки не пропускаются",
+	})
+	if err != nil {
+		t.Fatalf("proposal: %v", err)
+	}
+	if proposal.BaseWorkingHash == nil || *proposal.BaseWorkingHash == "" {
+		t.Fatalf("working proposal must carry the base fingerprint: %+v", proposal)
+	}
+
+	// The user edits the block before applying: the proposal is stale.
+	if _, err := service.SetWorkingInstructions(ctx, "Ручная правка пользователя."); err != nil {
+		t.Fatalf("manual edit: %v", err)
+	}
+	if _, _, err := service.ApplyProposal(ctx, proposal.ID, proposal.Version); !errors.Is(err, ErrStaleBase) {
+		t.Fatalf("stale apply must be refused: %v", err)
+	}
+	text, err := service.GetWorkingInstructions(ctx)
+	if err != nil || text != "Ручная правка пользователя." {
+		t.Fatalf("manual edit must survive a stale apply: %q %v", text, err)
+	}
+
+	// A fresh proposal prepared against the current text applies.
+	fresh, err := service.CreateProposal(ctx, ProposalInput{
+		Kind:           domainskill.ProposalWorkingInstructions,
+		Problem:        "нужна фиксация итога",
+		Evidence:       []string{"плохая оценка"},
+		Proposed:       domainskill.Content{Instructions: "Итоговые инструкции: фиксируй итог в конце каждого шага."},
+		ExpectedEffect: "итог всегда заметен",
+	})
+	if err != nil {
+		t.Fatalf("fresh proposal: %v", err)
+	}
+	applied, _, err := service.ApplyProposal(ctx, fresh.ID, fresh.Version)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if applied.Status != domainskill.ProposalApplied {
+		t.Fatalf("applied status: %s", applied.Status)
+	}
+	text, err = service.GetWorkingInstructions(ctx)
+	if err != nil || text != "Итоговые инструкции: фиксируй итог в конце каждого шага." {
+		t.Fatalf("applied text: %q %v", text, err)
+	}
+}
+
+// The 12000-rune budget is a hard cap: one skill whose instructions
+// exceed it on their own is never injected oversized.
+func TestOversizedSkillIsNeverSelected(t *testing.T) {
+	ctx := context.Background()
+	repo := newFakeRepo()
+	service := testService(repo)
+
+	content := sampleContent()
+	content.Instructions = strings.Repeat("шаг проверки ",
+		1500) // >12000 runes
+	view, err := service.Create(ctx, CreateInput{Content: content}, domainskill.SourceUser)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := service.ChangeStatus(ctx, view.Skill.ID, view.Skill.Version, domainskill.StatusActive); err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+	selected, err := service.SelectSkills(ctx, "Встреча после поездки, подведи итоги поездки", nil)
+	if err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	if len(selected) != 0 {
+		t.Fatalf("oversized skill must not be selected: %+v", selected)
+	}
+	if snapshot, err := service.SkillsSnapshot(ctx, "Встреча после поездки, подведи итоги поездки", 1); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	} else if strings.Contains(snapshot, "## Навык") {
+		t.Fatalf("snapshot must not contain the oversized skill: %q", snapshot[:200])
+	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -106,5 +107,46 @@ func TestSkillToolsCreateDraftAndPropose(t *testing.T) {
 	}
 	if analyzed.(map[string]any)["total"] == 0 {
 		t.Fatalf("analysis must find the bad rating: %+v", analyzed)
+	}
+}
+
+// The rollback confirmation must identify the skill being changed: the
+// user confirms a rewrite of one specific instruction, not "version N"
+// in the abstract.
+func TestSkillToolsRollbackPreviewIdentifiesSkill(t *testing.T) {
+	registry, service := setupSkillTools(t)
+	ctx := context.Background()
+
+	view, err := service.Create(ctx, appskills.CreateInput{Content: domainskill.Content{
+		Name:         "Подготовка к встрече",
+		Purpose:      "Готовить повестку и материалы к встрече заранее.",
+		WhenToUse:    "Когда до встречи меньше дня и пользователь просит подготовиться.",
+		Instructions: "1. Найди встречу в календаре. 2. Собери задачи и документы по теме. 3. Составь повестку. 4. Проверь каждый пункт.",
+
+		Tags: []string{"встреча"},
+	}}, domainskill.SourceUser)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	updated := view.Skill
+	updated.Instructions += "\n5. Позвони участникам."
+	if _, err := service.Update(ctx, view.Skill.ID, view.Skill.Version, appskills.UpdateInput{Instructions: &updated.Instructions, ChangeNote: "добавлен шаг"}, domainskill.SourceUser); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	preview, err := registry.Preview("rollback_skill", json.RawMessage(`{"skill_id": `+itoa(view.Skill.ID)+`, "version_no": 1}`))
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	for _, want := range []string{"Подготовка к встрече", "id", "версия 2", "к версии 1"} {
+		if !strings.Contains(preview, want) {
+			t.Fatalf("preview must say %q is %q: %s", want, preview, preview)
+		}
+	}
+
+	// Unknown skill id fails the preview instead of asking confirmation
+	// for a change whose target is unknown.
+	if _, err := registry.Preview("rollback_skill", json.RawMessage(`{"skill_id": 999999, "version_no": 1}`)); err == nil {
+		t.Fatalf("preview of unknown skill must fail")
 	}
 }

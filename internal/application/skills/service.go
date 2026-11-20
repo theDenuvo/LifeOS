@@ -11,6 +11,9 @@ package skills
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -68,6 +71,27 @@ func NewService(uow UnitOfWork, clock Clock, opts ...Option) *Service {
 type systemClock struct{}
 
 func (systemClock) Now() time.Time { return time.Now().UTC().Truncate(time.Second) }
+
+// workingHash fingerprints a working-instructions text for the optimistic
+// check: a proposal remembers the text it was prepared against and is
+// refused when the text has changed since.
+func workingHash(text string) string {
+	h := sha256.Sum256([]byte(strings.TrimSpace(text)))
+	return hex.EncodeToString(h[:])
+}
+
+// decodeWorkingText reads the JSON-encoded working instructions block the
+// settings store keeps; an absent key means the empty block.
+func decodeWorkingText(raw json.RawMessage, ok bool) (string, error) {
+	if !ok {
+		return "", nil
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		return "", err
+	}
+	return text, nil
+}
 
 func (s *Service) publish(eventType string, payload map[string]any) {
 	if s.broker != nil {
@@ -385,6 +409,7 @@ func (s *Service) CreateProposal(ctx context.Context, input ProposalInput) (*dom
 	// version it was prepared against; a create proposal must not reuse a
 	// name that is already taken.
 	var baseVersion *int
+	var baseWorkingHash *string
 	var current *domainskill.Skill
 	if input.Kind == domainskill.ProposalSkillVersion {
 		if input.SkillID == nil {
@@ -397,6 +422,15 @@ func (s *Service) CreateProposal(ctx context.Context, input ProposalInput) (*dom
 		}
 		v := current.CurrentVersion
 		baseVersion = &v
+	} else if input.Kind == domainskill.ProposalWorkingInstructions {
+		if s.working != nil {
+			current, err := s.working.GetWorkingInstructions(ctx)
+			if err != nil {
+				return nil, err
+			}
+			h := workingHash(current)
+			baseWorkingHash = &h
+		}
 	} else if input.Kind == domainskill.ProposalSkillCreate {
 		// Uniqueness is checked at apply time (the name may be freed by
 		// then); here only the text is validated.
@@ -428,7 +462,7 @@ func (s *Service) CreateProposal(ctx context.Context, input ProposalInput) (*dom
 		Problem: strings.TrimSpace(input.Problem), Evidence: evidence,
 		Proposed: proposed, ExpectedEffect: strings.TrimSpace(input.ExpectedEffect),
 		TestScenarios: input.TestScenarios, TestResult: testResult,
-		BaseVersion: baseVersion, ConversationID: input.ConversationID,
+		BaseVersion: baseVersion, BaseWorkingHash: baseWorkingHash, ConversationID: input.ConversationID,
 		CreatedAt: now, Version: 1,
 	}
 	var id int64
@@ -559,10 +593,37 @@ func (s *Service) ApplyProposal(ctx context.Context, proposalID int64, expectedP
 			proposal.ResultSkillID = &resultID
 			skillView = skill
 		case domainskill.ProposalWorkingInstructions:
-			if s.working == nil {
+			// The write joins this transaction via tx.Settings(). Going
+			// through WorkingInstructionsStore (settings.Service) would
+			// open a second transaction on the single SQLite connection
+			// and hang here until the request is cancelled.
+			settings := tx.Settings()
+			if settings == nil {
 				return ErrNoWorkingStore
 			}
-			if err := s.working.SetWorkingInstructions(ctx, strings.TrimSpace(proposal.Proposed.Instructions)); err != nil {
+			raw, ok, err := settings.Get(ctx, WorkingInstructionsKey)
+			if err != nil {
+				return err
+			}
+			currentText, err := decodeWorkingText(raw, ok)
+			if err != nil {
+				return err
+			}
+			// A proposal prepared against a different text is stale:
+			// refuse instead of overwriting the user's manual edits.
+			// A nil fingerprint (pre-check proposals) applies as before.
+			if proposal.BaseWorkingHash != nil && *proposal.BaseWorkingHash != workingHash(currentText) {
+				return ErrStaleBase
+			}
+			text := strings.TrimSpace(proposal.Proposed.Instructions)
+			if utf8.RuneCountInString(text) > domainskill.MaxInstructionsRunes {
+				return domainskill.ErrInvalidInstructions
+			}
+			encoded, err := json.Marshal(text)
+			if err != nil {
+				return err
+			}
+			if err := settings.Put(ctx, WorkingInstructionsKey, encoded, now); err != nil {
 				return err
 			}
 		default:

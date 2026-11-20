@@ -73,6 +73,7 @@ CREATE TABLE skill_proposals (
     test_scenarios_json TEXT NOT NULL DEFAULT '[]',
     test_result         TEXT NOT NULL DEFAULT '',
     base_version        INTEGER,
+    base_working_hash   TEXT,
     conversation_id     INTEGER,
     result_skill_id     INTEGER REFERENCES skills(id) ON DELETE SET NULL,
     created_at          INTEGER NOT NULL,

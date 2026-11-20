@@ -224,7 +224,9 @@ func selectSkills(query string, skills []*domainskill.Skill) []selectedSkill {
 			break
 		}
 		size := len([]rune(item.skill.Instructions))
-		if size > budget && len(out) > 0 {
+		// The budget is a hard cap: a single skill whose instructions
+		// exceed it is skipped, never injected oversized.
+		if size > budget {
 			continue
 		}
 		budget -= size

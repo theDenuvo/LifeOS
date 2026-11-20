@@ -553,6 +553,7 @@ func (h *Handler) createSkillProposal(w http.ResponseWriter, r *http.Request) {
 		Proposed       skillContentBody `json:"proposed"`
 		ExpectedEffect string           `json:"expected_effect"`
 		TestScenarios  []string         `json:"test_scenarios"`
+		BaseVersion    *int             `json:"base_version"`
 	}
 	if err := decodeJSONBody(w, r, &body); err != nil {
 		h.writeProblem(w, r, http.StatusBadRequest, "validation-failed", "Validation Failed", err.Error())
@@ -568,6 +569,7 @@ func (h *Handler) createSkillProposal(w http.ResponseWriter, r *http.Request) {
 			Tags: body.Proposed.Tags,
 		},
 		ExpectedEffect: body.ExpectedEffect, TestScenarios: body.TestScenarios,
+		BaseVersion: body.BaseVersion,
 	})
 	if err != nil {
 		h.writeSkillError(w, r, err)

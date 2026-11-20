@@ -1311,6 +1311,7 @@ POST   /api/v1/skills/proposals/{id}/apply    # подтверждение по�
 POST   /api/v1/skills/proposals/{id}/reject
 POST   /api/v1/skills/analyze                 # {"skill_id" optional} → findings
 POST   /api/v1/skills/propose                 # {"skill_id" optional} → proposals (без мутации)
+POST   /api/v1/skills/proposals                 # {"skill_id","kind",...,"base_version" optional} → предложение; переданная базовая версия сохраняется как есть
 GET    /api/v1/skills/working-instructions
 PUT    /api/v1/skills/working-instructions    # {"instructions"} ≤20000 символов
 ```

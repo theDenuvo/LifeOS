@@ -691,3 +691,68 @@ func TestWorkingFindingHashSurvivesManualEdit(t *testing.T) {
 		t.Fatalf("manual edit must survive: %q %v", text, err)
 	}
 }
+
+// The analysis race for skills: the finding derives the proposal from
+// snapshot A, a manual edit lands before the proposal is stored. The
+// stored base must describe A, so applying later is refused with 409
+// instead of overwriting B.
+func TestSkillFindingBaseSurvivesManualEdit(t *testing.T) {
+	ctx := context.Background()
+	repo := newFakeRepo()
+	service := testService(repo)
+
+	view, err := service.Create(ctx, CreateInput{Content: sampleContent()}, domainskill.SourceUser)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := service.ChangeStatus(ctx, view.Skill.ID, view.Skill.Version, domainskill.StatusActive); err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+	if _, err := service.Rate(ctx, view.Skill.ID, domainskill.RatingBad, "пропустил шаг", nil); err != nil {
+		t.Fatalf("rate: %v", err)
+	}
+	findings, err := service.Analyze(ctx, view.Skill.ID)
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	var finding *Finding
+	for i := range findings {
+		if findings[i].Kind == domainskill.ProposalSkillVersion {
+			finding = &findings[i]
+		}
+	}
+	if finding == nil || finding.BaseVersion == nil || *finding.BaseVersion != 1 {
+		t.Fatalf("finding at version 1: %+v", findings)
+	}
+	// Manual edit A -> B between analysis and storing the proposal.
+	manual := sampleContent()
+	manual.Instructions += " Ручная правка пользователя."
+
+	current, err := service.Get(ctx, view.Skill.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if _, err := service.Update(ctx, view.Skill.ID, current.Skill.Version, UpdateInput{
+		Instructions: &manual.Instructions, ChangeNote: "ручная правка",
+	}, domainskill.SourceUser); err != nil {
+		t.Fatalf("manual edit: %v", err)
+	}
+	proposal, err := service.CreateProposal(ctx, ProposalInput{
+		SkillID: finding.SkillID, Kind: finding.Kind, Problem: finding.Problem,
+		Evidence: finding.Evidence, Proposed: finding.Proposed,
+		ExpectedEffect: finding.ExpectedEffect, TestScenarios: finding.TestScenarios,
+		BaseVersion: finding.BaseVersion,
+	})
+	if err != nil {
+		t.Fatalf("proposal: %v", err)
+	}
+	if proposal.BaseVersion == nil || *proposal.BaseVersion != 1 {
+		t.Fatalf("stored base must be the analysis-time version: %+v", proposal)
+	}
+	if _, _, err := service.ApplyProposal(ctx, proposal.ID, proposal.Version); !errors.Is(err, ErrStaleBase) {
+		t.Fatalf("apply after manual edit must be refused: %v", err)
+	}
+	if got, err := service.Get(ctx, view.Skill.ID); err != nil || got.Skill.CurrentVersion != 2 {
+		t.Fatalf("manual edit must survive: %+v %v", got.Skill, err)
+	}
+}

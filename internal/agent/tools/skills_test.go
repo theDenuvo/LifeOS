@@ -89,13 +89,27 @@ func TestSkillToolsCreateDraftAndPropose(t *testing.T) {
 	_ = err
 	// The direct call above is intentionally malformed; the real call
 	// below carries the full payload.
+	freshView, err := service.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
 	proposed, err = registry.Execute(ctx, "propose_skill_change", json.RawMessage(
-		`{"skill_id": `+itoa(id)+`, "problem": "шаг проверки пропущен", "instructions": "1. Найди встречу.\n2. Собери материалы.\n3. Составь повестку.\n4. Проверь каждый пункт по данным.\n5. Назови проверенное пользователю.", "expected_effect": "проверяемый результат", "test_scenarios": ["подготовься к встрече завтра"]}`))
+		`{"skill_id": `+itoa(id)+`, "expected_version": `+itoa(int64(freshView.Skill.CurrentVersion))+`, "problem": "шаг проверки пропущен", "instructions": "1. Найди встречу.\n2. Собери материалы.\n3. Составь повестку.\n4. Проверь каждый пункт по данным.\n5. Назови проверенное пользователю.", "expected_effect": "проверяемый результат", "test_scenarios": ["подготовься к встрече завтра"]}`))
 	if err != nil {
 		t.Fatalf("propose_skill_change: %v", err)
 	}
 	if proposed.(map[string]any)["status"] != "proposed" {
 		t.Fatalf("proposal status: %+v", proposed)
+	}
+	// A proposal built on a stale snapshot is refused instead of being
+	// silently re-based onto the new version.
+	newInstructions := freshView.Skill.Instructions + " 5. Назови проверенное пользователю."
+	staleView, err := service.Update(ctx, id, freshView.Skill.Version, appskills.UpdateInput{Instructions: &newInstructions, ChangeNote: "шаг проверки"}, domainskill.SourceUser)
+	_ = staleView
+	_ = err
+	if _, err := registry.Execute(ctx, "propose_skill_change", json.RawMessage(
+		`{"skill_id": `+itoa(id)+`, "expected_version": `+itoa(int64(freshView.Skill.CurrentVersion))+`, "problem": "устаревший снимок", "instructions": "1. Найди встречу в календаре. 2. Собери задачи и документы по теме. 3. Составь повестку. 4. Проверь, что каждый пункт повестки опирается на данные LifeOS. 5. Назови проверенное пользователю.", "expected_effect": "проверяемый результат"}`)); err == nil {
+		t.Fatalf("propose_skill_change with a stale expected_version must fail")
 	}
 	// Rate + analyze through tools.
 	if _, err := registry.Execute(ctx, "rate_skill", json.RawMessage(fmt.Sprintf(`{"skill_id": %d, "rating": "bad", "comment": "пропустил проверку"}`, id))); err != nil {

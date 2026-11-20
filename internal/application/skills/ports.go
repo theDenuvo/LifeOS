@@ -75,7 +75,13 @@ type ProposalInput struct {
 	// describes the text the proposal text derives from, never a later
 	// manual edit. Nil means CreateProposal reads the current text.
 	BaseWorkingHash *string
-	ConversationID  *int64
+	// BaseVersion is the content version the proposal text was built
+	// from (skill proposals). The analysis and the tools hand it
+	// through so the stored base always describes the snapshot the
+	// proposal derives from, never a later manual edit. Nil means
+	// CreateProposal reads the current version.
+	BaseVersion    *int
+	ConversationID *int64
 }
 
 // Repository is the persistence boundary of the skill aggregate, its
@@ -172,4 +178,8 @@ type Finding struct {
 	// only). It travels with the finding so CreateProposal stores the
 	// hash of the very text the proposal builds on.
 	BaseWorkingHash *string
+	// BaseVersion is the content version of the snapshot this finding
+	// was derived from (skill findings). It travels with the finding so
+	// CreateProposal stores the version the proposal builds on.
+	BaseVersion *int
 }

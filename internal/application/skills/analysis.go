@@ -98,7 +98,7 @@ func (s *Service) analyzeSkill(ctx context.Context, skill *domainskill.Skill) ([
 			proposed.Limitations = strings.TrimSpace(current.Limitations) + " Не додумывай недостающие данные: уточни у пользователя."
 		}
 		findings = append(findings, Finding{
-			SkillID: &skill.ID, SkillName: skill.Name, Kind: domainskill.ProposalSkillVersion,
+			SkillID: &skill.ID, SkillName: skill.Name, Kind: domainskill.ProposalSkillVersion, BaseVersion: &skill.CurrentVersion,
 			Problem:        fmt.Sprintf("пользователь %d раз отметил, что навык «%s» сработал плохо", len(bad), skill.Name),
 			Evidence:       evidence,
 			Proposed:       proposed,
@@ -115,7 +115,7 @@ func (s *Service) analyzeSkill(ctx context.Context, skill *domainskill.Skill) ([
 			proposed.Instructions = strings.TrimSpace(current.Instructions) + "\n\n## Проверка результата\n- В конце проверь результат по данным LifeOS и назови его пользователю одним предложением."
 		}
 		findings = append(findings, Finding{
-			SkillID: &skill.ID, SkillName: skill.Name, Kind: domainskill.ProposalSkillVersion,
+			SkillID: &skill.ID, SkillName: skill.Name, Kind: domainskill.ProposalSkillVersion, BaseVersion: &skill.CurrentVersion,
 			Problem:        fmt.Sprintf("навык «%s» применялся %d раз, но пользователь ни разу не оценил результат — проверять нечего", skill.Name, skill.UseCount),
 			Evidence:       []string{fmt.Sprintf("применений: %d, оценок: 0", skill.UseCount)},
 			Proposed:       proposed,
@@ -130,7 +130,7 @@ func (s *Service) analyzeSkill(ctx context.Context, skill *domainskill.Skill) ([
 		proposed := current
 		proposed.WhenToUse = strings.TrimSpace(current.WhenToUse) + " Уточнение: применяй только когда поручение явно относится к этой задаче; в остальных случаях навык не нужен."
 		findings = append(findings, Finding{
-			SkillID: &skill.ID, SkillName: skill.Name, Kind: domainskill.ProposalSkillVersion,
+			SkillID: &skill.ID, SkillName: skill.Name, Kind: domainskill.ProposalSkillVersion, BaseVersion: &skill.CurrentVersion,
 			Problem:        fmt.Sprintf("активный навык «%s» ни разу не применялся за всё время — условия применения, видимо, не находят поручений", skill.Name),
 			Evidence:       []string{"применений: 0"},
 			Proposed:       proposed,
@@ -151,7 +151,7 @@ func (s *Service) analyzeSkill(ctx context.Context, skill *domainskill.Skill) ([
 			proposed.Limitations = limitations + "Границы навыка: навык описывает только этот класс задач и не распространяется на соседние."
 		}
 		findings = append(findings, Finding{
-			SkillID: &skill.ID, SkillName: skill.Name, Kind: domainskill.ProposalSkillVersion,
+			SkillID: &skill.ID, SkillName: skill.Name, Kind: domainskill.ProposalSkillVersion, BaseVersion: &skill.CurrentVersion,
 			Problem:        fmt.Sprintf("инструкция навыка «%s» менялась %d раз — границы навыка не зафиксированы", skill.Name, len(versions)),
 			Evidence:       []string{fmt.Sprintf("версий: %d", len(versions))},
 			Proposed:       proposed,
@@ -231,8 +231,8 @@ func (s *Service) ProposeImprovements(ctx context.Context, skillID int64, conver
 			SkillID: finding.SkillID, Kind: finding.Kind, Problem: finding.Problem,
 			Evidence: finding.Evidence, Proposed: finding.Proposed,
 			ExpectedEffect: finding.ExpectedEffect, TestScenarios: finding.TestScenarios,
-			BaseWorkingHash: finding.BaseWorkingHash,
-			ConversationID:  conversationID,
+			BaseWorkingHash: finding.BaseWorkingHash, BaseVersion: finding.BaseVersion,
+			ConversationID: conversationID,
 		})
 		if err != nil {
 			// A finding that no longer validates (for example, the skill

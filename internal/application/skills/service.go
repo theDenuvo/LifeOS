@@ -420,8 +420,15 @@ func (s *Service) CreateProposal(ctx context.Context, input ProposalInput) (*dom
 		if err != nil {
 			return nil, err
 		}
-		v := current.CurrentVersion
-		baseVersion = &v
+		if input.BaseVersion != nil {
+			// The caller derived the proposal from a known snapshot
+			// and hands us its version: store exactly that, never
+			// a re-read of the skill as it stands now.
+			baseVersion = input.BaseVersion
+		} else {
+			v := current.CurrentVersion
+			baseVersion = &v
+		}
 	} else if input.Kind == domainskill.ProposalWorkingInstructions {
 		if input.BaseWorkingHash != nil {
 			// The analysis derived this proposal from a known text

@@ -179,32 +179,34 @@ func RegisterSkillTools(registry *Registry, service *skillService) {
 	registry.Register(Tool{
 		Spec: assistantSpec("propose_skill_change", "Предложить изменение активного навыка: новая версия с объяснением проблемы, примерами, ожидаемым эффектом. Предложение не меняет навык, пока пользователь его не применит в библиотеке.",
 			objectSchema(map[string]any{
-				"skill_id":        integerProp("ID навыка"),
-				"problem":         stringProp("Какая проблема найдена"),
-				"evidence":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Примеры и основания"},
-				"instructions":    stringProp("Новая инструкция целиком"),
-				"purpose":         stringProp("Новое назначение (необязательно)"),
-				"when_to_use":     stringProp("Новые условия применения (необязательно)"),
-				"limitations":     stringProp("Новые ограничения (необязательно)"),
-				"examples":        stringProp("Новые примеры (необязательно)"),
-				"tags":            map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-				"expected_effect": stringProp("Ожидаемый эффект изменения"),
-				"test_scenarios":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Запросы, на которых проверяется новый вариант"},
-			}, "skill_id", "problem", "instructions", "expected_effect")),
+				"skill_id":         integerProp("ID навыка"),
+				"expected_version": integerProp("Версия навыка из get_skill: версия, на основе которой строится предложение"),
+				"problem":          stringProp("Какая проблема найдена"),
+				"evidence":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Примеры и основания"},
+				"instructions":     stringProp("Новая инструкция целиком"),
+				"purpose":          stringProp("Новое назначение (необязательно)"),
+				"when_to_use":      stringProp("Новые условия применения (необязательно)"),
+				"limitations":      stringProp("Новые ограничения (необязательно)"),
+				"examples":         stringProp("Новые примеры (необязательно)"),
+				"tags":             map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"expected_effect":  stringProp("Ожидаемый эффект изменения"),
+				"test_scenarios":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Запросы, на которых проверяется новый вариант"},
+			}, "skill_id", "expected_version", "problem", "instructions", "expected_effect")),
 		Direct: true,
 		Execute: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			var args struct {
-				SkillID        int64    `json:"skill_id"`
-				Problem        string   `json:"problem"`
-				Evidence       []string `json:"evidence"`
-				Instructions   string   `json:"instructions"`
-				Purpose        string   `json:"purpose"`
-				WhenToUse      string   `json:"when_to_use"`
-				Limitations    string   `json:"limitations"`
-				Examples       string   `json:"examples"`
-				Tags           []string `json:"tags"`
-				ExpectedEffect string   `json:"expected_effect"`
-				TestScenarios  []string `json:"test_scenarios"`
+				SkillID         int64    `json:"skill_id"`
+				ExpectedVersion int      `json:"expected_version"`
+				Problem         string   `json:"problem"`
+				Evidence        []string `json:"evidence"`
+				Instructions    string   `json:"instructions"`
+				Purpose         string   `json:"purpose"`
+				WhenToUse       string   `json:"when_to_use"`
+				Limitations     string   `json:"limitations"`
+				Examples        string   `json:"examples"`
+				Tags            []string `json:"tags"`
+				ExpectedEffect  string   `json:"expected_effect"`
+				TestScenarios   []string `json:"test_scenarios"`
 			}
 			if err := decodeArgs(raw, &args); err != nil {
 				return nil, err
@@ -212,6 +214,13 @@ func RegisterSkillTools(registry *Registry, service *skillService) {
 			view, err := service.Get(ctx, args.SkillID)
 			if err != nil {
 				return nil, skillToolError(err)
+			}
+			// The model built the proposal from the snapshot it saw
+			// in get_skill. A changed skill is refused instead of
+			// re-basing the proposal onto the new version: the user
+			// must confirm a proposal derived from the text they saw.
+			if view.Skill.CurrentVersion != args.ExpectedVersion {
+				return nil, fmt.Errorf("навык «%s» изменился с версии %d на %d: прочитайте его заново (get_skill) и подготовьте предложение снова", view.Skill.Name, args.ExpectedVersion, view.Skill.CurrentVersion)
 			}
 			proposed := view.Skill.Content()
 			proposed.Instructions = args.Instructions
@@ -234,11 +243,12 @@ func RegisterSkillTools(registry *Registry, service *skillService) {
 			if conv := appassistant.ToolContextFrom(ctx); conv.ConversationID > 0 {
 				conversationID = &conv.ConversationID
 			}
+			baseVersion := args.ExpectedVersion
 			proposal, err := service.CreateProposal(ctx, appskills.ProposalInput{
 				SkillID: &args.SkillID, Kind: domainskill.ProposalSkillVersion,
 				Problem: args.Problem, Evidence: args.Evidence, Proposed: proposed,
 				ExpectedEffect: args.ExpectedEffect, TestScenarios: args.TestScenarios,
-				ConversationID: conversationID,
+				BaseVersion: &baseVersion, ConversationID: conversationID,
 			})
 			if err != nil {
 				return nil, skillToolError(err)

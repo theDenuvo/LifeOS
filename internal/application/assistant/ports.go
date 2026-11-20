@@ -125,6 +125,15 @@ type RetryObserverProvider interface {
 	WithRetryObserver(observer func(ProviderRetry)) Provider
 }
 
+// SkillsProvider renders the skill library for one turn: the catalogue of
+// active skills plus the full instructions of only the skills selected
+// for the current query. Selection is query-aware, so it cannot be part
+// of the query-independent snapshot; the assistant calls it with the
+// user's own text and journals each injection as used.
+type SkillsProvider interface {
+	SkillsSnapshot(ctx context.Context, query string, conversationID int64) (string, error)
+}
+
 // Provider is the LLM boundary. Implementations live in internal/agent.
 type Provider interface {
 	Complete(ctx context.Context, messages []ChatMessage, tools []ToolSpec) (Completion, error)

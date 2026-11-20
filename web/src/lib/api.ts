@@ -1586,3 +1586,168 @@ export function deleteResearchWatch(id: number): Promise<void> {
 export function checkResearchWatch(id: number): Promise<ResearchWatchCheck> {
 	return request<ResearchWatchCheck>(`/api/v1/research/watches/${id}/check`, { method: 'POST' });
 }
+
+// ─── Навыки и самоулучшение ───────────────────────────────────────────────
+
+export type SkillStatus = 'draft' | 'active' | 'disabled' | 'archived';
+export type SkillProposalKind = 'skill_version' | 'skill_create' | 'working_instructions';
+export type SkillProposalStatus = 'proposed' | 'applied' | 'rejected';
+
+export interface SkillContent {
+	name: string;
+	purpose: string;
+	when_to_use: string;
+	instructions: string;
+	limitations: string;
+	examples: string;
+	tags: string[];
+}
+
+export interface SkillVersion {
+	version_no: number;
+	name: string;
+	purpose: string;
+	when_to_use: string;
+	change_note: string;
+	created_by: string;
+	created_at: string;
+}
+
+export interface SkillProposal {
+	id: number;
+	skill_id?: number | null;
+	kind: SkillProposalKind;
+	status: SkillProposalStatus;
+	problem: string;
+	evidence: string[];
+	proposed: SkillContent;
+	expected_effect: string;
+	test_scenarios: string[];
+	test_result: string;
+	base_version?: number | null;
+	result_skill_id?: number | null;
+	diff?: string[];
+	created_at: string;
+	resolved_at?: string | null;
+	version: number;
+}
+
+export interface Skill {
+	id: number;
+	name: string;
+	purpose: string;
+	when_to_use: string;
+	instructions: string;
+	limitations: string;
+	examples: string;
+	tags: string[];
+	status: SkillStatus;
+	current_version: number;
+	source: string;
+	created_by_assistant: boolean;
+	use_count: number;
+	good_count: number;
+	bad_count: number;
+	bad_ratio: number;
+	last_used_at?: string | null;
+	created_at: string;
+	updated_at: string;
+	version: number;
+	versions?: SkillVersion[];
+	proposals?: SkillProposal[];
+	feedback?: { id: number; version_no: number; rating: 'good' | 'bad'; comment: string; created_at: string }[];
+	usages?: { id: number; version_no: number; context: string; matched: string[]; created_at: string }[];
+}
+
+export interface SkillList {
+	data: Skill[];
+	meta: { limit: number; offset: number; total: number };
+}
+
+export interface SkillFinding {
+	skill_id?: number | null;
+	skill_name: string;
+	kind: SkillProposalKind;
+	problem: string;
+	evidence: string[];
+	expected_effect: string;
+	test_result: string;
+	test_scenarios: string[];
+}
+
+export function listSkills(query: { status?: SkillStatus; q?: string; limit?: number; offset?: number } = {}): Promise<SkillList> {
+	const params = new URLSearchParams();
+	if (query.status) params.set('status', query.status);
+	if (query.q) params.set('q', query.q);
+	if (query.limit !== undefined) params.set('limit', String(query.limit));
+	if (query.offset !== undefined) params.set('offset', String(query.offset));
+	const suffix = params.toString();
+	return request<SkillList>(`/api/v1/skills${suffix ? `?${suffix}` : ''}`);
+}
+
+export function getSkill(id: number): Promise<Skill> {
+	return request<Skill>(`/api/v1/skills/${id}`);
+}
+
+export function createSkill(input: SkillContent): Promise<Skill> {
+	return request<Skill>('/api/v1/skills', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export function updateSkill(id: number, input: Partial<SkillContent> & { change_note?: string }, version: number): Promise<Skill> {
+	return request<Skill>(`/api/v1/skills/${id}`, {
+		method: 'PATCH',
+		headers: { 'If-Match': `"${version}"` },
+		body: JSON.stringify(input)
+	});
+}
+
+export function deleteSkill(id: number): Promise<void> {
+	return request<void>(`/api/v1/skills/${id}`, { method: 'DELETE' });
+}
+
+export function changeSkillStatus(id: number, status: SkillStatus): Promise<Skill> {
+	return request<Skill>(`/api/v1/skills/${id}/status`, { method: 'POST', body: JSON.stringify({ status }) });
+}
+
+export function rollbackSkill(id: number, versionNo: number): Promise<Skill> {
+	return request<Skill>(`/api/v1/skills/${id}/versions/${versionNo}/rollback`, { method: 'POST', body: JSON.stringify({}) });
+}
+
+export function rateSkill(id: number, rating: 'good' | 'bad', comment: string): Promise<unknown> {
+	return request<unknown>(`/api/v1/skills/${id}/feedback`, { method: 'POST', body: JSON.stringify({ rating, comment }) });
+}
+
+export function analyzeSkills(skillId?: number): Promise<{ findings: SkillFinding[]; total: number }> {
+	return request('/api/v1/skills/analyze', { method: 'POST', body: JSON.stringify({ skill_id: skillId ?? 0 }) });
+}
+
+export function proposeSkillImprovements(skillId?: number): Promise<{ proposals: SkillProposal[]; total: number }> {
+	return request('/api/v1/skills/propose', { method: 'POST', body: JSON.stringify({ skill_id: skillId ?? 0 }) });
+}
+
+export function listSkillProposals(query: { skill_id?: number; status?: SkillProposalStatus } = {}): Promise<{ data: SkillProposal[]; total: number }> {
+	const params = new URLSearchParams();
+	if (query.skill_id !== undefined) params.set('skill_id', String(query.skill_id));
+	if (query.status) params.set('status', query.status);
+	const suffix = params.toString();
+	return request(`/api/v1/skills/proposals${suffix ? `?${suffix}` : ''}`);
+}
+
+export function applySkillProposal(id: number): Promise<SkillProposal> {
+	return request<SkillProposal>(`/api/v1/skills/proposals/${id}/apply`, { method: 'POST' });
+}
+
+export function rejectSkillProposal(id: number): Promise<SkillProposal> {
+	return request<SkillProposal>(`/api/v1/skills/proposals/${id}/reject`, { method: 'POST' });
+}
+
+export function getWorkingInstructions(): Promise<{ instructions: string }> {
+	return request<{ instructions: string }>('/api/v1/skills/working-instructions');
+}
+
+export function putWorkingInstructions(instructions: string): Promise<{ instructions: string }> {
+	return request<{ instructions: string }>('/api/v1/skills/working-instructions', {
+		method: 'PUT',
+		body: JSON.stringify({ instructions })
+	});
+}

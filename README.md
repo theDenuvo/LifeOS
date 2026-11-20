@@ -92,6 +92,13 @@ LifeOS — персональная операционная система дл
   (self-hosted SearxNG) включается настройкой `LIFEOS_ALLOW_LOCAL_SEARCH`. Инструменты MCP без изменения данных
   открываются пользователю поимённо: пометка сервера «только чтение» — его
   заявление, а не гарантия.
+- **Навыки и самоулучшение**: библиотека версионированных инструкций в разделе
+  «Навыки». К каждому обращению ассистенту подбираются только релевантные
+  навыки (детерминированно, без вызова модели); созданные ассистентом навыки
+  появляются черновиком и активируются решением пользователя. По прямому
+  запросу ассистент анализирует свою работу и готовит предложения с diff и
+  тестовыми сценариями — применение создаёт новую версию, откат доступен,
+  а инструкции, выдающие новые разрешения, отклоняются.
 - **MCP**: tools-only сервер поверх Streamable HTTP; по умолчанию read-only.
 - **Настройки и поиск**: JSON key-value настройки, общий поиск по задачам и
   входящим.
@@ -113,7 +120,7 @@ Transport (HTTP, SSE, MCP) → Application → Domain
   PendingAction, MemoryEntry; без внешних зависимостей.
 - `internal/application` — use cases: tasks, inbox, summary, assistant,
   proactive, planning, documents, completion, memory, search, settings, goals,
-  automation, research.
+  automation, research, skills.
 - `internal/infrastructure/sqlite` — репозитории, Unit of Work, миграции.
 - `internal/transport` — REST/SSE, MCP-адаптер.
 - `internal/agent` — OpenAI-совместимый провайдер и реестр инструментов.

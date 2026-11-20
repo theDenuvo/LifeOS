@@ -45,6 +45,7 @@ type Service struct {
 	documents    DocumentTextProvider
 	workdir      string
 	learner      MemoryLearner
+	skills       SkillsProvider
 }
 
 // Clock supplies the current instant.
@@ -107,6 +108,14 @@ func WithDocumentTextProvider(provider DocumentTextProvider) Option {
 // never fails the turn.
 type MemoryLearner interface {
 	LearnConversation(ctx context.Context, conversationID, messageID int64, text string) (int, error)
+}
+
+// WithSkillsProvider attaches the skill library: catalogue plus the
+// relevant instructions for the current query.
+func WithSkillsProvider(provider SkillsProvider) Option {
+	return func(s *Service) {
+		s.skills = provider
+	}
 }
 
 // WithMemoryLearner attaches autonomous memory maintenance.
@@ -261,6 +270,17 @@ func (s *Service) SendMessageWithInteraction(ctx context.Context, conversationID
 			contextUnavailable = true
 		} else {
 			snapshot = value
+		}
+	}
+	// Skills are selected against the user's own text, so they join the
+	// snapshot here rather than inside the query-independent context.
+	// A skills failure must not fail the turn: the catalogue is a hint.
+	if s.skills != nil {
+		if value, err := s.skills.SkillsSnapshot(ctx, content, conversationID); err == nil && strings.TrimSpace(value) != "" {
+			if snapshot != "" {
+				snapshot += "\n\n"
+			}
+			snapshot += value
 		}
 	}
 
@@ -689,7 +709,8 @@ func (s *Service) systemPrompt(now time.Time, snapshot string, contextUnavailabl
 		"- Существующие встречи и блоки, которые поставил пользователь, не двигай. Меняй только автоматически запланированные блоки.\n" +
 		"- Повторяющиеся дела создавай через create_task с полем repeat. Не создавай копии на каждую дату вручную.\n" +
 		"- Если пользователь говорит «запиши, разберусь позже» — сохраняй через capture и не задавай больше вопросов. Идея, заметка или цель не становятся задачей без прямой просьбы.\n" +
-		"- Отмечай задачу выполненной, только когда результат виден по данным или по словам пользователя. Если уверенности нет, спроси.\n"
+		"- Отмечай задачу выполненной, только когда результат виден по данным или по словам пользователя. Если уверенности нет, спроси.\n" +
+		"- Навыки: библиотека навыков — проверенные способы решения классов задач. Каталог активных навыков приходит в текущем состоянии; полные инструкции подходящего навыка уже подключены автоматически. Если пользователь прямо просит применить, не применять или изменить конкретный навык — выполни его просьбу: для применения вызови get_skill, для изменения — propose_skill_change, для отказа не вызывай get_skill и не опирайся на этот навык. Новый навык создавай инструментом create_skill только по просьбе пользователя: он появится черновиком и не будет применяться, пока пользователь его не активирует. Улучшения своей работы предлагай только по прямому запросу пользователя инструментом propose_skill_improvements и никогда не меняй активную инструкцию без применения предложения пользователем. Оценку навыка (сработал хорошо/плохо) записывай инструментом rate_skill.\n"
 	if autoConfirm {
 		prompt += "\nАвтоподтверждение включено: изменяющие инструменты применяются сразу после вызова. " +
 			"Не спрашивай разрешение, не предлагай план вместо действия и не жди согласия.\n"

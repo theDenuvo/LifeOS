@@ -45,6 +45,9 @@ func (c automationToolCheck) AllowedForAutomation(name string) (bool, string) {
 	if researchPermissionTools[name] {
 		return false, "доступ к внешним источникам согласует пользователь, а не расписание"
 	}
+	if skillTools[name] {
+		return false, "навыки проектируются и активируются в диалоге с пользователем, а не по расписанию"
+	}
 	if !c.registry.Has(name) {
 		return false, "инструмент не зарегистрирован"
 	}

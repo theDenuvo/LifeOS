@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -34,6 +35,7 @@ import (
 	appresearch "github.com/theDenuvo/LifeOS/internal/application/research"
 	"github.com/theDenuvo/LifeOS/internal/application/search"
 	"github.com/theDenuvo/LifeOS/internal/application/settings"
+	appskills "github.com/theDenuvo/LifeOS/internal/application/skills"
 	"github.com/theDenuvo/LifeOS/internal/application/summary"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	"github.com/theDenuvo/LifeOS/internal/config"
@@ -330,6 +332,18 @@ func main() {
 		tools.WithWorkspaceHub(workspaceHub),
 		tools.WithTimezone(cfg.Timezone),
 	)
+	// Roadmap stage 8: skills and assistant self-improvement. The library
+	// is built before the assistant so the assistant can select relevant
+	// skills against the user's text; its tools attach to the same
+	// registry as the other meta tools. Working instructions live in the
+	// settings store, so a proposal that changes them is applied through
+	// the user's own settings, not a hidden copy.
+	skillsService := appskills.NewService(
+		sqlite.NewSkillUnitOfWork(db),
+		clock,
+		appskills.WithPublisher(broker),
+		appskills.WithWorkingInstructions(workingInstructionsStore{settings: settingsService}),
+	)
 	contextProvider := assistant.NewLifeOSContext(
 		summaryService,
 		proactiveService,
@@ -350,6 +364,7 @@ func main() {
 		assistant.WithContextProvider(contextProvider),
 		assistant.WithDocumentTextProvider(documentTextProvider{service: documentService}),
 		assistant.WithMemoryLearner(memoryService),
+		assistant.WithSkillsProvider(skillsService),
 		assistant.WithWorkingDirectory(workingDirectory()),
 	)
 	workspaceHub.Bind(assistantService)
@@ -377,6 +392,10 @@ func main() {
 	// exists. The service was built earlier, so the proactive detector already
 	// references it.
 	tools.RegisterResearchTools(registry, researchService)
+
+	// Roadmap stage 8: the skill tools attach once the service exists;
+	// the assistant already references the service for selection.
+	tools.RegisterSkillTools(registry, skillsService)
 
 	// Roadmap stage 5: the initiative engine. It writes into the main chat on
 	// LifeOS's own behalf, so it is built after the assistant storage exists.
@@ -423,6 +442,7 @@ func main() {
 		Goals:       goalsService,
 		Automations: automationService,
 		Research:    researchService,
+		Skills:      skillsService,
 		Models:      modelCatalog,
 		Tools:       registry,
 		Broker:      broker,
@@ -761,6 +781,38 @@ func (p documentTextProvider) DocumentText(ctx context.Context, id int64) (assis
 		Filename: view.Document.Filename,
 		Text:     *view.Document.ExtractedText,
 	}, nil
+}
+
+// workingInstructionsStore persists the assistant's working instructions
+// in the settings store under assistant.working_instructions, so the
+// library and the settings page show the same text.
+type workingInstructionsStore struct {
+	settings *settings.Service
+}
+
+const workingInstructionsKey = "assistant.working_instructions"
+
+func (w workingInstructionsStore) GetWorkingInstructions(ctx context.Context) (string, error) {
+	raw, err := w.settings.Get(ctx, workingInstructionsKey)
+	if err != nil {
+		if errors.Is(err, settings.ErrNotFound) {
+			return "", nil
+		}
+		return "", err
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		return "", err
+	}
+	return text, nil
+}
+
+func (w workingInstructionsStore) SetWorkingInstructions(ctx context.Context, text string) error {
+	raw, err := json.Marshal(text)
+	if err != nil {
+		return err
+	}
+	return w.settings.Put(ctx, workingInstructionsKey, raw)
 }
 
 // workingDirectory is the base for relative paths in the file tools.

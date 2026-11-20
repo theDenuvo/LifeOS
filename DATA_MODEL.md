@@ -672,6 +672,40 @@ Application (сначала пауза).
 является внешним ключом: журнал переживает удаление источника и продолжает
 объяснять, что с ним делали.
 
+### 17. Skill (Навык и самоулучшение)
+
+`skills`: `id`, `name`, `name_lower` (UNIQUE, регистронезависимая уникальность),
+`purpose`, `when_to_use`, `instructions`, `limitations`, `examples`, `tags`
+(JSON-массив), `status` (`draft`, `active`, `disabled`, `archived` — CHECK),
+`current_version`, `version` (optimistic locking, пишется Application),
+`created_by_assistant` (INTEGER 0/1), `use_count`, `good_count`, `bad_count`
+(сводные счётчики, их поддерживает репозиторий), `last_used_at`,
+`created_at`, `updated_at`. Индекс по `status`.
+
+`skill_versions`: `id`, `skill_id` (FK → `skills`, CASCADE), `version_no`,
+`name`, `purpose`, `when_to_use`, `instructions`, `limitations`, `examples`,
+`tags`, `change_note`, `created_by` (`user`/`assistant`) , `created_at`.
+Уникальность `(skill_id, version_no)`. Создание навыка и первая версия —
+одна транзакция; правка и откат добавляют запись.
+
+`skill_proposals`: `id`, `skill_id` (FK, NULL для рабочих инструкций —
+частичный индекс `skill_id IS NULL`), `kind` (`skill`/`working_instructions`),
+`title`, `problem`, `evidence` (JSON-массив), `proposed_instructions`,
+`diff` (JSON-массив строк), `expected_effect`, `test_result`, `base_version`,
+`base_working_hash` (отпечаток SHA-256 исходного текста рабочих инструкций для предложений этого вида; передаётся из анализа, а не перечитывается при создании предложения — иначе гонка A/B),
+`status` (`proposed`/`applied`/`rejected` — CHECK), `created_at`,
+`resolved_at`, `resolved_by`.
+
+`skill_feedback`: `id`, `skill_id` (FK, CASCADE), `rating` (`good`/`bad` —
+CHECK), `comment`, `conversation_id`, `created_at`.
+
+`skill_usages`: `id`, `skill_id` (FK, CASCADE), `conversation_id`,
+`query_excerpt` (≤300 символов), `source` (`query`/`tool` — CHECK),
+`applied_at`. Журнал переживает архивирование навыка.
+
+Миграция 030 создаёт все пять таблиц и индексы; переход `archived → draft`
+проверяется доменом, удаление — только черновика/архива.
+
 ## Работа с датами и часовыми поясами
 
 ### Правила (критично)
@@ -783,6 +817,7 @@ Automation 1 ──< AutomationRun
 | 027 | Исследования: `research_reports`, `research_connections`, `research_watches`, `research_calls`; перестройка `memory_sources` ради вида источника `web` |
 | 028 | Журнал внешних обращений: колонка `method` и исходы `started`/`unknown` (перестройка таблицы ради нового CHECK), индекс по `outcome` |
 | 029 | `research_connections.allowed_tools`: инструменты MCP, разрешённые пользователем для чтения |
+| 030 | Навыки: `skills` (CHECK статусов, UNIQUE `name_lower`), `skill_versions`, `skill_proposals`, `skill_feedback`, `skill_usages` с каскадным удалением |
 
 ### Идентификаторы событий
 

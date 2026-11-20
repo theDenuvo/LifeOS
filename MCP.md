@@ -20,6 +20,13 @@ LIFEOS_MCP_ALLOW_WRITES=false
 `remember`, `save_knowledge`, `update_memory`, `forget_memory`,
 `link_memory`) включаются только при `LIFEOS_MCP_ALLOW_WRITES=true`.
 
+Инструменты навыков, помеченные как чтение (`list_skills`, `get_skill`,
+`analyze_skill_use`), доступны в read-only режиме автоматически; изменяющие
+(`create_skill`, `propose_skill_change`, `propose_skill_improvements`,
+`activate_skill`, `disable_skill`, `archive_skill`, `rollback_skill`,
+`rate_skill`) включаются только при `LIFEOS_MCP_ALLOW_WRITES=true`. Автоматизации
+инструменты навыков не получают.
+
 MCP-клиент не имеет интерфейса подтверждения, поэтому включение записи — явное
 решение оператора. Встроенный ассистент всегда использует подтверждаемые
 `pending_action`.

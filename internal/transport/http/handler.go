@@ -29,6 +29,7 @@ import (
 	appresearch "github.com/theDenuvo/LifeOS/internal/application/research"
 	"github.com/theDenuvo/LifeOS/internal/application/search"
 	"github.com/theDenuvo/LifeOS/internal/application/settings"
+	appskills "github.com/theDenuvo/LifeOS/internal/application/skills"
 	"github.com/theDenuvo/LifeOS/internal/application/summary"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	"github.com/theDenuvo/LifeOS/internal/config"
@@ -57,6 +58,7 @@ type Services struct {
 	Goals       *goals.Service
 	Automations *automation.Service
 	Research    *appresearch.Service
+	Skills      *appskills.Service
 	Models      *agent.ModelCatalog
 	Tools       *tools.Registry
 	Broker      *events.Broker
@@ -213,6 +215,23 @@ func (h *Handler) apiRoutes() http.Handler {
 	mux.HandleFunc("PATCH /research/watches/{id}", h.patchResearchWatch)
 	mux.HandleFunc("DELETE /research/watches/{id}", h.deleteResearchWatch)
 	mux.HandleFunc("POST /research/watches/{id}/check", h.checkResearchWatch)
+	mux.HandleFunc("GET /skills", h.listSkills)
+	mux.HandleFunc("POST /skills", h.createSkill)
+	mux.HandleFunc("GET /skills/{id}", h.getSkill)
+	mux.HandleFunc("PATCH /skills/{id}", h.patchSkill)
+	mux.HandleFunc("DELETE /skills/{id}", h.deleteSkill)
+	mux.HandleFunc("POST /skills/{id}/status", h.changeSkillStatus)
+	mux.HandleFunc("POST /skills/{id}/versions/{version}/rollback", h.rollbackSkill)
+	mux.HandleFunc("GET /skills/{id}/versions", h.listSkillVersions)
+	mux.HandleFunc("POST /skills/{id}/feedback", h.rateSkill)
+	mux.HandleFunc("POST /skills/analyze", h.analyzeSkills)
+	mux.HandleFunc("POST /skills/propose", h.proposeSkillImprovements)
+	mux.HandleFunc("GET /skills/proposals", h.listSkillProposals)
+	mux.HandleFunc("POST /skills/proposals", h.createSkillProposal)
+	mux.HandleFunc("POST /skills/proposals/{proposalId}/apply", h.decideSkillProposal)
+	mux.HandleFunc("POST /skills/proposals/{proposalId}/reject", h.decideSkillProposal)
+	mux.HandleFunc("GET /skills/working-instructions", h.getWorkingInstructions)
+	mux.HandleFunc("PUT /skills/working-instructions", h.putWorkingInstructions)
 	mux.HandleFunc("GET /settings", h.listSettings)
 	mux.HandleFunc("GET /settings/{key}", h.getSetting)
 	mux.HandleFunc("PUT /settings/{key}", h.putSetting)

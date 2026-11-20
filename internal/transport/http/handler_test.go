@@ -1,6 +1,7 @@
 package httptransport
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"github.com/theDenuvo/LifeOS/internal/application/profile"
 	"github.com/theDenuvo/LifeOS/internal/application/research"
 	"github.com/theDenuvo/LifeOS/internal/application/settings"
+	appskills "github.com/theDenuvo/LifeOS/internal/application/skills"
 	"github.com/theDenuvo/LifeOS/internal/application/summary"
 	"github.com/theDenuvo/LifeOS/internal/application/tasks"
 	"github.com/theDenuvo/LifeOS/internal/config"
@@ -93,7 +95,9 @@ func setupTestHandlerWithProvider(t *testing.T, provider assistant.Provider) (*H
 		research.WithExternal(newHTTPTestWeb()), research.WithPublisher(broker),
 	)
 	tools.RegisterResearchTools(registry, researchService)
-	assistantService := assistant.NewService(sqlite.NewAssistantUnitOfWork(db), provider, registry, clock)
+	skillsService := appskills.NewService(sqlite.NewSkillUnitOfWork(db), clock, appskills.WithPublisher(broker), appskills.WithWorkingInstructions(&testWorkingInstructions{}))
+	tools.RegisterSkillTools(registry, skillsService)
+	assistantService := assistant.NewService(sqlite.NewAssistantUnitOfWork(db), provider, registry, clock, assistant.WithSkillsProvider(skillsService))
 	handler := NewHandler(db, cfg, testEmbedFS, Services{
 		Tasks:       taskService,
 		Inbox:       inboxService,
@@ -107,6 +111,7 @@ func setupTestHandlerWithProvider(t *testing.T, provider assistant.Provider) (*H
 		Goals:       goalsService,
 		Automations: automationService,
 		Research:    researchService,
+		Skills:      skillsService,
 		Broker:      broker,
 		Version:     "test",
 	})
@@ -474,4 +479,14 @@ func TestHandlerServeFrontendWithRealEmbedFS(t *testing.T) {
 	handler.Routes().ServeHTTP(w, req)
 	// Note: This might 404 if the test file doesn't exist in the real embed
 	// But we're testing the code path works
+}
+
+type testWorkingInstructions struct{ text string }
+
+func (t *testWorkingInstructions) GetWorkingInstructions(ctx context.Context) (string, error) {
+	return t.text, nil
+}
+func (t *testWorkingInstructions) SetWorkingInstructions(_ context.Context, text string) error {
+	t.text = text
+	return nil
 }

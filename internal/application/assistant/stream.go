@@ -119,6 +119,14 @@ func (s *Service) SendMessageStream(
 			snapshot = value
 		}
 	}
+	if s.skills != nil {
+		if value, err := s.skills.SkillsSnapshot(ctx, content, conversationID); err == nil && strings.TrimSpace(value) != "" {
+			if snapshot != "" {
+				snapshot += "\n\n"
+			}
+			snapshot += value
+		}
+	}
 	chat := s.buildChat(ctx, history, now, snapshot, contextUnavailable, sanitizeInteraction(interaction), autoConfirm, conversation)
 
 	pending := make([]*domainassistant.PendingAction, 0)

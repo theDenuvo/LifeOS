@@ -28,7 +28,8 @@
 		Layers,
 		Target,
 		Telescope,
-		Workflow
+		Workflow,
+		GraduationCap
 	} from 'lucide-svelte';
 
 	const nav = [
@@ -37,6 +38,7 @@
 		{ href: '/goals', label: 'Цели', icon: Target, chat: false },
 		{ href: '/automations', label: 'Автоматизации', icon: Workflow, chat: false },
 		{ href: '/research', label: 'Исследования', icon: Telescope, chat: false },
+		{ href: '/skills', label: 'Навыки', icon: GraduationCap, chat: false },
 		{ href: '/calendar', label: 'Календарь', icon: CalendarDays, chat: false },
 		{ href: '/memory', label: 'Память', icon: BookOpen, chat: false }
 	];
@@ -49,6 +51,7 @@
 		{ href: '/goals', label: 'Цели', icon: Target, chat: false },
 		{ href: '/automations', label: 'Автоматизации', icon: Workflow, chat: false },
 		{ href: '/research', label: 'Исследования', icon: Telescope, chat: false },
+		{ href: '/skills', label: 'Навыки', icon: GraduationCap, chat: false },
 		{ href: '/calendar', label: 'Календарь', icon: CalendarDays, chat: false },
 		{ href: '/memory', label: 'Память', icon: BookOpen, chat: false }
 	];

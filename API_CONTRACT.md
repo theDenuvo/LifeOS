@@ -1247,6 +1247,105 @@ POST   /api/v1/research/watches/{id}/check      # {"watch": {...}, "change": {"s
 `research.watch.changed`, `research.watch.checked` приходят через
 `GET /api/v1/events`.
 
+
+### 8.5 Навыки и самоулучшение ассистента
+
+Навык — версионированная инструкция: название (3–80 символов, уникальное
+регистронезависимо), назначение, условия применения, инструкции (50–20000
+символов), ограничения, примеры и теги. Жизненный цикл: `draft` → `active` ⇄
+`disabled`, из черновика/активного/отключённого — в `archived`, из архива только
+в `draft` (никогда сразу в активные). Удаление возможно только для черновика
+или архива. Каждая правка создаёт новую версию с `change_note`; возврат к
+версии создаёт ещё одну версию. Инструкции с фразами, выдающими новые
+разрешения или обходящими правила, отклоняются доменом с `400` при каждом
+создании и правке.
+
+К каждому ходу ассистента навыки подбираются на стороне сервера: только
+активные, релевантные тексту поручения (токены и основы слов, порог
+совпадения, максимум 3 навыка и 12000 символов инструкций). Снапшот запроса
+включает отобранные навыки и рабочие инструкции; отдаётся кусками, поэтому
+кэш запроса не ломается.
+
+#### Схема Skill
+
+```json
+{
+  "id": 1,
+  "name": "Подготовка к поездке",
+  "purpose": "Помогает собраться в поездку без суеты.",
+  "when_to_use": "Когда пользователь говорит о поездке, перелёте или командировке.",
+  "instructions": "1. Уточните даты и город. 2. Проверьте транспорт. 3. Соберите список вещей.",
+  "limitations": "Не бронируйте ничего без подтверждения.",
+  "examples": "Поездка в Казань в июне.",
+  "tags": ["поездка", "итоги"],
+  "status": "active",
+  "current_version": 3,
+  "version": 7,
+  "created_by_assistant": false,
+  "use_count": 12,
+  "good_count": 5,
+  "bad_count": 1,
+  "last_used_at": "2026-05-01T10:00:00Z"
+}
+```
+
+`version` — optimistic-lock счётчик ресурса (для `If-Match`);
+`current_version` — номер текущей версии текста. Подробно при чтении:
+`versions` (все версии с `change_note` и автором), `proposals` (все
+предложения по навыку), `feedback` (оценки), `usages` (журнал применений).
+
+#### Endpoints
+
+```
+GET    /api/v1/skills?status=&q=&limit=20&offset=0
+POST   /api/v1/skills                         # {"name","purpose","when_to_use","instructions","limitations","examples","tags","created_by_assistant"}
+GET    /api/v1/skills/{id}
+PATCH  /api/v1/skills/{id}                    # content + change_note, обязательный If-Match
+DELETE /api/v1/skills/{id}                    # только draft/archived
+POST   /api/v1/skills/{id}/status             # {"status"} → полный навык с версиями
+POST   /api/v1/skills/{id}/versions/{version}/rollback  # If-Match обязателен: версия, которую видел при подтверждении; устаревшая → 409
+POST   /api/v1/skills/{id}/rate               # {"rating": "good"|"bad", "comment", "conversation_id"}
+GET    /api/v1/skills/{id}/proposals?status=&limit=20
+GET    /api/v1/skills/proposals?status=&limit=20
+POST   /api/v1/skills/proposals/{id}/apply    # подтверждение пользователя, создаёт версию
+POST   /api/v1/skills/proposals/{id}/reject
+POST   /api/v1/skills/analyze                 # {"skill_id" optional} → findings
+POST   /api/v1/skills/propose                 # {"skill_id" optional} → proposals (без мутации)
+POST   /api/v1/skills/proposals                 # {"skill_id","kind",...,"base_version" optional} → предложение; переданная базовая версия сохраняется как есть
+GET    /api/v1/skills/working-instructions
+PUT    /api/v1/skills/working-instructions    # {"instructions"} ≤20000 символов
+```
+
+Ошибки: отсутствие навыка/предложения → `404`; неверный переход статуса,
+удаление активного навыка, устаревшая `version` → `409`; отсутствующий
+`If-Match` у `PATCH` → `428`; невалидное содержимое (фразы-нарушения границы,
+короткие поля) → `400`; применение предложения, чья базовая версия (для навыков) или исходный
+текст рабочих инструкций (отпечаток `base_working_hash`) уже не текущие, → `409`.
+
+`PATCH` без обновлённого значения в теле возвращает неизменённый ресурс с
+текущим `version` (идемпотентный повтор); `POST /status` с тем же статусом
+тоже возвращает ресурс без лишней записи.
+
+#### Самоулучшение
+
+`POST /analyze` возвращает выводы: плохие оценки, частые применения без
+обратной связи, активные навыки, не применяющиеся дольше 30 дней, частые правки
+(4+ версий), плюс вывод по рабочим инструкциям. `POST /propose` готовит
+предложения с `problem`, `evidence`, `diff` (строки вида `+`/`-`/` `),
+`expected_effect`, `test_result` и `base_version`. Предложение не меняет
+навык: применение — только `POST /proposals/{id}/apply`.
+
+Тестовые сценарии проверяются детерминированно: три записи (конкретная
+просьба, отрицание «не примени…», смена темы) гоняются через отбор навыков;
+результат сообщает, подобрался ли навык.
+
+#### События
+
+`skill.created`, `skill.updated`, `skill.deleted`, `skill.proposal.created`,
+`skill.proposal.resolved`, `skill.feedback`, `skill.instructions.updated`
+приходят через `GET /api/v1/events`. Фронтенд перезагружает библиотеку по
+событию.
+
 ### 9. Настройки
 
 #### Список настроек

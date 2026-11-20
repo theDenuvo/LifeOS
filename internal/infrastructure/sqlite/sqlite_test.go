@@ -38,8 +38,8 @@ func TestMigrationsApply(t *testing.T) {
 	if err != nil {
 		t.Fatalf("goose.GetDBVersion failed: %v", err)
 	}
-	if version != 29 {
-		t.Errorf("Expected version 29, got %d", version)
+	if version != 30 {
+		t.Errorf("Expected version 30, got %d", version)
 	}
 }
 
@@ -53,8 +53,8 @@ func TestMigrationsIdempotent(t *testing.T) {
 	}
 
 	version, _ := goose.GetDBVersion(db)
-	if version != 29 {
-		t.Errorf("Expected version 29 after re-apply, got %d", version)
+	if version != 30 {
+		t.Errorf("Expected version 30 after re-apply, got %d", version)
 	}
 }
 
@@ -64,7 +64,7 @@ func TestSchemaTablesExist(t *testing.T) {
 
 	expectedTables := []string{
 		"tasks", "inbox_items", "task_events", "conversations",
-		"messages", "pending_actions", "app_settings", "calendar_events", "documents", "document_tasks", "task_blocks", "task_reminders", "completion_checks", "event_sequence", "automations", "automation_runs", "goose_db_version",
+		"messages", "pending_actions", "app_settings", "calendar_events", "documents", "document_tasks", "task_blocks", "task_reminders", "completion_checks", "event_sequence", "automations", "automation_runs", "skills", "skill_versions", "skill_proposals", "skill_feedback", "skill_usages", "goose_db_version",
 	}
 
 	for _, table := range expectedTables {
@@ -342,8 +342,8 @@ func TestProductionMigrationPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("goose.GetDBVersion failed: %v", err)
 	}
-	if version != 29 {
-		t.Errorf("Expected version 29, got %d", version)
+	if version != 30 {
+		t.Errorf("Expected version 30, got %d", version)
 	}
 }
 

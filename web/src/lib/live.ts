@@ -144,6 +144,13 @@ const eventTypes = [
 	'automation.deleted',
 	'automation.run.started',
 	'automation.run.finished',
+	'skill.created',
+	'skill.updated',
+	'skill.deleted',
+	'skill.proposal.created',
+	'skill.proposal.resolved',
+	'skill.feedback',
+	'skill.instructions.updated',
 	// Sources and links change what an entry shows even though the entry
 	// itself is not edited, so they need the same refresh.
 	'memory.source.added',

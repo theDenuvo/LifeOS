@@ -41,6 +41,12 @@ func (h *Handler) streamEvents(w http.ResponseWriter, r *http.Request) {
 	if err := clearWriteDeadline(w); err != nil {
 		slog.Warn("events stream: write deadline is not cleared", "error", err)
 	}
+	// Subscribe before flushing the headers: the client returns from
+	// connect once it sees the 200, and an event published between that
+	// and a later Subscribe would reach neither the channel nor (without
+	// Last-Event-ID) the replay, and the stream would sit silent.
+	stream := broker.Subscribe(r.Context())
+
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
@@ -51,7 +57,6 @@ func (h *Handler) streamEvents(w http.ResponseWriter, r *http.Request) {
 	// dropped in the live loop as already accounted for; events published
 	// after the head read arrive through the channel with higher ids and are
 	// delivered.
-	stream := broker.Subscribe(r.Context())
 	lastSent := uint64(0)
 
 	// The position is resolved after Subscribe: the head read and the cursor

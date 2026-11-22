@@ -342,7 +342,9 @@ func (s *Service) SendMessageWithInteraction(ctx context.Context, conversationID
 		for _, call := range completion.ToolCalls {
 			resultText, action, toolAttachments, err := s.runTool(toolCtx, conversationID, toolMessage.ID, call, now)
 			if err != nil {
-				return SendResult{}, err
+				// Tool error should be passed to the model as tool result, not terminate the turn
+				resultText = `{"error": "` + strings.ReplaceAll(err.Error(), `"`, `\"`) + `"}`
+				err = nil
 			}
 			if action != nil {
 				pending = append(pending, action)
@@ -375,15 +377,15 @@ func (s *Service) runTool(ctx context.Context, conversationID, messageID int64, 
 	if s.tools.IsReadOnly(call.Name) || s.tools.IsDirect(call.Name) {
 		result, err := s.tools.Execute(ctx, call.Name, call.Arguments)
 		if err != nil {
-			payload, _ := json.Marshal(map[string]any{"error": err.Error()})
-			return string(payload), nil, nil, nil
+			// Return the error so the model sees it and can react (retry, report, etc.)
+			return "", nil, nil, err
 		}
 		if result == nil {
-			return `{"error":"tool returned no data"}`, nil, nil, nil
+			return "", nil, nil, fmt.Errorf("tool returned no data")
 		}
 		payload, err := json.Marshal(result)
 		if err != nil {
-			return `{"error":"result is not serialisable"}`, nil, nil, nil
+			return "", nil, nil, fmt.Errorf("result is not serialisable: %w", err)
 		}
 		return string(payload), nil, attachmentsForTool(call.Name, result), nil
 	}
@@ -719,7 +721,8 @@ func (s *Service) systemPrompt(now time.Time, snapshot string, contextUnavailabl
 		"- Навыки: библиотека навыков — проверенные способы решения классов задач. Каталог активных навыков приходит в текущем состоянии; полные инструкции подходящего навыка уже подключены автоматически. Если пользователь прямо просит применить, не применять или изменить конкретный навык — выполни его просьбу: для применения вызови get_skill, для изменения — propose_skill_change, для отказа не вызывай get_skill и не опирайся на этот навык. Новый навык создавай инструментом create_skill только по просьбе пользователя: он появится черновиком и не будет применяться, пока пользователь его не активирует. Улучшения своей работы предлагай только по прямому запросу пользователя инструментом propose_skill_improvements и никогда не меняй активную инструкцию без применения предложения пользователем. Оценку навыка (сработал хорошо/плохо) записывай инструментом rate_skill.\n"
 	if autoConfirm {
 		prompt += "\nАвтоподтверждение включено: изменяющие инструменты применяются сразу после вызова. " +
-			"Не спрашивай разрешение, не предлагай план вместо действия и не жди согласия.\n"
+			"Не спрашивай разрешение, не предлагай план вместо действия и не жди согласия. " +
+			"После вызова инструмента не подтверждай, что действие выполнено — результат вернёт интерфейс.\n"
 	}
 	return prompt
 }
